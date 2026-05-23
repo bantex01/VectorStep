@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show *)",
+      "Bash(python3 -c \"import apscheduler; print\\(apscheduler.__version__\\)\")"
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "pipeline": "new-order",
+  "event": "order.placed",
+  "source": "shopify",
+  "summary": "New order #1042 placed by Alex Dalton",
+  "data": {
+    "order_id": "1042",
+    "customer_name": "Alex Dalton",
+    "customer_email": "alex@example.com",
+    "items": [
+      { "name": "Mechanical Keyboard", "category": "tech", "price": 129.99 },
+      { "name": "USB-C Hub", "category": "tech", "price": 34.99 }
+    ],
+    "total": 164.98
+  }
+}

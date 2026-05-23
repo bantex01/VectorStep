@@ -1,0 +1,80 @@
+name: pork-triage-test
+description: Single-step test pipeline for first-line-support agent
+version: 1
+
+trigger:
+  match:
+    severity: critical
+    service: pork
+
+vars:
+  confluence_space: SP
+  confluence_space_url: https://alexfdalton.atlassian.net/wiki/spaces/SP/
+  confluence_service_docs_folder: Service Documentation
+  confluence_service_doc_name: Pork
+  service_doc_schema: "Owner, Business Criticality, SLO (Error Rate), SLO (Availability), Dependencies (Upstream + Downstream), Failure Impact, Known Fragility"
+  jira_project: PORK
+  jira_project_url: https://alexfdalton.atlassian.net/jira/software/projects/PORK/
+
+context_template:
+  include:
+    - severity
+    - labels.service
+    - labels.environment
+    - summary
+
+steps:
+  - name: first-line-triage
+    executor: openclaw
+    executor_config:
+      agent: first-line-support
+      session_key: "agent:first-line-support:{{pipeline_run_id}}"
+    confidence_threshold: 0.60
+    on_low_confidence: escalate
+    on_abort: notify
+    prompt_template: |
+      Alert severity: {{severity}}
+      Service: {{labels.service}}
+      Environment: {{labels.environment}}
+      Summary: {{summary}}
+
+      Confluence space: {{confluence_space}} ({{confluence_space_url}})
+      Service doc: "{{confluence_service_doc_name}}" in folder "{{confluence_service_docs_folder}}"
+      Expected doc sections: {{service_doc_schema}}
+      Jira project: {{jira_project}} ({{jira_project_url}})
+
+      Once you have looked up the service doc and raised the Jira bug ticket,
+      Set confidence based on how completely you executed the tasks — did you
+      find the service doc, raise the ticket, and produce a useful brief?
+      Not a rating of the alert severity.
+
+      respond with ONLY this JSON and nothing else:
+      {
+        "confidence": 0.0,
+        "doc_found": true,
+        "summary": "One sentence: what is happening and how serious",
+        "jira_ticket": "{{jira_project}}-<number>",
+        "next_step_context": "Focused investigation brief for the next step",
+        "reasoning": {
+          "supports": "Evidence that makes this alert credible",
+          "contradicts": "Evidence that suggests noise or false positive",
+          "assumptions": "What you are assuming in the absence of data"
+        }
+      }
+
+notifications:
+  escalate:
+    channel: telegram
+    template: |
+      ⚠️ Escalated: {{pipeline_name}}
+      Service: {{labels.service}} ({{environment}})
+      Step: {{current_step}}
+      Reason: {{escalation_reason}}{% if confidence is not none %} — confidence {{confidence | round(2)}} below threshold {{confidence_threshold}}{% endif %}
+      Summary: {{step_summary}}
+      {% if contradicts %}Contradicts: {{contradicts}}{% endif %}
+  notify:
+    channel: telegram
+    template: |
+      Aborted: {{pipeline_name}}
+      Service: {{labels.service}}
+      Step: {{current_step}}

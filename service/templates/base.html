@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}P-Ork{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body class="h-full bg-zinc-950 text-zinc-100 antialiased">
+<div class="flex h-full">
+
+  <!-- Sidebar -->
+  <aside class="w-52 shrink-0 bg-zinc-900 border-r border-zinc-800 flex flex-col">
+
+    <!-- Pig + title — pt-8 matches main content py-8 so they sit on the same line -->
+    <div class="px-5 pt-8 pb-6">
+      <div class="flex items-center gap-2.5">
+        <svg width="38" height="38" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" class="shrink-0">
+          <ellipse cx="15" cy="17" rx="9" ry="11" fill="#e5e7eb"/>
+          <ellipse cx="15" cy="17" rx="5.5" ry="7" fill="#f9fafb"/>
+          <ellipse cx="49" cy="17" rx="9" ry="11" fill="#e5e7eb"/>
+          <ellipse cx="49" cy="17" rx="5.5" ry="7" fill="#f9fafb"/>
+          <circle cx="32" cy="37" r="22" fill="#f3f4f6" stroke="#d1d5db" stroke-width="1"/>
+          <circle cx="24" cy="32" r="3.2" fill="#111827"/>
+          <circle cx="40" cy="32" r="3.2" fill="#111827"/>
+          <circle cx="25.2" cy="30.8" r="1.1" fill="white"/>
+          <circle cx="41.2" cy="30.8" r="1.1" fill="white"/>
+          <ellipse cx="32" cy="45" rx="11" ry="7.5" fill="#e5e7eb" stroke="#d1d5db" stroke-width="0.8"/>
+          <circle cx="28" cy="45" r="2.4" fill="#6b7280"/>
+          <circle cx="36" cy="45" r="2.4" fill="#6b7280"/>
+          <path d="M26 52.5 Q32 57 38 52.5" stroke="#374151" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+        </svg>
+        <div class="flex flex-col leading-tight">
+          <span class="font-bold text-zinc-50 tracking-tight text-base">P-Ork</span>
+          <span class="text-xs text-zinc-500 italic">bringing home the bacon...</span>
+        </div>
+      </div>
+    </div>
+
+    <nav class="flex-1 px-3 space-y-0.5">
+      <a href="/ui/" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
+        {% if active_page == 'dashboard' %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
+        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 12a1 1 0 011-1h4a1 1 0 011 1v7a1 1 0 01-1 1h-4a1 1 0 01-1-1v-7z"/>
+        </svg>
+        Dashboard
+      </a>
+      <a href="/ui/runs" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
+        {% if active_page == 'runs' %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
+        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+        </svg>
+        Runs
+      </a>
+      <a href="/ui/pipelines" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
+        {% if active_page == 'pipelines' %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
+        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+        </svg>
+        Pipelines
+      </a>
+      <a href="/ui/schedules" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
+        {% if active_page == 'schedules' %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
+        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        Schedules
+      </a>
+    </nav>
+
+    <div class="p-3 border-t border-zinc-800">
+      <a href="/health" target="_blank" class="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
+        <div class="w-1.5 h-1.5 rounded-full bg-green-500"></div>
+        Service online
+      </a>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="flex-1 overflow-auto">
+    <div class="max-w-5xl mx-auto px-8 py-8">
+      <div class="mb-8">{% block page_heading %}{% endblock %}</div>
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+
+</div>
+</body>
+</html>

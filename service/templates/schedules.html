@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Schedules — P-Ork{% endblock %}
+{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Schedules</h1>{% endblock %}
+{% block content %}
+
+{% if jobs %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800">
+  <table class="w-full">
+    <thead>
+      <tr class="text-xs text-zinc-500 uppercase tracking-wide border-b border-zinc-800">
+        <th class="text-left px-5 py-3 font-medium">Pipeline</th>
+        <th class="text-left px-5 py-3 font-medium">Cron</th>
+        <th class="text-left px-5 py-3 font-medium">Summary</th>
+        <th class="text-left px-5 py-3 font-medium">Severity</th>
+        <th class="text-left px-5 py-3 font-medium">Next run</th>
+        <th class="px-5 py-3"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-zinc-800">
+      {% for job in jobs %}
+      <tr class="hover:bg-zinc-800 transition-colors">
+        <td class="px-5 py-3">
+          <a href="/ui/pipelines/{{ job.name }}" class="text-sm font-medium text-zinc-100 hover:text-indigo-400">
+            {{ job.name }}
+          </a>
+        </td>
+        <td class="px-5 py-3">
+          <span class="font-mono text-xs text-zinc-400 bg-zinc-800 px-2 py-1 rounded">{{ job.cron }}</span>
+        </td>
+        <td class="px-5 py-3 text-sm text-zinc-400 max-w-xs truncate" title="{{ job.summary }}">
+          {{ job.summary or '—' }}
+        </td>
+        <td class="px-5 py-3">
+          {% if job.severity %}
+            <span class="text-xs text-zinc-400">{{ job.severity }}</span>
+          {% else %}
+            <span class="text-zinc-600">—</span>
+          {% endif %}
+        </td>
+        <td class="px-5 py-3 text-sm text-zinc-400">
+          {% if job.next_run %}
+            <span title="{{ job.next_run.isoformat() }}">{{ format_ago(job.next_run) }}</span>
+            <span class="text-xs text-zinc-600 ml-1">{{ job.next_run.strftime('%H:%M') }}</span>
+          {% else %}
+            <span class="text-zinc-600">—</span>
+          {% endif %}
+        </td>
+        <td class="px-5 py-3 text-right">
+          <a href="/ui/runs?pipeline={{ job.name }}" class="text-xs text-indigo-400 hover:text-indigo-300">Runs →</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 px-5 py-16 text-center">
+  <p class="text-sm text-zinc-500">No scheduled pipelines. Add a <code class="text-xs font-mono bg-zinc-800 text-zinc-300 px-1.5 py-0.5 rounded">schedule:</code> block to a pipeline YAML to create one.</p>
+</div>
+{% endif %}
+
+{% endblock %}

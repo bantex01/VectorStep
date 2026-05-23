@@ -1,0 +1,38 @@
+name: telegram-hello
+description: Minimal echo pipeline for testing the Telegram → generic webhook flow end-to-end
+version: 1
+
+# source: generic only — this pipeline is always invoked by explicit name,
+# trigger.match is never evaluated for generic source payloads.
+trigger:
+  match:
+    source: generic
+
+steps:
+  - name: hello
+    executor: openclaw
+    executor_config:
+      agent: first-line-support   # any available agent works — swap if needed
+      session_key: "agent:first-line-support:{{pipeline_run_id}}"
+    confidence_threshold: 0.0
+    on_low_confidence: proceed
+    timeout_seconds: 60
+    prompt_template: |
+      Someone has sent a test message via the Porc pipeline service. Greet them warmly
+      and confirm the pipeline is working.
+      {% if summary %}Their message context: {{summary}}{% endif %}
+
+      Return ONLY this JSON and nothing else:
+      {
+        "confidence": 1.0,
+        "proceed": false,
+        "proceed_reason": "Hello acknowledged — pipeline complete",
+        "summary": "A friendly one-sentence reply confirming the pipeline is working",
+        "next_step_context": ""
+      }
+
+notifications:
+  stopped:
+    channel: telegram
+    template: |
+      👋 {{step_summary}}

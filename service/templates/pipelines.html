@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Pipelines — P-Ork{% endblock %}
+{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Pipelines</h1>{% endblock %}
+{% block content %}
+
+{% if pipelines %}
+<div class="grid grid-cols-1 gap-4">
+  {% for p in pipelines %}
+  <a href="/ui/pipelines/{{ p.name }}"
+     class="block bg-zinc-900 rounded-lg border border-zinc-800 p-5 hover:border-indigo-700 hover:shadow-sm transition-all group">
+    <div class="flex items-start justify-between">
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2.5 mb-1">
+          <h2 class="text-base font-semibold text-zinc-100 group-hover:text-indigo-400 transition-colors">{{ p.name }}</h2>
+          <span class="text-xs text-zinc-500 font-mono">v{{ p.version }}</span>
+          {% if p.schedule %}
+            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-950 text-indigo-400 ring-1 ring-inset ring-indigo-800">
+              <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+              {{ p.schedule.cron }}
+            </span>
+          {% endif %}
+        </div>
+        {% if p.description %}
+          <p class="text-sm text-zinc-400">{{ p.description }}</p>
+        {% endif %}
+      </div>
+
+      <div class="flex items-center gap-4 ml-6 shrink-0">
+        {% if p.name in last_status %}
+          <div class="text-right">
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(last_status[p.name]) }}">
+              {{ last_status[p.name] }}
+            </span>
+            {% if p.name in last_run %}
+              <p class="text-xs text-zinc-500 mt-1">{{ format_ago(last_run[p.name]) }}</p>
+            {% endif %}
+          </div>
+          <div class="text-right">
+            <p class="text-lg font-semibold text-zinc-200">{{ run_counts.get(p.name, 0) }}</p>
+            <p class="text-xs text-zinc-500">runs</p>
+          </div>
+        {% else %}
+          <p class="text-xs text-zinc-500">No runs yet</p>
+        {% endif %}
+        <svg class="w-4 h-4 text-zinc-600 group-hover:text-indigo-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+        </svg>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-4 mt-3 pt-3 border-t border-zinc-800 text-xs text-zinc-500">
+      <span>{{ p.steps | length }} step{% if p.steps | length != 1 %}s{% endif %}</span>
+      {% if p.trigger.match %}
+        <span class="flex items-center gap-1">
+          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+          </svg>
+          Triggered by:
+          {% for k, v in p.trigger.match.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}
+        </span>
+      {% endif %}
+      {% if p.notifications %}
+        <span>{{ p.notifications | length }} notification{% if p.notifications | length != 1 %}s{% endif %}</span>
+      {% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 px-5 py-16 text-center text-sm text-zinc-500">
+    No pipelines loaded. Add YAML files to the pipelines directory and reload.
+  </div>
+{% endif %}
+
+{% endblock %}

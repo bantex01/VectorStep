@@ -1,0 +1,197 @@
+# Feature test pipeline — exercises when: conditions, parallel groups, and step skipping.
+#
+# Expected flow (happy path):
+#   1. triage        — first-line-support: Confluence lookup + Jira ticket, returns action="investigate"
+#   2. context-gather — parallel group fires because action == "investigate"
+#      ├─ jira-history    — first-line-support: searches recent Jira tickets for context
+#      └─ quick-assessment — principal-sre: gives a quick severity opinion (no tools)
+#   3. no-further-action — SKIPPED because action != "ignore"
+#
+# To trigger: POST /webhook?source=alertmanager with tests/fixtures/alertmanager_feature_test.json
+# The pipeline: label in the fixture routes directly here, bypassing trigger matching.
+
+name: feature-test
+description: Tests when conditions, parallel groups, and step skipping
+version: 1
+
+trigger:
+  match: {}   # unused — fixture sets pipeline: feature-test label which routes directly
+
+schedule:
+  cron: "*/45 * * * *"          # every 45 minutes — convenient for local testing
+  summary: "Scheduled health check — error rate for pork exceeded 5% for 5 minutes"
+  severity: warning
+  labels:
+    service: pork
+    environment: prod
+
+vars:
+  confluence_space: SP
+  confluence_space_url: https://alexfdalton.atlassian.net/wiki/spaces/SP/
+  confluence_service_docs_folder: Service Documentation
+  confluence_service_doc_name: Pork
+  service_doc_schema: "Owner, Business Criticality, SLO (Error Rate), SLO (Availability), Dependencies, Failure Impact, Known Fragility"
+  jira_project: PORK
+  jira_project_url: https://alexfdalton.atlassian.net/jira/software/projects/PORK/
+
+context_template:
+  include:
+    - severity
+    - labels.service
+    - labels.environment
+    - summary
+
+steps:
+
+  # ── Step 1: Triage ──────────────────────────────────────────────────────────
+  # Look up the service doc and raise a Jira ticket. Determine whether this
+  # alert warrants further investigation or can be dismissed.
+  - name: triage
+    executor: openclaw
+    executor_config:
+      agent: first-line-support
+      session_key: "pipeline:{{pipeline_run_id}}:triage"
+    confidence_threshold: 0.60
+    on_low_confidence: escalate
+    on_abort: notify
+    timeout_seconds: 300
+    prompt_template: |
+      Alert severity: {{severity}}
+      Service: {{labels.service}}
+      Environment: {{labels.environment}}
+      Summary: {{summary}}
+
+      Confluence space: {{confluence_space}} ({{confluence_space_url}})
+      Service doc: "{{confluence_service_doc_name}}" in folder "{{confluence_service_docs_folder}}"
+      Expected doc sections: {{service_doc_schema}}
+      Jira project: {{jira_project}} ({{jira_project_url}})
+
+      1. Look up the service documentation in Confluence.
+      2. Raise a Jira issue type "Bug" for this alert in project {{jira_project}}.
+      3. Based on the service doc and the alert summary, decide:
+         - "investigate" if the alert is credible and warrants Grafana/metric investigation
+         - "ignore" if the alert is clearly noise or the service is known to self-recover
+
+      Set confidence based on how completely you executed steps 1–2, not on alert severity.
+
+      Return ONLY this JSON, no other text:
+      {
+        "confidence": 0.0,
+        "action": "investigate",
+        "doc_found": true,
+        "summary": "One sentence: what is happening and how serious",
+        "jira_ticket": "{{jira_project}}-<number>",
+        "next_step_context": "Focused brief for the next step — what to look for and where",
+        "reasoning": {
+          "supports": "Evidence that makes this alert credible",
+          "contradicts": "Evidence that suggests noise or false positive",
+          "assumptions": "What you are assuming in the absence of data"
+        }
+      }
+
+  # ── Step 2: Parallel context gathering ─────────────────────────────────────
+  # Only fires when triage says investigate. Two branches run concurrently:
+  # one searches Jira history for related incidents, the other gives a fast
+  # second-opinion assessment without needing tools.
+  - parallel:
+      name: context-gather
+      when: "steps.triage.action == 'investigate'"
+      join: any_must_pass
+      confidence_threshold: 0.50
+      on_low_confidence: escalate
+      on_abort: notify
+      timeout_seconds: 180
+      steps:
+
+        - name: jira-history
+          executor: openclaw
+          executor_config:
+            agent: first-line-support
+            session_key: "pipeline:{{pipeline_run_id}}:jira-history"
+          timeout_seconds: 150
+          prompt_template: |
+            Service: {{labels.service}}
+            Alert: {{summary}}
+            Jira project: {{jira_project}} ({{jira_project_url}})
+
+            Search Jira project {{jira_project}} for recent tickets (last 30 days)
+            related to this service or alert type. Do NOT create a new ticket.
+
+            Summarise what you find: are there recurring issues, recent incidents,
+            or any known fragility patterns relevant to this alert?
+
+            Return ONLY this JSON, no other text:
+            {
+              "confidence": 0.0,
+              "summary": "One sentence: what Jira history shows",
+              "findings": "Key patterns or incidents found (or 'no recent related tickets')",
+              "next_step_context": ""
+            }
+
+        - name: quick-assessment
+          executor: openclaw
+          executor_config:
+            agent: principal-sre
+            session_key: "pipeline:{{pipeline_run_id}}:quick-assessment"
+          timeout_seconds: 60
+          prompt_template: |
+            Service: {{labels.service}}
+            Severity: {{severity}}
+            Alert: {{summary}}
+            Triage summary: {{steps.triage.summary}}
+
+            Without using any tools, give a fast second-opinion on this alert:
+            - Does the triage assessment seem reasonable?
+            - What is the likely blast radius if this is real?
+            - Is there anything the triage agent may have missed?
+
+            Return ONLY this JSON, no other text:
+            {
+              "confidence": 0.0,
+              "summary": "One sentence: your severity and urgency assessment",
+              "next_step_context": "Any specific concerns or gaps to flag for remediation"
+            }
+
+  # ── Step 3: No-action close-out ────────────────────────────────────────────
+  # Only fires when triage says ignore. Should be SKIPPED in the happy path.
+  - name: no-further-action
+    when: "steps.triage.action == 'ignore'"
+    executor: openclaw
+    executor_config:
+      agent: principal-sre
+      session_key: "pipeline:{{pipeline_run_id}}:close"
+    confidence_threshold: 0.50
+    on_low_confidence: proceed
+    on_abort: notify
+    timeout_seconds: 60
+    prompt_template: |
+      The triage agent determined this alert can be ignored.
+      Service: {{labels.service}}, Severity: {{severity}}
+      Reason: {{steps.triage.summary}}
+
+      Confirm this is appropriate and signal the pipeline to close.
+
+      Return ONLY this JSON, no other text:
+      {
+        "confidence": 0.9,
+        "proceed": false,
+        "proceed_reason": "Triage assessed alert as ignorable — no further steps warranted",
+        "summary": "Alert closed — no action required",
+        "next_step_context": ""
+      }
+
+notifications:
+  escalate:
+    channel: telegram
+    template: |
+      ⚠️ Escalated: {{pipeline_name}}
+      Service: {{labels.service}} ({{environment}})
+      Step: {{current_step}}
+      Reason: {{escalation_reason}}{% if confidence is not none %} — confidence {{confidence | round(2)}} below threshold {{confidence_threshold}}{% endif %}
+      Summary: {{step_summary}}
+  notify:
+    channel: telegram
+    template: |
+      Aborted: {{pipeline_name}}
+      Service: {{labels.service}}
+      Step: {{current_step}}

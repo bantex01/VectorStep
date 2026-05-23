@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — P-Ork{% endblock %}
+{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Dashboard</h1>{% endblock %}
+{% block content %}
+
+<!-- Stat cards -->
+<div class="grid grid-cols-4 gap-4 mb-8">
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Runs today</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_24h }}</p>
+    <p class="mt-1 text-xs text-zinc-500">{{ counts_all.values() | sum }} all time</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Success rate</p>
+    {% if success_rate is not none %}
+      <p class="mt-2 text-3xl font-semibold {% if success_rate >= 80 %}text-green-400{% elif success_rate >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">
+        {{ success_rate }}%
+      </p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+    {% endif %}
+    <p class="mt-1 text-xs text-zinc-500">completed / terminal</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Escalated</p>
+    <p class="mt-2 text-3xl font-semibold {% if counts_24h.get('escalated', 0) > 0 %}text-amber-400{% else %}text-zinc-50{% endif %}">
+      {{ counts_24h.get('escalated', 0) }}
+    </p>
+    <p class="mt-1 text-xs text-zinc-500">{{ counts_24h.get('failed', 0) }} failed</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Pipelines</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ pipeline_count }}</p>
+    <p class="mt-1 text-xs text-zinc-500">{{ scheduled_count }} scheduled</p>
+  </div>
+
+</div>
+
+<!-- Status breakdown + Pipeline activity -->
+<div class="grid grid-cols-3 gap-6 mb-8">
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Status breakdown <span class="text-zinc-500 font-normal">(24h)</span></h2>
+    {% set statuses = ['completed', 'escalated', 'aborted', 'failed', 'stopped', 'running'] %}
+    {% for s in statuses %}
+      {% set n = counts_24h.get(s, 0) %}
+      {% if n > 0 or s in ['completed', 'escalated'] %}
+      <div class="flex items-center justify-between py-1.5">
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(s) }}">{{ s }}</span>
+        <span class="text-sm font-medium text-zinc-200">{{ n }}</span>
+      </div>
+      {% endif %}
+    {% endfor %}
+    {% if not counts_24h %}
+      <p class="text-sm text-zinc-500 py-2">No runs in last 24 hours</p>
+    {% endif %}
+  </div>
+
+  <div class="col-span-2 bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Pipeline activity <span class="text-zinc-500 font-normal">(7 days)</span></h2>
+    {% if pipeline_activity %}
+    <table class="w-full">
+      <tbody class="divide-y divide-zinc-800">
+        {% for name, count in pipeline_activity %}
+        <tr>
+          <td class="py-2 pr-4">
+            <a href="/ui/pipelines/{{ name }}" class="text-sm text-indigo-400 hover:text-indigo-300 font-medium">{{ name }}</a>
+          </td>
+          <td class="py-2 w-32">
+            <div class="flex items-center gap-2">
+              <div class="flex-1 bg-zinc-700 rounded-full h-1.5">
+                {% set max_count = pipeline_activity[0][1] %}
+                <div class="h-1.5 rounded-full bg-indigo-500" style="width: {{ ((count / max_count) * 100)|round|int }}%"></div>
+              </div>
+              <span class="text-xs text-zinc-500 w-6 text-right">{{ count }}</span>
+            </div>
+          </td>
+          <td class="py-2 pl-4 text-right"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p class="text-sm text-zinc-500">No runs in the last 7 days</p>
+    {% endif %}
+  </div>
+
+</div>
+
+<!-- Recent runs -->
+<div class="bg-zinc-900 rounded-lg border border-zinc-800">
+  <div class="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
+    <h2 class="text-sm font-semibold text-zinc-200">Recent runs</h2>
+    <a href="/ui/runs" class="text-xs text-indigo-400 hover:text-indigo-300">View all →</a>
+  </div>
+  {% if recent_runs %}
+  <table class="w-full">
+    <thead>
+      <tr class="text-xs text-zinc-500 uppercase tracking-wide border-b border-zinc-800">
+        <th class="text-left px-5 py-3 font-medium">Status</th>
+        <th class="text-left px-5 py-3 font-medium">Pipeline</th>
+        <th class="text-left px-5 py-3 font-medium">Source</th>
+        <th class="text-left px-5 py-3 font-medium">Triggered</th>
+        <th class="text-left px-5 py-3 font-medium">Duration</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-zinc-800">
+      {% for run in recent_runs %}
+      <tr class="hover:bg-zinc-800 transition-colors">
+        <td class="px-5 py-3">
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(run.status) }}">
+            {{ run.status }}
+          </span>
+        </td>
+        <td class="px-5 py-3">
+          <a href="/ui/runs/{{ run.id }}" class="text-sm font-medium text-zinc-100 hover:text-indigo-400">{{ run.pipeline_name }}</a>
+        </td>
+        <td class="px-5 py-3 text-sm text-zinc-400">{{ source_label(run.source) }}</td>
+        <td class="px-5 py-3 text-sm text-zinc-400" title="{{ run.triggered_at.isoformat() }}">{{ format_ago(run.triggered_at) }}</td>
+        <td class="px-5 py-3 text-sm text-zinc-400">{{ format_duration(run.triggered_at, run.completed_at) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="px-5 py-10 text-center text-sm text-zinc-500">No runs yet. Trigger a webhook to get started.</div>
+  {% endif %}
+</div>
+
+{% endblock %}

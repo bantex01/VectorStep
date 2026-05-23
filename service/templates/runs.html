@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Runs — P-Ork{% endblock %}
+{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Runs</h1>{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-end mb-6">
+  <form method="get" action="/ui/runs" class="flex items-center gap-2">
+    <select name="status" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="">All statuses</option>
+      {% for s in statuses %}
+        <option value="{{ s }}" {% if selected_status == s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+    <select name="pipeline" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="">All pipelines</option>
+      {% for name in pipeline_names %}
+        <option value="{{ name }}" {% if selected_pipeline == name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="text-sm bg-indigo-600 text-white px-3 py-1.5 rounded-md hover:bg-indigo-500 transition-colors">Filter</button>
+    {% if selected_status or selected_pipeline %}
+      <a href="/ui/runs" class="text-sm text-zinc-500 hover:text-zinc-300 px-2">Clear</a>
+    {% endif %}
+  </form>
+</div>
+
+<div class="bg-zinc-900 rounded-lg border border-zinc-800">
+  {% if runs %}
+  <table class="w-full">
+    <thead>
+      <tr class="text-xs text-zinc-500 uppercase tracking-wide border-b border-zinc-800">
+        <th class="text-left px-5 py-3 font-medium">Status</th>
+        <th class="text-left px-5 py-3 font-medium">Pipeline</th>
+        <th class="text-left px-5 py-3 font-medium">Source</th>
+        <th class="text-left px-5 py-3 font-medium">Triggered</th>
+        <th class="text-left px-5 py-3 font-medium">Duration</th>
+        <th class="px-5 py-3"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-zinc-800">
+      {% for run in runs %}
+      <tr class="hover:bg-zinc-800 transition-colors">
+        <td class="px-5 py-3">
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(run.status) }}">
+            {{ run.status }}
+          </span>
+        </td>
+        <td class="px-5 py-3">
+          <span class="text-sm font-medium text-zinc-100">{{ run.pipeline_name }}</span>
+        </td>
+        <td class="px-5 py-3 text-sm text-zinc-400">{{ source_label(run.source) }}</td>
+        <td class="px-5 py-3 text-sm text-zinc-400" title="{{ run.triggered_at.isoformat() }}">
+          {{ format_ago(run.triggered_at) }}
+        </td>
+        <td class="px-5 py-3 text-sm text-zinc-400">
+          {{ format_duration(run.triggered_at, run.completed_at) }}
+        </td>
+        <td class="px-5 py-3 text-right">
+          <a href="/ui/runs/{{ run.id }}" class="text-xs text-indigo-400 hover:text-indigo-300 font-medium">View →</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <!-- Pagination -->
+  <div class="flex items-center justify-between px-5 py-3 border-t border-zinc-800">
+    <span class="text-xs text-zinc-500">Showing {{ runs | length }} runs</span>
+    <div class="flex gap-2">
+      {% if offset > 0 %}
+        <a href="/ui/runs?status={{ selected_status }}&pipeline={{ selected_pipeline }}&limit={{ limit }}&offset={{ [offset - limit, 0] | max }}"
+           class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 border border-zinc-700 rounded-md">← Previous</a>
+      {% endif %}
+      {% if runs | length == limit %}
+        <a href="/ui/runs?status={{ selected_status }}&pipeline={{ selected_pipeline }}&limit={{ limit }}&offset={{ offset + limit }}"
+           class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 border border-zinc-700 rounded-md">Next →</a>
+      {% endif %}
+    </div>
+  </div>
+
+  {% else %}
+  <div class="px-5 py-16 text-center text-sm text-zinc-500">
+    {% if selected_status or selected_pipeline %}
+      No runs match the selected filters.
+    {% else %}
+      No runs yet.
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+{% endblock %}

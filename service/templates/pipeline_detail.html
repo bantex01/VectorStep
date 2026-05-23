@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}{{ pipeline.name }} — P-Ork{% endblock %}
+{% block page_heading %}
+<nav class="flex items-center gap-2 text-sm text-zinc-500">
+  <a href="/ui/pipelines" class="hover:text-zinc-300">Pipelines</a>
+  <span>/</span>
+  <span class="text-zinc-300">{{ pipeline.name }}</span>
+</nav>
+{% endblock %}
+{% block content %}
+
+<!-- Header -->
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 mb-6">
+  <div class="flex items-start justify-between">
+    <div>
+      <div class="flex items-center gap-2.5 mb-1">
+        <h1 class="text-xl font-semibold text-zinc-50">{{ pipeline.name }}</h1>
+        <span class="text-xs text-zinc-500 font-mono">v{{ pipeline.version }}</span>
+        {% if pipeline.schedule %}
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-950 text-indigo-400 ring-1 ring-inset ring-indigo-800">
+            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            Scheduled
+          </span>
+        {% endif %}
+      </div>
+      {% if pipeline.description %}
+        <p class="text-sm text-zinc-400">{{ pipeline.description }}</p>
+      {% endif %}
+    </div>
+    {% if total_runs > 0 %}
+    <div class="flex items-center gap-6 text-right">
+      <div>
+        <p class="text-2xl font-semibold text-zinc-50">{{ total_runs }}</p>
+        <p class="text-xs text-zinc-500">total runs</p>
+      </div>
+      {% set completed = status_counts.get('completed', 0) %}
+      {% set terminal = total_runs - status_counts.get('running', 0) %}
+      {% if terminal > 0 %}
+      <div>
+        {% set rate = (completed / terminal * 100)|round|int %}
+        <p class="text-2xl font-semibold {% if rate >= 80 %}text-green-400{% elif rate >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">{{ rate }}%</p>
+        <p class="text-xs text-zinc-500">success rate</p>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Metadata grid -->
+  <div class="grid grid-cols-3 gap-6 mt-5 pt-5 border-t border-zinc-800 text-sm">
+    <div>
+      <p class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Steps</p>
+      <p class="text-zinc-200">{{ pipeline.steps | length }}</p>
+    </div>
+    {% if pipeline.trigger.match %}
+    <div>
+      <p class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Trigger match</p>
+      <p class="font-mono text-xs text-zinc-400">
+        {% for k, v in pipeline.trigger.match.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}
+      </p>
+    </div>
+    {% endif %}
+    {% if pipeline.schedule %}
+    <div>
+      <p class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Schedule</p>
+      <p class="font-mono text-xs text-zinc-400">{{ pipeline.schedule.cron }}</p>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Status breakdown -->
+  {% if status_counts %}
+  <div class="flex items-center gap-3 mt-4 pt-4 border-t border-zinc-800">
+    {% for s, n in status_counts.items() %}
+      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(s) }}">
+        {{ n }} {{ s }}
+      </span>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<!-- Recent runs -->
+{% if recent_runs %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6">
+  <div class="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
+    <h2 class="text-sm font-semibold text-zinc-200">Recent runs</h2>
+    <a href="/ui/runs?pipeline={{ pipeline.name }}" class="text-xs text-indigo-400 hover:text-indigo-300">View all →</a>
+  </div>
+  <table class="w-full">
+    <tbody class="divide-y divide-zinc-800">
+      {% for run in recent_runs %}
+      <tr class="hover:bg-zinc-800 transition-colors">
+        <td class="px-5 py-3">
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(run.status) }}">
+            {{ run.status }}
+          </span>
+        </td>
+        <td class="px-5 py-3 text-sm text-zinc-400">{{ source_label(run.source) }}</td>
+        <td class="px-5 py-3 text-sm text-zinc-400" title="{{ run.triggered_at.isoformat() }}">{{ format_ago(run.triggered_at) }}</td>
+        <td class="px-5 py-3 text-sm text-zinc-400">{{ format_duration(run.triggered_at, run.completed_at) }}</td>
+        <td class="px-5 py-3 text-right">
+          <a href="/ui/runs/{{ run.id }}" class="text-xs text-indigo-400 hover:text-indigo-300 font-medium">View →</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<!-- YAML -->
+<div x-data="{ open: true }" class="bg-zinc-900 rounded-lg border border-zinc-800">
+  <button @click="open = !open" class="w-full flex items-center justify-between px-5 py-4 border-b border-zinc-800">
+    <h2 class="text-sm font-semibold text-zinc-200">Pipeline YAML</h2>
+    <svg class="w-4 h-4 text-zinc-500 transition-transform" :class="open ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+    </svg>
+  </button>
+  <div x-show="open" class="p-5">
+    <pre class="text-xs font-mono text-zinc-300 bg-zinc-800 rounded-lg p-4 overflow-x-auto leading-relaxed">{{ raw_yaml }}</pre>
+  </div>
+</div>
+
+{% endblock %}

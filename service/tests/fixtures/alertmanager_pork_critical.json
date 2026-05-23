@@ -1,0 +1,40 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"HighErrorRate\"}",
+  "truncatedAlerts": 0,
+  "status": "firing",
+  "receiver": "porc-webhook",
+  "groupLabels": {
+    "alertname": "HighErrorRate"
+  },
+  "commonLabels": {
+    "alertname": "HighErrorRate",
+    "environment": "prod",
+    "service": "pork",
+    "severity": "critical"
+  },
+  "commonAnnotations": {
+    "summary": "Error rate for pork exceeded 5% for 5 minutes",
+    "description": "The pork service in prod is returning errors at 7.3%, breaching the 5% SLO threshold."
+  },
+  "externalURL": "http://alertmanager:9093",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "environment": "prod",
+        "service": "pork",
+        "severity": "critical",
+        "pipeline": "pork-triage-test"
+      },
+      "annotations": {
+        "summary": "Error rate for pork exceeded 5% for 5 minutes",
+        "description": "The pork service in prod is returning errors at 7.3%, breaching the 5% SLO threshold."
+      },
+      "startsAt": "2026-04-16T10:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus:9090/graph?g0.expr=error_rate"
+    }
+  ]
+}
