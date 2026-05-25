@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Agents — P-Ork{% endblock %}
+{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Agents</h1>{% endblock %}
+{% block content %}
+
+{% if gateway_error %}
+<div class="flex items-start gap-3 bg-amber-950 border border-amber-800 rounded-lg px-4 py-3 mb-6 text-sm text-amber-300">
+  <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+  </svg>
+  <span>{{ gateway_error }}</span>
+</div>
+{% endif %}
+
+{% if agents %}
+<div class="grid grid-cols-1 gap-4">
+  {% for agent in agents %}
+  {% set aid = agent.get('id') or agent.get('agentId') or '' %}
+  {% set display = agent.get('displayName') or agent.get('name') or aid %}
+  {% set stats = agent_stats.get(aid, {}) %}
+  <a href="/ui/agents/{{ aid }}"
+     class="block bg-zinc-900 rounded-lg border border-zinc-800 p-5 hover:border-indigo-700 hover:shadow-sm transition-all group">
+    <div class="flex items-start justify-between">
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2.5 mb-1.5">
+          <h2 class="text-base font-semibold text-zinc-100 group-hover:text-indigo-400 transition-colors">{{ display }}</h2>
+          {% if display != aid %}
+            <span class="font-mono text-xs text-zinc-500 bg-zinc-800 px-1.5 py-0.5 rounded">{{ aid }}</span>
+          {% endif %}
+        </div>
+        {% if agent.get('model') %}
+          <p class="text-sm text-zinc-500 font-mono">{{ agent.get('model') }}</p>
+        {% endif %}
+      </div>
+
+      <div class="flex items-center gap-6 ml-6 shrink-0">
+        {% if stats %}
+          {% set rate = stats.get('success_rate') %}
+          <div class="text-right">
+            {% if rate is not none %}
+              <p class="text-lg font-semibold
+                {% if rate >= 90 %}text-green-400{% elif rate >= 70 %}text-amber-400{% else %}text-red-400{% endif %}">
+                {{ rate }}%
+              </p>
+            {% else %}
+              <p class="text-lg font-semibold text-zinc-600">—</p>
+            {% endif %}
+            <p class="text-xs text-zinc-500">success</p>
+          </div>
+          <div class="text-right">
+            <p class="text-lg font-semibold text-zinc-200">{{ stats.get('total', 0) }}</p>
+            <p class="text-xs text-zinc-500">runs</p>
+          </div>
+          {% if stats.get('last_run') %}
+            <div class="text-right">
+              <p class="text-sm text-zinc-300">{{ format_ago(stats.get('last_run')) }}</p>
+              <p class="text-xs text-zinc-500">last run</p>
+            </div>
+          {% endif %}
+        {% else %}
+          <p class="text-xs text-zinc-500">No runs yet</p>
+        {% endif %}
+        <svg class="w-4 h-4 text-zinc-600 group-hover:text-indigo-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+        </svg>
+      </div>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 px-5 py-16 text-center text-sm text-zinc-500">
+  No agents found. Make sure OpenClaw is running and agents are configured.
+</div>
+{% endif %}
+
+{% endblock %}

@@ -14,7 +14,7 @@ executors:
 
 notifications:
   telegram:
-    bot_token: 8637524420:AAHk9AkRxHEYSWdzIpTTiEGteUYRvtjn680
+    bot_token: 8637524420:AAE9g7HBHkqziZgaLsI2IN7vWwE2WXye_SE 
     chat_id: 8696664118
 
 logging:

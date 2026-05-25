@@ -140,7 +140,7 @@ Pipeline name can also be explicitly set by the source parser if the webhook pay
 
 ### 4. Pipeline Config Schema (YAML)
 
-`model` is NOT a top-level step field. Model selection is handled by routing to a named OpenClaw agent (which has a model bound in OpenClaw config). Use `executor_config.agent` instead.
+`model` is not a top-level step field. By default, model selection is handled by the named OpenClaw agent's own config. To override the model for a specific step, set `executor_config.model` — this is passed directly to the Gateway API and takes precedence over the agent's configured model.
 
 Steps support an optional `verifier` block for independent confidence verification by a second agent. The verifier trigger can be set to `always: true` (fires unconditionally), or scoped to a confidence band (`confidence_above` to `confidence_below`) to save calls when the outcome is obvious. Combination strategies: `minimum` (both must clear `confidence_threshold`) or `veto` (verifier below `veto_floor` blocks regardless of primary score). See §5 for full trigger configuration examples.
 
@@ -167,8 +167,10 @@ steps:
   - name: initial-triage
     executor: openclaw
     executor_config:
-      agent: sre-triage-sonnet          # named agent in OpenClaw (model bound there)
-      session_key: "pipeline:{{pipeline_run_id}}:triage"
+      agent: sre-triage-sonnet          # named agent in OpenClaw
+      session_key: "agent:sre-triage-sonnet:{{pipeline_run_id}}:triage"
+      model: anthropic/claude-sonnet-4-6   # optional — overrides the agent's configured model
+      thinking_level: low                  # optional — off|minimal|low|medium|high|xhigh
     confidence_threshold: 0.75
     on_low_confidence: escalate  # escalate | abort | proceed
     on_abort: notify
@@ -195,7 +197,7 @@ steps:
     executor: openclaw
     executor_config:
       agent: sre-remediation-sonnet
-      session_key: "pipeline:{{pipeline_run_id}}:remediation"
+      session_key: "agent:sre-remediation-sonnet:{{pipeline_run_id}}:remediation"
     confidence_threshold: 0.85
     on_low_confidence: escalate
     on_abort: notify
@@ -474,9 +476,16 @@ Agents report findings and score their own confidence. They do not decide pipeli
 `proceed` is a pipeline signal only — it carries no domain meaning. Default is true; set false only when the agent is confident no further steps are warranted and this should (generally) be determined by the agents SOUL. Example, the agent should be scoped well enough for a particular job and have instructions that match the fact that the agent is just a atep in a process or a decision maker.
 
 Currently implemented executors:
-- `OpenClawExecutor` — invokes OpenClaw via the `openclaw agent` CLI (subprocess). The `/hooks/agent` HTTP endpoint does not exist in current OpenClaw versions; the CLI is the correct programmatic interface. Scans all payloads in reverse order for the last valid JSON block (models sometimes narrate before outputting JSON).
+- `OpenClawWSExecutor` (`executor: openclaw`) — invokes OpenClaw agents via the Gateway WebSocket API (`ws://localhost:18789/rpc`). Authenticates using Ed25519 device identity from `~/.openclaw/identity/device.json`. Fires an `agent` call and waits for the final result frame, which contains the response text, model used, and duration. Session isolation is handled server-side by the Gateway — no file deletion needed. Scans payloads in reverse for the last valid JSON block.
 
-**Known limitation — session isolation:** `openclaw agent --session-id <id>` does not create isolated sessions per invocation. All calls route to `agent:<name>:main` regardless of the ID passed, causing models to replay previous answers from session history rather than execute fresh tool calls. **Current workaround:** the executor deletes all session files for the agent before each call (`_clear_agent_sessions`). This breaks concurrent pipeline runs targeting the same agent. **TODO:** Replace with `--new-session` flag once the OpenClaw feature request is implemented.
+`executor_config` keys:
+
+| Key | Required | Description |
+|---|---|---|
+| `agent` | yes | OpenClaw agent name |
+| `session_key` | no | Jinja2 template; must start with `agent:{agent-name}:`. Default: `agent:{{agent}}:pipeline:{{pipeline_run_id}}:{{current_step}}` |
+| `model` | no | Model override, e.g. `anthropic/claude-opus-4-7`. Overrides the agent's configured model for this step only. |
+| `thinking_level` | no | `off\|minimal\|low\|medium\|high\|xhigh` — controls the model's thinking budget |
 
 - `HumanExecutor` (`executor: human`) — sends a Telegram inline keyboard message and pauses the pipeline until the operator clicks Approve or Reject, or `timeout_seconds` elapses.
 
@@ -537,7 +546,32 @@ The `runner` controls all step execution and flow decisions. Agents never decide
 5. Build context for next step using `{{steps.step_name.field}}` references
 6. Record step result to SQLite before proceeding
 
-Pipeline run statuses: `completed` (all steps ran), `stopped` (agent signalled no further steps warranted), `escalated`, `aborted`, `failed`.
+### Step and Run Status Reference
+
+**Step statuses** — set on each `pipeline_steps` row:
+
+| Status | Set when | Counts as failure? |
+|---|---|---|
+| `completed` | Step ran successfully and `proceed: true` — pipeline continues | No |
+| `stopped` | Step ran successfully and returned `proceed: false` — agent signalled no further steps warranted | No |
+| `escalated` | `effective_confidence < threshold` and `on_low_confidence: escalate` — pipeline escalates to a human | No |
+| `aborted` | `effective_confidence < threshold` and `on_low_confidence: abort` — pipeline halts quietly | No |
+| `failed` | Executor exception, timeout, bad JSON, or schema validation error — the step did not produce usable output | **Yes** |
+
+`escalated` and `aborted` both fire because confidence was below the configured threshold — a pipeline policy decision, not a model failure. They differ only in which notification fires: `escalated` always routes to the `escalate` notification template (high-visibility, includes confidence detail); `aborted` routes to the step's `on_abort` notification (typically quieter).
+
+For agent success rate calculations, `failed` is the only status that counts against a model. All other statuses represent the model returning usable output.
+
+**Pipeline run statuses** — set on each `pipeline_runs` row:
+
+| Status | Meaning |
+|---|---|
+| `completed` | All steps ran to completion |
+| `stopped` | A step returned `proceed: false` — clean intentional stop |
+| `escalated` | A step was escalated — run halted, human notified |
+| `aborted` | A step aborted due to low confidence — run halted |
+| `failed` | A step raised an unhandled error |
+| `running` | Currently in progress |
 
 If "escalation" is a desired business outcome (page someone, open a P1), it should be a pipeline *step* — not something an agent signals.
 
@@ -679,20 +713,26 @@ GET /runs/{run_id}
 OpenClaw is the primary executor backend. It is an autonomous AI agent gateway that:
 - Routes requests to multiple model backends (Anthropic Claude, OpenRouter free tier)
 - Manages MCP tool access (Grafana, Atlassian, filesystem, Tavily web search)
-- Provides programmatic invocation via the `openclaw agent` CLI
+- Exposes a WebSocket Gateway API at `ws://localhost:18789/rpc`
 
-### OpenClaw CLI Invocation
+### Gateway WebSocket API
 
-```bash
-openclaw agent \
-  --agent <agent-name> \
-  --session-id "pipeline:{run_id}:{step_name}" \
-  --message "<rendered prompt>" \
-  --json
+P-Ork communicates with OpenClaw via the Gateway WebSocket API (`OpenClawWSExecutor`). The protocol uses JSON frames:
+
+```
+Request:  {"type": "req", "id": "<uuid>", "method": "<method>", "params": {...}}
+Response: {"type": "res", "id": "<uuid>", "ok": true/false, "payload": {...}}
+Event:    {"type": "event", "event": "<name>", "payload": {...}}
 ```
 
-### OpenClaw CLI Response Format
+**Auth:** Ed25519 device-signature challenge/response on connect. Credentials read automatically from `~/.openclaw/identity/device.json` and `~/.openclaw/identity/device-auth.json` — no manual configuration needed.
 
+**Agent call flow:**
+1. Send `agent` request → gateway immediately responds with `status: "accepted"` and a `runId`
+2. Events stream in (`lifecycle`, `assistant`, `chat`) while the agent runs
+3. Gateway sends a second `res` for the same request ID once complete, with `status: "ok"` and the full result including `payloads`, `agentMeta.model`, and `durationMs`
+
+**Gateway result format** (second `agent` response):
 ```json
 {
   "runId": "...",
@@ -708,11 +748,33 @@ openclaw agent \
 }
 ```
 
-The agent's response text (`result.payloads[0].text`) should be JSON matching `LLMOutput`. The executor strips markdown code fences if the model wraps the JSON.
+The agent's response text (`result.payloads[-1].text`) should be JSON matching `LLMOutput`. The executor scans payloads in reverse for the last valid JSON block (models sometimes narrate before outputting JSON) and strips markdown code fences.
+
+### Session Keys
+
+Session keys **must** start with `agent:{agent-name}:` — the Gateway validates this and rejects calls where the session key's agent name doesn't match the `agentId`. Any suffix after the agent name prefix is free-form.
+
+```yaml
+# Correct
+session_key: "agent:sre-triage:{{pipeline_run_id}}:triage"
+
+# Wrong — gateway will reject this
+session_key: "pipeline:{{pipeline_run_id}}:triage"
+```
+
+If `session_key` is omitted, the executor generates `agent:{agent}:pipeline:{pipeline_run_id}:{current_step}` automatically.
 
 ### Model Selection per Step
 
-Models are bound to named agents in OpenClaw config — not specified per API call. Pipeline steps reference an agent name in `executor_config.agent`. Create separate agents in OpenClaw for different model tiers:
+By default, models are bound to named agents in OpenClaw config. To override for a specific step, set `executor_config.model`:
+
+```yaml
+executor_config:
+  agent: sre-triage
+  model: anthropic/claude-opus-4-7   # overrides agent's configured model for this step
+```
+
+Typical agent tiers (model bound in OpenClaw agent config):
 - Critical/remediation steps → agent backed by `anthropic/claude-sonnet-4-6`
 - Verification steps → agent backed by a stronger model (e.g. Opus)
 - Warning/routine steps → agent backed by `anthropic/claude-haiku-4-5-20251001` or free OpenRouter model
@@ -748,11 +810,6 @@ pipeline_config_dir: ./pipelines
 
 database:
   url: sqlite+aiosqlite:///./runs.db
-
-executors:
-  openclaw:
-    base_url: http://localhost:18789
-    hooks_token: ${OPENCLAW_HOOKS_TOKEN}   # env var
 
 notifications:
   telegram:
@@ -885,7 +942,7 @@ Implementation in progress. All code lives under `service/`.
 7. **Pipeline config loader** — `src/pipeline/loader.py` — globs `*.yaml` from pipelines dir, validates via Pydantic, alphabetical load order
 8. **Pipeline resolver** — `src/pipeline/resolver.py` — explicit pipeline name takes priority; otherwise AND-logic match against `trigger.match` (top-level fields + labels); first match wins
 9. **Example pipeline config** — `service/pipelines/alert-triage-critical.yaml`
-10. **OpenClaw executor** — `src/executors/openclaw.py` — invokes `openclaw agent` CLI as async subprocess; renders `prompt_template` and `session_key` via Jinja2; strips markdown fences; parses response into `LLMOutput`
+10. **OpenClaw executor** — `src/executors/openclaw_ws.py` — invokes OpenClaw agents via Gateway WebSocket API; Ed25519 device-signature auth from `~/.openclaw/identity/`; waits for the final `agent` result frame which carries response text, actual model used, and duration; server-side session isolation (no file deletion); strips markdown fences; scans payloads in reverse for last valid JSON block
 11. **OpenClaw Mac setup** — gateway running, Telegram paired, all MCP servers verified
 12. **Context builder** — `src/pipeline/context.py` — resolves `context_template.include` dotted paths from `NormalisedContext`; injects `pipeline_run_id`, `pipeline_name`, `current_step`; `labels` dict always present; prior step outputs available as `steps.<name>.<field>`; leaf key flattening means `labels.service` is accessible as both `{{service}}` and `{{labels.service}}`
 13. **Pipeline runner** — `src/pipeline/runner.py` — `PipelineRunner` class; sequential step execution; flow control on abort/escalate/proceed; confidence gate with `on_low_confidence` action; optional verifier with built-in internal prompt (user never writes verifier prompts); veto/minimum combination strategies; verifier failure is non-fatal (falls back to primary confidence); executor instances cached per runner; accepts optional `session_factory` for DB (no-op if not provided)
@@ -906,6 +963,9 @@ Implementation in progress. All code lives under `service/`.
 26. **Retry logic with backoff** — optional `retry:` block on `StepConfig` (`attempts`, `backoff: fixed|exponential`, `delay_seconds`); wraps executor call only — low-confidence results are valid outputs and never retried; exponential default doubles delay each attempt
 27. **Human-in-the-loop approval** — `executor: human` step type sends a Telegram inline keyboard message (Approve/Reject buttons) and pauses the pipeline until a button is clicked or `timeout_seconds` elapses; approve → `confidence=1.0, proceed=true`; reject → `confidence=0.0, proceed=true` (triggers `on_low_confidence` action); timeout → step fails; a background Telegram long-poll task resolves approval futures; started automatically when Telegram credentials are configured; poller calls `deleteWebhook` at startup to avoid 409 conflicts with registered webhooks; **must use a separate bot from OpenClaw** — Telegram only allows one simultaneous `getUpdates` poller per bot; credentials sourced from `config.yaml` `notifications.telegram` (env vars are fallback)
 28. **Webhook output executor** — `executor: webhook` posts the rendered `prompt_template` as the HTTP body to `executor_config.url`; supports `method`, `headers` (with `${ENV_VAR}` substitution), `content_type`, `timeout_seconds`; returns `confidence=1.0` on HTTP 2xx; non-2xx raises and triggers retry/fail flow; works as any regular step so `when:`, `retry:`, and verifiers apply
+29. **Gateway WebSocket executor** — replaced CLI subprocess with direct Gateway WebSocket API calls; Ed25519 device-signature auth; model override via `executor_config.model`; server-side session isolation (no more session file deletion or concurrent-run caveats); actual model used surfaced in `LLMOutput.model` from `agentMeta` in the final result frame
+30. **Model override per step** — `executor_config.model` on any `openclaw` step overrides the agent's configured model for that call only; passed directly to the Gateway `agent` params
+31. **Thinking level per step** — `executor_config.thinking_level` (`off|minimal|low|medium|high|xhigh`) controls the model's thinking budget; passed as `thinking` in the Gateway `agent` params
 
 ### Up Next
 1. **Dockerfile and Kubernetes manifests** — deferred until after testing

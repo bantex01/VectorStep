@@ -44,7 +44,7 @@ steps:
     executor: openclaw
     executor_config:
       agent: first-line-support
-      session_key: "pipeline:{{pipeline_run_id}}:triage"
+      session_key: "agent:first-line-support:pipeline:{{pipeline_run_id}}:triage"
     confidence_threshold: 0.60
     on_low_confidence: escalate
     on_abort: notify
@@ -101,7 +101,7 @@ steps:
           executor: openclaw
           executor_config:
             agent: first-line-support
-            session_key: "pipeline:{{pipeline_run_id}}:jira-history"
+            session_key: "agent:first-line-support:pipeline:{{pipeline_run_id}}:jira-history"
           timeout_seconds: 150
           prompt_template: |
             Service: {{labels.service}}
@@ -126,7 +126,7 @@ steps:
           executor: openclaw
           executor_config:
             agent: principal-sre
-            session_key: "pipeline:{{pipeline_run_id}}:quick-assessment"
+            session_key: "agent:principal-sre:pipeline:{{pipeline_run_id}}:quick-assessment"
           timeout_seconds: 60
           prompt_template: |
             Service: {{labels.service}}
@@ -153,7 +153,7 @@ steps:
     executor: openclaw
     executor_config:
       agent: principal-sre
-      session_key: "pipeline:{{pipeline_run_id}}:close"
+      session_key: "agent:principal-sre:pipeline:{{pipeline_run_id}}:close"
     confidence_threshold: 0.50
     on_low_confidence: proceed
     on_abort: notify

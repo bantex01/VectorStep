@@ -1,7 +1,11 @@
+import asyncio
 import glob
 import json
+import logging
 import os
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 import yaml
 from fastapi import APIRouter, HTTPException, Request
@@ -12,6 +16,7 @@ from sqlalchemy.orm import selectinload
 
 from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep
+from .gateway import gateway_call_safe
 
 router = APIRouter(prefix="/ui")
 
@@ -134,7 +139,7 @@ async def ui_dashboard(request: Request):
     total_24h = sum(counts_24h.values())
     terminal_24h = total_24h - counts_24h.get("running", 0)
     success_rate = (
-        round(counts_24h.get("completed", 0) / terminal_24h * 100)
+        round((terminal_24h - counts_24h.get("failed", 0)) / terminal_24h * 100)
         if terminal_24h > 0 else None
     )
     pipelines = getattr(request.app.state, "pipelines", [])
@@ -340,6 +345,122 @@ async def ui_schedules(request: Request):
     return templates.TemplateResponse(request, "schedules.html", {
         "jobs": jobs,
         "active_page": "schedules",
+    })
+
+
+@router.get("/agents", response_class=HTMLResponse)
+async def ui_agents(request: Request):
+    gw = await gateway_call_safe("agents.list", {})
+    agents_raw: list[dict] = []
+    gateway_error: str | None = None
+    if gw is None:
+        gateway_error = "Could not reach OpenClaw Gateway — is it running?"
+    else:
+        agents_raw = gw.get("agents") or []
+
+    sf = get_session_factory()
+    async with sf() as session:
+        rows = await session.execute(
+            select(
+                PipelineStep.agent,
+                PipelineStep.status,
+                func.count().label("n"),
+                func.max(PipelineStep.executed_at).label("last_run"),
+            )
+            .where(PipelineStep.agent.isnot(None))
+            .group_by(PipelineStep.agent, PipelineStep.status)
+        )
+        step_rows = rows.all()
+
+    agent_stats: dict[str, dict] = {}
+    for row in step_rows:
+        s = agent_stats.setdefault(
+            row.agent,
+            {"succeeded": 0, "failed": 0, "total": 0, "last_run": None, "success_rate": None},
+        )
+        s["total"] += row.n
+        if row.status == "failed":
+            s["failed"] += row.n
+        else:
+            s["succeeded"] += row.n
+        if row.last_run and (s["last_run"] is None or row.last_run > s["last_run"]):
+            s["last_run"] = row.last_run
+
+    for s in agent_stats.values():
+        if s["total"] > 0:
+            s["success_rate"] = round(s["succeeded"] / s["total"] * 100, 1)
+
+    # If gateway is down, synthesise stub entries from DB history so page still works
+    if not agents_raw and agent_stats:
+        agents_raw = [{"id": aid} for aid in sorted(agent_stats.keys())]
+
+    return templates.TemplateResponse(request, "agents.html", {
+        "agents": agents_raw,
+        "agent_stats": agent_stats,
+        "gateway_error": gateway_error,
+        "active_page": "agents",
+    })
+
+
+@router.get("/agents/{agent_id}", response_class=HTMLResponse)
+async def ui_agent_detail(request: Request, agent_id: str):
+    soul_r, tools_r, identity_r, list_r = await asyncio.gather(
+        gateway_call_safe("agents.files.get", {"agentId": agent_id, "name": "SOUL.md"}),
+        gateway_call_safe("agents.files.get", {"agentId": agent_id, "name": "TOOLS.md"}),
+        gateway_call_safe("agents.files.get", {"agentId": agent_id, "name": "IDENTITY.md"}),
+        gateway_call_safe("agents.list", {}),
+    )
+
+    def _file_content(payload: dict | None) -> str | None:
+        return ((payload or {}).get("file") or {}).get("content") or None
+
+    agents_list = (list_r or {}).get("agents") or []
+    agent_config = next(
+        (a for a in agents_list if a.get("id") == agent_id or a.get("agentId") == agent_id),
+        None,
+    )
+
+    sf = get_session_factory()
+    async with sf() as session:
+        rows = await session.execute(
+            select(
+                PipelineStep.model,
+                PipelineStep.status,
+                func.count().label("n"),
+                func.max(PipelineStep.executed_at).label("last_run"),
+            )
+            .where(PipelineStep.agent == agent_id)
+            .group_by(PipelineStep.model, PipelineStep.status)
+        )
+        step_rows = rows.all()
+
+    model_stats: dict[str, dict] = {}
+    for row in step_rows:
+        m = row.model or "unknown"
+        s = model_stats.setdefault(
+            m,
+            {"succeeded": 0, "failed": 0, "total": 0, "last_run": None, "success_rate": None},
+        )
+        s["total"] += row.n
+        if row.status == "failed":
+            s["failed"] += row.n
+        else:
+            s["succeeded"] += row.n
+        if row.last_run and (s["last_run"] is None or row.last_run > s["last_run"]):
+            s["last_run"] = row.last_run
+
+    for s in model_stats.values():
+        if s["total"] > 0:
+            s["success_rate"] = round(s["succeeded"] / s["total"] * 100, 1)
+
+    return templates.TemplateResponse(request, "agent_detail.html", {
+        "agent_id": agent_id,
+        "agent_config": agent_config,
+        "soul": _file_content(soul_r),
+        "tools": _file_content(tools_r),
+        "identity": _file_content(identity_r),
+        "model_stats": model_stats,
+        "active_page": "agents",
     })
 
 

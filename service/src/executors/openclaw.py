@@ -56,13 +56,17 @@ def _extract_json_object(text: str) -> dict | None:
         return None
 
 
+_VALID_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
+
+
 class OpenClawExecutor(BaseExecutor):
     """Executor that invokes an OpenClaw agent via the openclaw CLI.
 
     executor_config keys (all optional except agent):
-        agent       — OpenClaw agent name (required)
-        session_key — Jinja2 template for the session key; defaults to
-                      "pipeline:{{pipeline_run_id}}:{{step_name}}"
+        agent          — OpenClaw agent name (required)
+        session_key    — Jinja2 template for the session key; defaults to
+                         "pipeline:{{pipeline_run_id}}:{{step_name}}"
+        thinking_level — Thinking budget: off|minimal|low|medium|high|xhigh
     """
 
     def __init__(self, timeout_seconds: int = 1200):
@@ -86,15 +90,22 @@ class OpenClawExecutor(BaseExecutor):
         timeout = int(step.executor_config.get("timeout_seconds", self._timeout))
         prompt = self._render(step.prompt_template, context)
 
+        thinking_level = step.executor_config.get("thinking_level")
+        if thinking_level is not None and thinking_level not in _VALID_THINKING_LEVELS:
+            raise ValueError(
+                f"Step '{step.name}': invalid thinking_level '{thinking_level}'. "
+                f"Must be one of: {', '.join(sorted(_VALID_THINKING_LEVELS))}"
+            )
+
         logger.info(
-            "OpenClaw execute: step=%s agent=%s session=%s",
-            step.name, agent, session_key,
+            "OpenClaw execute: step=%s agent=%s session=%s thinking=%s",
+            step.name, agent, session_key, thinking_level or "default",
         )
         logger.debug("Prompt >>>\n%s", prompt)
 
         self._clear_agent_sessions(agent)
 
-        raw = await self._call_agent(agent, session_key, prompt, timeout)
+        raw = await self._call_agent(agent, session_key, prompt, timeout, thinking_level)
 
         response_text = (raw.get("result", {}).get("payloads") or [{}])[0].get("text", "")
         logger.debug("Response <<<\n%s", response_text)
@@ -140,7 +151,10 @@ class OpenClawExecutor(BaseExecutor):
     def _render(self, template: str, context: dict) -> str:
         return _jinja_env.from_string(template).render(**context)
 
-    async def _call_agent(self, agent: str, session_key: str, message: str, timeout: int) -> dict:
+    async def _call_agent(
+        self, agent: str, session_key: str, message: str, timeout: int,
+        thinking_level: str | None = None,
+    ) -> dict:
         cmd = [
             self._openclaw_bin,
             "agent",
@@ -149,6 +163,8 @@ class OpenClawExecutor(BaseExecutor):
             "--message", message,
             "--json",
         ]
+        if thinking_level:
+            cmd += ["--thinking", thinking_level]
 
         try:
             proc = await asyncio.create_subprocess_exec(
