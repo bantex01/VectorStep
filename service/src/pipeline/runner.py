@@ -686,12 +686,13 @@ class PipelineRunner:
         if not self._session_factory:
             return
         async with self._session_factory() as session:
+            _agent = step.executor_config.get("agent")
             session.add(PipelineStep(
                 run_id=run_id,
                 step_name=result.step_name,
                 step_index=result.step_index,
                 executor=step.executor,
-                agent=step.executor_config.get("agent"),
+                agent=f"{step.executor}:{_agent}" if _agent else None,
                 model=result.output.model if result.output else None,
                 prompt=json.dumps(step.executor_config),
                 raw_output=json.dumps(result.output.raw_response) if result.output else None,
@@ -719,6 +720,7 @@ class PipelineRunner:
         if not self._session_factory:
             return
         branch_failed = getattr(output, "failed", False)
+        _agent = branch.executor_config.get("agent")
         async with self._session_factory() as session:
             session.add(PipelineStep(
                 run_id=run_id,
@@ -727,7 +729,7 @@ class PipelineRunner:
                 # Branches share the same group_index prefix and sort together.
                 step_index=group_index * 1000 + branch_index,
                 executor=branch.executor,
-                agent=branch.executor_config.get("agent"),
+                agent=f"{branch.executor}:{_agent}" if _agent else None,
                 model=output.model,
                 prompt=json.dumps(branch.executor_config),
                 raw_output=json.dumps(output.raw_response),

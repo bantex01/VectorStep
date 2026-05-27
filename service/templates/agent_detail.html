@@ -35,7 +35,16 @@
     {% else %}
       {% set display = agent_id %}
     {% endif %}
-    <h1 class="text-2xl font-semibold text-zinc-50">{{ display }}</h1>
+    <div class="flex items-center gap-2.5">
+      <h1 class="text-2xl font-semibold text-zinc-50">{{ display }}</h1>
+      {% if executor == 'gateway' %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-violet-950 text-violet-400 ring-1 ring-inset ring-violet-800">gateway</span>
+      {% elif executor == 'openclaw' %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-cyan-950 text-cyan-400 ring-1 ring-inset ring-cyan-800">openclaw</span>
+      {% else %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">{{ executor }}</span>
+      {% endif %}
+    </div>
     {% if display != agent_id %}
       <p class="text-sm text-zinc-500 font-mono mt-0.5">{{ agent_id }}</p>
     {% endif %}

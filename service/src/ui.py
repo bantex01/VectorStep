@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep
+from .gateway import gateway_call_safe
 
 logger = logging.getLogger(__name__)
 
@@ -366,31 +367,68 @@ def _read_pipeline_yaml(pipeline_dir: str, pipeline_name: str) -> str | None:
 
 # ── Agent pages ────────────────────────────────────────────────────────────
 
-# P-Ork Gateway REST URL (config-driven, with fallback)
-_GATEWAY_BASE = os.environ.get("PORK_GATEWAY_URL", "http://localhost:18780")
+# Per-executor URLs — overridden at startup by configure() called from main.py lifespan.
+# Defaults allow the service to start without config and fall back gracefully.
+_pork_gateway_base: str = os.environ.get("PORK_GATEWAY_URL", "http://localhost:18780")
+_openclaw_ws_url: str = "ws://127.0.0.1:18789/rpc"
 
 
-async def _gateway_agents() -> tuple[list[dict], str | None]:
-    """Fetch agents list from the P-Ork Gateway REST /agents endpoint.
-    Returns (agents_list, error_message_or_None).
-    """
+def configure(openclaw_ws_url: str = "", pork_gateway_base: str = "") -> None:
+    """Set agent source URLs from config.yaml values. Call from main.py lifespan."""
+    global _openclaw_ws_url, _pork_gateway_base
+    if openclaw_ws_url:
+        _openclaw_ws_url = openclaw_ws_url
+    if pork_gateway_base:
+        _pork_gateway_base = pork_gateway_base
+
+
+# ── Per-executor agent discovery ──────────────────────────────────────────────
+
+async def _fetch_openclaw_agents() -> tuple[list[dict], str | None]:
+    """Fetch agents list from the OpenClaw Gateway WS API (agents.list RPC)."""
+    result = await gateway_call_safe("agents.list", {}, gateway_url=_openclaw_ws_url)
+    if result is None:
+        return [], f"Could not reach OpenClaw Gateway at {_openclaw_ws_url} — is it running?"
+    return result.get("agents") or [], None
+
+
+async def _fetch_pork_gateway_agents() -> tuple[list[dict], str | None]:
+    """Fetch agents list from the P-Ork Gateway REST /agents endpoint."""
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{_GATEWAY_BASE}/agents")
+            resp = await client.get(f"{_pork_gateway_base}/agents")
             resp.raise_for_status()
             return resp.json().get("agents", []), None
     except Exception as exc:
-        logger.debug("gateway /agents failed: %s", exc)
-        return [], f"Could not reach P-Ork Gateway at {_GATEWAY_BASE} — is it running?"
+        logger.debug("P-Ork Gateway /agents failed: %s", exc)
+        return [], f"Could not reach P-Ork Gateway at {_pork_gateway_base} — is it running?"
 
 
-async def _gateway_agent_files(agent_id: str) -> dict[str, str | None]:
-    """Fetch agent soul.md from the P-Ork Gateway REST /agents/{id}/soul endpoint."""
-    result = {"soul": None, "tools": None, "identity": None}
-    # Gateway only exposes /agents and /agents/{name}/soul currently
+async def _fetch_openclaw_agent_files(agent_id: str) -> dict[str, str | None]:
+    """Fetch SOUL.md / TOOLS.md / IDENTITY.md from the OpenClaw Gateway WS API."""
+    def _content(payload: dict | None) -> str | None:
+        return ((payload or {}).get("file") or {}).get("content") or None
+
+    soul_r, tools_r, identity_r = await asyncio.gather(
+        gateway_call_safe("agents.files.get", {"agentId": agent_id, "name": "SOUL.md"}, gateway_url=_openclaw_ws_url),
+        gateway_call_safe("agents.files.get", {"agentId": agent_id, "name": "TOOLS.md"}, gateway_url=_openclaw_ws_url),
+        gateway_call_safe("agents.files.get", {"agentId": agent_id, "name": "IDENTITY.md"}, gateway_url=_openclaw_ws_url),
+    )
+    return {
+        "soul": _content(soul_r),
+        "tools": _content(tools_r),
+        "identity": _content(identity_r),
+    }
+
+
+async def _fetch_pork_gateway_agent_files(agent_id: str) -> dict[str, str | None]:
+    """Fetch soul from the P-Ork Gateway REST /agents/{id}/soul endpoint.
+    Tools and Identity are not yet exposed by the P-Ork Gateway REST API.
+    """
+    result: dict[str, str | None] = {"soul": None, "tools": None, "identity": None}
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{_GATEWAY_BASE}/agents/{agent_id}/soul")
+            resp = await client.get(f"{_pork_gateway_base}/agents/{agent_id}/soul")
             if resp.status_code == 200:
                 result["soul"] = resp.json().get("content") or resp.text
     except Exception:
@@ -398,10 +436,29 @@ async def _gateway_agent_files(agent_id: str) -> dict[str, str | None]:
     return result
 
 
+# ── Routes ────────────────────────────────────────────────────────────────────
+
 @router.get("/agents", response_class=HTMLResponse)
 async def ui_agents(request: Request):
-    agents_raw, gateway_error = await _gateway_agents()
+    # Fetch from both backends concurrently
+    (oc_agents, oc_error), (gw_agents, gw_error) = await asyncio.gather(
+        _fetch_openclaw_agents(),
+        _fetch_pork_gateway_agents(),
+    )
 
+    # Tag every entry with its executor source so the template and URL routing
+    # can distinguish agents that share names across backends.
+    all_agents: list[dict] = []
+    for a in oc_agents:
+        all_agents.append({**a, "executor": "openclaw"})
+    for a in gw_agents:
+        all_agents.append({**a, "executor": "gateway"})
+
+    # Collect non-None error messages
+    gateway_errors = [e for e in [oc_error, gw_error] if e]
+
+    # DB stats — agent column now stores "executor:name" prefixed values.
+    # Group by the full prefixed key so openclaw:X and gateway:X are counted separately.
     sf = get_session_factory()
     async with sf() as session:
         rows = await session.execute(
@@ -434,29 +491,45 @@ async def ui_agents(request: Request):
         if s["total"] > 0:
             s["success_rate"] = round(s["succeeded"] / s["total"] * 100, 1)
 
-    # If gateway is down, synthesise stub entries from DB history so page still works
-    if not agents_raw and agent_stats:
-        agents_raw = [{"id": aid, "name": aid} for aid in sorted(agent_stats.keys())]
+    # If both backends are unreachable, synthesise stub entries from DB history
+    # so the page still renders something useful.  Only synthesise for rows that
+    # carry a recognisable "executor:agent" prefix — bare legacy entries are ignored.
+    if not all_agents:
+        seen: set[str] = set()
+        for key in sorted(agent_stats.keys()):
+            if ":" in key:
+                executor, _, aid = key.partition(":")
+                stub_key = f"{executor}:{aid}"
+                if stub_key not in seen:
+                    seen.add(stub_key)
+                    all_agents.append({"id": aid, "name": aid, "executor": executor})
 
     return templates.TemplateResponse(request, "agents.html", {
-        "agents": agents_raw,
+        "agents": all_agents,
         "agent_stats": agent_stats,
-        "gateway_error": gateway_error,
+        "gateway_errors": gateway_errors,
         "active_page": "agents",
     })
 
 
-@router.get("/agents/{agent_id}", response_class=HTMLResponse)
-async def ui_agent_detail(request: Request, agent_id: str):
-    # Fetch agents list + soul from gateway
-    agents_raw, _ = await _gateway_agents()
-    agent_files = await _gateway_agent_files(agent_id)
+@router.get("/agents/{executor}/{agent_id}", response_class=HTMLResponse)
+async def ui_agent_detail(request: Request, executor: str, agent_id: str):
+    prefixed_key = f"{executor}:{agent_id}"
+
+    # Fetch live config + file contents from the appropriate backend
+    if executor == "openclaw":
+        agents_raw, _ = await _fetch_openclaw_agents()
+        agent_files = await _fetch_openclaw_agent_files(agent_id)
+    else:  # gateway (or any future executor with REST discovery)
+        agents_raw, _ = await _fetch_pork_gateway_agents()
+        agent_files = await _fetch_pork_gateway_agent_files(agent_id)
 
     agent_config = next(
         (a for a in agents_raw if a.get("name") == agent_id or a.get("id") == agent_id),
         None,
     )
 
+    # DB run stats scoped to this executor:agent pair
     sf = get_session_factory()
     async with sf() as session:
         rows = await session.execute(
@@ -466,7 +539,7 @@ async def ui_agent_detail(request: Request, agent_id: str):
                 func.count().label("n"),
                 func.max(PipelineStep.executed_at).label("last_run"),
             )
-            .where(PipelineStep.agent == agent_id)
+            .where(PipelineStep.agent == prefixed_key)
             .group_by(PipelineStep.model, PipelineStep.status)
         )
         step_rows = rows.all()
@@ -492,6 +565,7 @@ async def ui_agent_detail(request: Request, agent_id: str):
 
     return templates.TemplateResponse(request, "agent_detail.html", {
         "agent_id": agent_id,
+        "executor": executor,
         "agent_config": agent_config,
         "soul": agent_files["soul"],
         "tools": agent_files["tools"],

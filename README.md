@@ -476,7 +476,8 @@ Agents report findings and score their own confidence. They do not decide pipeli
 `proceed` is a pipeline signal only — it carries no domain meaning. Default is true; set false only when the agent is confident no further steps are warranted and this should (generally) be determined by the agents SOUL. Example, the agent should be scoped well enough for a particular job and have instructions that match the fact that the agent is just a atep in a process or a decision maker.
 
 Currently implemented executors:
-- `OpenClawWSExecutor` (`executor: openclaw`) — invokes OpenClaw agents via the Gateway WebSocket API (`ws://localhost:18789/rpc`). Authenticates using Ed25519 device identity from `~/.openclaw/identity/device.json`. Fires an `agent` call and waits for the final result frame, which contains the response text, model used, and duration. Session isolation is handled server-side by the Gateway — no file deletion needed. Scans payloads in reverse for the last valid JSON block.
+
+- `OpenClawWSExecutor` (`executor: openclaw`) — invokes OpenClaw agents via the OpenClaw Gateway WebSocket API. Authenticates using Ed25519 device identity from `~/.openclaw/identity/device.json`. Fires an `agent` call and waits for the final result frame, which contains the response text, model used, and duration. Session isolation is handled server-side by the Gateway — no file deletion needed. Scans payloads in reverse for the last valid JSON block.
 
 `executor_config` keys:
 
@@ -486,6 +487,18 @@ Currently implemented executors:
 | `session_key` | no | Jinja2 template; must start with `agent:{agent-name}:`. Default: `agent:{{agent}}:pipeline:{{pipeline_run_id}}:{{current_step}}` |
 | `model` | no | Model override, e.g. `anthropic/claude-opus-4-7`. Overrides the agent's configured model for this step only. |
 | `thinking_level` | no | `off\|minimal\|low\|medium\|high\|xhigh` — controls the model's thinking budget |
+
+- `GatewayExecutor` (`executor: gateway`) — invokes agents via the **P-Ork Gateway** WebSocket API. Uses a simpler token-based auth (no device identity required). Requires `executors.gateway.url` and optionally `executors.gateway.token` in `config.yaml`. Supports `model` and `thinking_level` overrides identical to the OpenClaw executor.
+
+`executor_config` keys:
+
+| Key | Required | Description |
+|---|---|---|
+| `agent` | yes | P-Ork Gateway agent name |
+| `session_key` | no | Jinja2 template; must start with `agent:{agent-name}:`. Default: `agent:{{agent}}:pipeline:{{pipeline_run_id}}:{{step_name}}` |
+| `model` | no | Model override string, e.g. `ollama/qwen3.5:4b` |
+| `thinking_level` | no | Thinking level override, e.g. `low\|medium\|high` |
+| `timeout_seconds` | no | Per-request timeout override (default: 1200) |
 
 - `HumanExecutor` (`executor: human`) — sends a Telegram inline keyboard message and pauses the pipeline until the operator clicks Approve or Reject, or `timeout_seconds` elapses.
 
@@ -708,9 +721,30 @@ GET /runs/{run_id}
 
 ---
 
+## Agent Library (UI)
+
+The `/ui/agents` page provides a unified library of agents across all configured executor backends. Agents are fetched live from each backend and merged into a single list, with each entry tagged by its source executor.
+
+### Executor-prefixed agent identity
+
+Agents are uniquely identified by an `executor:name` key — e.g. `openclaw:sre-investigation` and `gateway:sre-investigation` are treated as distinct agents even if they share a name. This prefix is stored in the `pipeline_steps.agent` DB column so run history, success rates, and model usage are attributed correctly per backend.
+
+> **Migration note:** Pipeline steps recorded before this change have bare agent names (e.g. `sre-investigation`) in the DB. These rows will not appear in the per-agent stats on the detail page but remain queryable via the Runs API. A one-time migration can backfill the prefix: `UPDATE pipeline_steps SET agent = executor || ':' || agent WHERE agent IS NOT NULL AND agent NOT LIKE '%:%';`
+
+### Per-executor discovery and file fetching
+
+| Executor | Agent list | Soul / Tools / Identity files |
+|---|---|---|
+| `openclaw` | OpenClaw Gateway WS — `agents.list` RPC | OpenClaw Gateway WS — `agents.files.get` RPC |
+| `gateway` | P-Ork Gateway REST — `GET /agents` | P-Ork Gateway REST — `GET /agents/{id}/soul` |
+
+Both backends are queried concurrently. If one is unreachable, the other's agents are still shown and a warning banner is displayed. If both fail, any agents that appear in the DB run history (with a recognisable `executor:name` prefix) are surfaced as stub entries.
+
+---
+
 ## OpenClaw Integration
 
-OpenClaw is the primary executor backend. It is an autonomous AI agent gateway that:
+OpenClaw is one of the supported executor backends. It is an autonomous AI agent gateway that:
 - Routes requests to multiple model backends (Anthropic Claude, OpenRouter free tier)
 - Manages MCP tool access (Grafana, Atlassian, filesystem, Tavily web search)
 - Exposes a WebSocket Gateway API at `ws://localhost:18789/rpc`
@@ -815,6 +849,16 @@ notifications:
   telegram:
     bot_token: ${TELEGRAM_BOT_TOKEN}   # or a literal value — env var placeholder is optional
     chat_id: ${TELEGRAM_CHAT_ID}
+
+executors:
+  openclaw:
+    url: ws://127.0.0.1:18789/rpc      # OpenClaw Gateway WebSocket URL
+                                        # defaults to ws://127.0.0.1:18789/rpc if omitted
+  gateway:
+    url: ws://localhost:18780/ws        # P-Ork Gateway WebSocket URL (required to use executor: gateway)
+    token: ${PORK_GATEWAY_TOKEN}        # Bearer token; empty string for local dev with no auth
+    rest_url: http://localhost:18780    # P-Ork Gateway REST base URL (used by the Agents UI)
+                                        # falls back to PORK_GATEWAY_URL env var if omitted
 
 logging:
   level: INFO
@@ -966,6 +1010,9 @@ Implementation in progress. All code lives under `service/`.
 29. **Gateway WebSocket executor** — replaced CLI subprocess with direct Gateway WebSocket API calls; Ed25519 device-signature auth; model override via `executor_config.model`; server-side session isolation (no more session file deletion or concurrent-run caveats); actual model used surfaced in `LLMOutput.model` from `agentMeta` in the final result frame
 30. **Model override per step** — `executor_config.model` on any `openclaw` step overrides the agent's configured model for that call only; passed directly to the Gateway `agent` params
 31. **Thinking level per step** — `executor_config.thinking_level` (`off|minimal|low|medium|high|xhigh`) controls the model's thinking budget; passed as `thinking` in the Gateway `agent` params
+32. **P-Ork Gateway executor** (`executor: gateway`) — second executor backend targeting the P-Ork Gateway WS API; token-based auth (no device identity required); configurable URL + token via `executors.gateway` in `config.yaml`; same `model` / `thinking_level` / `session_key` / `timeout_seconds` overrides as the openclaw executor; both executors now co-exist and can be mixed within a single pipeline
+33. **Multi-source Agent Library UI** — `/ui/agents` fetches agents from both the OpenClaw Gateway WS (`agents.list` RPC) and the P-Ork Gateway REST (`GET /agents`) concurrently; each agent card shows an executor badge (`openclaw` / `gateway`); agents with the same name across backends are distinct entries; soul/tools/identity files fetched from the appropriate backend on the detail page; both backends failing gracefully surfaces stub entries from DB run history; agent detail route updated to `/ui/agents/{executor}/{agent_id}`
+34. **Executor-prefixed agent identity in DB** — `pipeline_steps.agent` now stores `executor:agent_name` (e.g. `openclaw:sre-investigation`) so success rates and model usage are attributed correctly per backend; OpenClaw Gateway WS URL is configurable via `executors.openclaw.url` in `config.yaml` (previously hardcoded)
 
 ### Up Next
 1. **Dockerfile and Kubernetes manifests** — deferred until after testing

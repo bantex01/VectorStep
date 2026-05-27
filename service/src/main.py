@@ -21,11 +21,13 @@ import functools
 
 from .executors import EXECUTORS
 from .executors.gateway import GatewayExecutor
+from .executors.openclaw_ws import OpenClawWSExecutor
 from .models.context import NormalisedContext
 from .normaliser import PARSERS
 from .normaliser.alertmanager import AlertmanagerStrategy
 from .notifications.telegram import TelegramNotifier
 from .pipeline import PipelineRunner, load_pipelines, resolve_pipeline
+from .ui import configure as configure_ui
 from .ui import router as ui_router
 
 logging.basicConfig(
@@ -176,18 +178,42 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("Telegram notifier not configured — notifications will be skipped")
 
-    # Build executor registry — gateway needs URL + token from config
-    gateway_cfg = config.get("executors", {}).get("gateway", {})
+    # Build executor registry — both gateway executors accept URL + credentials from config
+    executors_cfg = config.get("executors", {})
+    gateway_cfg = executors_cfg.get("gateway", {})
+    openclaw_cfg = executors_cfg.get("openclaw", {})
+
     executors = dict(EXECUTORS)
+
     if gateway_cfg.get("url"):
         executors["gateway"] = functools.partial(
             GatewayExecutor,
             url=gateway_cfg["url"],
             token=gateway_cfg.get("token", ""),
         )
-        logger.info("Gateway executor configured: %s", gateway_cfg["url"])
+        logger.info("P-Ork Gateway executor configured: %s", gateway_cfg["url"])
     else:
-        logger.warning("Gateway executor not configured — executors.gateway.url missing")
+        logger.warning("P-Ork Gateway executor not configured — executors.gateway.url missing")
+
+    openclaw_url = openclaw_cfg.get("url", "")
+    if openclaw_url:
+        executors["openclaw"] = functools.partial(
+            OpenClawWSExecutor,
+            gateway_url=openclaw_url,
+        )
+        logger.info("OpenClaw executor configured: %s", openclaw_url)
+
+    # Configure agent source URLs for the UI layer
+    pork_gateway_rest = gateway_cfg.get("rest_url") or os.environ.get("PORK_GATEWAY_URL", "http://localhost:18780")
+    configure_ui(
+        openclaw_ws_url=openclaw_url,
+        pork_gateway_base=pork_gateway_rest,
+    )
+    logger.info(
+        "UI agent sources — openclaw: %s, pork-gateway: %s",
+        openclaw_url or "(default ws://127.0.0.1:18789/rpc)",
+        pork_gateway_rest,
+    )
 
     # Runner
     _runner = PipelineRunner(
