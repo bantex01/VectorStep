@@ -132,7 +132,7 @@ class GatewayExecutor(BaseExecutor):
                     "type": "req",
                     "id": str(uuid.uuid4()),
                     "method": "connect",
-                    "params": {"token": self._token},
+                    "params": {"auth": {"token": self._token}},
                 }))
 
                 # Step 3: receive connect response
