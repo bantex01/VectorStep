@@ -179,15 +179,15 @@ async def lifespan(app: FastAPI):
     # Build executor registry — gateway needs URL + token from config
     gateway_cfg = config.get("executors", {}).get("gateway", {})
     executors = dict(EXECUTORS)
-    if gateway_cfg.get("url") and gateway_cfg.get("token"):
+    if gateway_cfg.get("url"):
         executors["gateway"] = functools.partial(
             GatewayExecutor,
             url=gateway_cfg["url"],
-            token=gateway_cfg["token"],
+            token=gateway_cfg.get("token", ""),
         )
         logger.info("Gateway executor configured: %s", gateway_cfg["url"])
     else:
-        logger.warning("Gateway executor not configured — executors.gateway.url/token missing")
+        logger.warning("Gateway executor not configured — executors.gateway.url missing")
 
     # Runner
     _runner = PipelineRunner(

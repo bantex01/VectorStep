@@ -17,7 +17,7 @@ context_template:
 
 steps:
   - name: order-intake
-    executor: openclaw
+    executor: gateway
     executor_config:
       agent: order-intake
       session_key: "agent:order-intake:{{pipeline_run_id}}"
@@ -52,7 +52,7 @@ steps:
       }
 
   - name: customer-comms
-    executor: openclaw
+    executor: gateway
     executor_config:
       agent: customer-comms
       session_key: "agent:customer-comms:{{pipeline_run_id}}"
