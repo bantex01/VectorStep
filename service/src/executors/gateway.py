@@ -124,7 +124,8 @@ class GatewayExecutor(BaseExecutor):
                 # Step 1: receive challenge
                 raw = await ws.recv()
                 challenge = json.loads(raw)
-                if challenge.get("event") != "challenge":
+                event_name = challenge.get("event", "")
+                if event_name not in ("challenge", "connect.challenge"):
                     raise RuntimeError(f"Expected 'challenge' event, got: {raw[:200]}")
 
                 # Step 2: send connect
