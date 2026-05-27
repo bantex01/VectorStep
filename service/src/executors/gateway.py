@@ -67,9 +67,9 @@ class GatewayExecutor(BaseExecutor):
         session_key = self._render(
             step.executor_config.get(
                 "session_key",
-                "pipeline:{{pipeline_run_id}}:{{step_name}}",
+                "agent:{{agent}}:pipeline:{{pipeline_run_id}}:{{step_name}}",
             ),
-            context,
+            {**context, "agent": agent},
         )
         timeout = int(step.executor_config.get("timeout_seconds", self._timeout))
         prompt = self._render(step.prompt_template, context)
