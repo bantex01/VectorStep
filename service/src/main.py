@@ -17,7 +17,10 @@ from sqlalchemy.orm import selectinload
 
 from .db.database import create_tables, get_session_factory, init_db
 from .db.models import PipelineRun, PipelineStep
+import functools
+
 from .executors import EXECUTORS
+from .executors.gateway import GatewayExecutor
 from .models.context import NormalisedContext
 from .normaliser import PARSERS
 from .normaliser.alertmanager import AlertmanagerStrategy
@@ -173,9 +176,22 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("Telegram notifier not configured — notifications will be skipped")
 
+    # Build executor registry — gateway needs URL + token from config
+    gateway_cfg = config.get("executors", {}).get("gateway", {})
+    executors = dict(EXECUTORS)
+    if gateway_cfg.get("url") and gateway_cfg.get("token"):
+        executors["gateway"] = functools.partial(
+            GatewayExecutor,
+            url=gateway_cfg["url"],
+            token=gateway_cfg["token"],
+        )
+        logger.info("Gateway executor configured: %s", gateway_cfg["url"])
+    else:
+        logger.warning("Gateway executor not configured — executors.gateway.url/token missing")
+
     # Runner
     _runner = PipelineRunner(
-        executors=EXECUTORS,
+        executors=executors,
         session_factory=get_session_factory(),
         notifiers=notifiers,
     )
