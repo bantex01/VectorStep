@@ -5,8 +5,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 
-logger = logging.getLogger(__name__)
-
+import httpx
 import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -16,7 +15,8 @@ from sqlalchemy.orm import selectinload
 
 from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep
-from .gateway import gateway_call_safe
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ui")
 
@@ -348,15 +348,59 @@ async def ui_schedules(request: Request):
     })
 
 
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _read_pipeline_yaml(pipeline_dir: str, pipeline_name: str) -> str | None:
+    for path in glob.glob(os.path.join(pipeline_dir, "*.yaml")):
+        try:
+            with open(path) as f:
+                content = f.read()
+            data = yaml.safe_load(content)
+            if isinstance(data, dict) and data.get("name") == pipeline_name:
+                return content
+        except Exception:
+            continue
+    return None
+
+
+# ── Agent pages ────────────────────────────────────────────────────────────
+
+# P-Ork Gateway REST URL (config-driven, with fallback)
+_GATEWAY_BASE = os.environ.get("PORK_GATEWAY_URL", "http://localhost:18780")
+
+
+async def _gateway_agents() -> tuple[list[dict], str | None]:
+    """Fetch agents list from the P-Ork Gateway REST /agents endpoint.
+    Returns (agents_list, error_message_or_None).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{_GATEWAY_BASE}/agents")
+            resp.raise_for_status()
+            return resp.json().get("agents", []), None
+    except Exception as exc:
+        logger.debug("gateway /agents failed: %s", exc)
+        return [], f"Could not reach P-Ork Gateway at {_GATEWAY_BASE} — is it running?"
+
+
+async def _gateway_agent_files(agent_id: str) -> dict[str, str | None]:
+    """Fetch agent soul.md from the P-Ork Gateway REST /agents/{id}/soul endpoint."""
+    result = {"soul": None, "tools": None, "identity": None}
+    # Gateway only exposes /agents and /agents/{name}/soul currently
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{_GATEWAY_BASE}/agents/{agent_id}/soul")
+            if resp.status_code == 200:
+                result["soul"] = resp.json().get("content") or resp.text
+    except Exception:
+        pass
+    return result
+
+
 @router.get("/agents", response_class=HTMLResponse)
 async def ui_agents(request: Request):
-    gw = await gateway_call_safe("agents.list", {})
-    agents_raw: list[dict] = []
-    gateway_error: str | None = None
-    if gw is None:
-        gateway_error = "Could not reach OpenClaw Gateway — is it running?"
-    else:
-        agents_raw = gw.get("agents") or []
+    agents_raw, gateway_error = await _gateway_agents()
 
     sf = get_session_factory()
     async with sf() as session:
@@ -392,7 +436,7 @@ async def ui_agents(request: Request):
 
     # If gateway is down, synthesise stub entries from DB history so page still works
     if not agents_raw and agent_stats:
-        agents_raw = [{"id": aid} for aid in sorted(agent_stats.keys())]
+        agents_raw = [{"id": aid, "name": aid} for aid in sorted(agent_stats.keys())]
 
     return templates.TemplateResponse(request, "agents.html", {
         "agents": agents_raw,
@@ -404,19 +448,12 @@ async def ui_agents(request: Request):
 
 @router.get("/agents/{agent_id}", response_class=HTMLResponse)
 async def ui_agent_detail(request: Request, agent_id: str):
-    soul_r, tools_r, identity_r, list_r = await asyncio.gather(
-        gateway_call_safe("agents.files.get", {"agentId": agent_id, "name": "SOUL.md"}),
-        gateway_call_safe("agents.files.get", {"agentId": agent_id, "name": "TOOLS.md"}),
-        gateway_call_safe("agents.files.get", {"agentId": agent_id, "name": "IDENTITY.md"}),
-        gateway_call_safe("agents.list", {}),
-    )
+    # Fetch agents list + soul from gateway
+    agents_raw, _ = await _gateway_agents()
+    agent_files = await _gateway_agent_files(agent_id)
 
-    def _file_content(payload: dict | None) -> str | None:
-        return ((payload or {}).get("file") or {}).get("content") or None
-
-    agents_list = (list_r or {}).get("agents") or []
     agent_config = next(
-        (a for a in agents_list if a.get("id") == agent_id or a.get("agentId") == agent_id),
+        (a for a in agents_raw if a.get("name") == agent_id or a.get("id") == agent_id),
         None,
     )
 
@@ -456,24 +493,9 @@ async def ui_agent_detail(request: Request, agent_id: str):
     return templates.TemplateResponse(request, "agent_detail.html", {
         "agent_id": agent_id,
         "agent_config": agent_config,
-        "soul": _file_content(soul_r),
-        "tools": _file_content(tools_r),
-        "identity": _file_content(identity_r),
+        "soul": agent_files["soul"],
+        "tools": agent_files["tools"],
+        "identity": agent_files["identity"],
         "model_stats": model_stats,
         "active_page": "agents",
     })
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _read_pipeline_yaml(pipeline_dir: str, pipeline_name: str) -> str | None:
-    for path in glob.glob(os.path.join(pipeline_dir, "*.yaml")):
-        try:
-            with open(path) as f:
-                content = f.read()
-            data = yaml.safe_load(content)
-            if isinstance(data, dict) and data.get("name") == pipeline_name:
-                return content
-        except Exception:
-            continue
-    return None
