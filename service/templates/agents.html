@@ -19,7 +19,7 @@
 {% if agents %}
 <div class="grid grid-cols-1 gap-4">
   {% for agent in agents %}
-  {% set aid = agent.get('id') or agent.get('agentId') or '' %}
+  {% set aid = agent.get('id') or agent.get('agentId') or agent.get('name') or '' %}
   {% set executor = agent.get('executor', '') %}
   {% set display = agent.get('displayName') or agent.get('name') or aid %}
   {% set stats_key = executor ~ ':' ~ aid %}
