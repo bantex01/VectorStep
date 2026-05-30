@@ -1,0 +1,84 @@
+name: approval-test
+description: Test pipeline for human-in-the-loop approval — three steps with a human gate in the middle
+version: 1
+
+trigger:
+  match:
+    test: approval
+
+context_template:
+  include:
+    - summary
+
+steps:
+  - name: pre-check
+    executor: openclaw
+    executor_config:
+      agent: main
+      session_key: "agent:main:{{pipeline_run_id}}:pre-check"
+    confidence_threshold: 0.5
+    on_low_confidence: proceed
+    prompt_template: |
+      This is a test pipeline run. Summarise what you have been asked to do and
+      confirm you are ready for a human to review before proceeding.
+
+      Context: {{summary}}
+
+      Return JSON only, no other text:
+      {
+        "confidence": 0.95,
+        "summary": "Pre-check complete — ready for human approval",
+        "next_step_context": "Pre-check passed",
+        "reasoning": {}
+      }
+
+  - name: human-approval
+    executor: human
+    timeout_seconds: 300
+    confidence_threshold: 0.5
+    on_low_confidence: abort
+    on_abort: rejected
+    prompt_template: |
+      <b>P-Ork approval request</b>
+
+      Pipeline: <code>{{pipeline_name}}</code>
+      Run: <code>{{pipeline_run_id}}</code>
+
+      Pre-check: {{steps.pre_check.summary}}
+
+      Approve to continue to the post-approval step, or reject to abort.
+
+  - name: post-approval
+    executor: openclaw
+    executor_config:
+      agent: main
+      session_key: "agent:main:{{pipeline_run_id}}:post-approval"
+    confidence_threshold: 0.5
+    on_low_confidence: proceed
+    prompt_template: |
+      A human just approved this pipeline run. Produce a short completion message
+      confirming the approval was received and the pipeline finished successfully.
+
+      Return JSON only, no other text:
+      {
+        "confidence": 0.95,
+        "proceed": false,
+        "proceed_reason": "Post-approval step complete — pipeline finished",
+        "summary": "Human approval received — pipeline completed successfully",
+        "next_step_context": "",
+        "reasoning": {}
+      }
+
+notifications:
+  rejected:
+    channel: telegram
+    template: |
+      ❌ Rejected: {{pipeline_name}}
+      Run: {{pipeline_run_id}}
+      The human approval step was rejected or timed out.
+  stopped:
+    channel: telegram
+    template: |
+      ✅ Done: {{pipeline_name}}
+      Run: {{pipeline_run_id}}
+      {{step_summary}}

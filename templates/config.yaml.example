@@ -1,0 +1,26 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+
+pipeline_config_dir: ./pipelines
+
+database:
+  url: sqlite+aiosqlite:///./runs.db
+
+executors:
+  openclaw:
+    url: ws://127.0.0.1:18789/rpc
+    hooks_token: ${OPENCLAW_HOOKS_TOKEN}
+  gateway:
+    url: ws://localhost:18780/rpc
+    token: some_token 
+    rest_url: http://localhost:18780
+
+notifications:
+  telegram:
+    bot_token: some_token
+    chat_id: some_chat_id 
+
+logging:
+  level: INFO
+
