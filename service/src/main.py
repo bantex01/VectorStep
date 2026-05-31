@@ -35,8 +35,64 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+
+def _setup_logging(config: dict) -> None:
+    """Reconfigure logging from config.yaml after startup.
+
+    - service.log  — all application logs (stdout + rotating file if logging.dir is set)
+    - access.log   — uvicorn HTTP access logs (file only; excluded from stdout)
+    """
+    from logging.handlers import RotatingFileHandler
+
+    log_cfg = config.get("logging", {})
+    level_str = log_cfg.get("level", "INFO").upper()
+    level = getattr(logging, level_str, logging.INFO)
+    log_dir = log_cfg.get("dir", "")
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level)
+
+    stdout_handler = logging.StreamHandler()
+    stdout_handler.setFormatter(formatter)
+    root.addHandler(stdout_handler)
+
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+        service_handler = RotatingFileHandler(
+            os.path.join(log_dir, "service.log"),
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        service_handler.setFormatter(formatter)
+        root.addHandler(service_handler)
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    # Detach uvicorn.access from the root logger so HTTP request lines don't
+    # appear in stdout or service.log. Route them to access.log if a log dir is set.
+    access_logger = logging.getLogger("uvicorn.access")
+    access_logger.propagate = False
+    access_logger.handlers.clear()
+    if log_dir:
+        access_handler = RotatingFileHandler(
+            os.path.join(log_dir, "access.log"),
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        access_handler.setFormatter(formatter)
+        access_logger.addHandler(access_handler)
+    else:
+        access_logger.addHandler(logging.NullHandler())
 
 # ---------------------------------------------------------------------------
 # App state — populated at startup
@@ -141,6 +197,7 @@ async def lifespan(app: FastAPI):
     _app_ref = app
 
     config = _load_config()
+    _setup_logging(config)
 
     # Database
     db_url = config.get("database", {}).get("url", "sqlite+aiosqlite:///./runs.db")
