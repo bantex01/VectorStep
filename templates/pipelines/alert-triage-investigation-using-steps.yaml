@@ -1,0 +1,94 @@
+# Template: Alert Triage + Grafana Investigation
+#
+# A two-step alert pipeline using reusable library steps.
+# Copy this file to pipelines/, fill in your service details, and reload.
+#
+# Steps used (from steps/ library):
+#   first-line-triage       — Confluence lookup + Jira ticket + investigation brief
+#   sre-investigation       — Grafana RED metrics + Jira update + probable cause
+#
+# To use the always-on verified variant instead of plain sre-investigation:
+#   replace "use: sre-investigation" with "use: sre-investigation-verified"
+
+name: my-service-triage
+description: Alert triage and Grafana investigation for my-service
+version: 1
+
+trigger:
+  match:
+    severity: critical
+    service: my-service        # match your Alertmanager service label
+
+context_template:
+  include:
+    - severity
+    - labels.service
+    - labels.environment
+    - summary
+    - metadata.starts_at       # remove if your alerts don't carry this
+
+# ── Variables ────────────────────────────────────────────────────────────────
+# Required by first-line-triage
+vars:
+  confluence_space: MY-SPACE
+  confluence_space_url: https://yourorg.atlassian.net/wiki/spaces/MY-SPACE/
+  confluence_service_docs_folder: Service Documentation
+  confluence_service_doc_name: My Service
+  service_doc_schema: "Owner, Business Criticality, SLO, Dependencies, Failure Impact, Known Fragility"
+  jira_project: MY
+  jira_project_url: https://yourorg.atlassian.net/jira/software/projects/MY/
+
+  # Required by sre-investigation
+  grafana_mcp_server: grafana_production
+  grafana_url: https://yourorg.grafana.net/
+  grafana_dashboard: My Service
+  grafana_service_labels: "job=my-service"
+  alerting_metric: error_rate
+
+# ── Steps ────────────────────────────────────────────────────────────────────
+steps:
+
+  # Step 1: First-line triage
+  # Inherits all config from the library step. The default prompt uses the
+  # vars above — no override needed unless you want a different prompt.
+  - use: first-line-triage
+
+  # Step 2: SRE investigation
+  # Also fully inherited. The default prompt references steps.first_line_triage.*
+  # which is the name of the step above — keep the names consistent.
+  #
+  # To bump the confidence threshold just for this pipeline:
+  #   - use: sre-investigation
+  #     confidence_threshold: 0.75
+  #
+  # To override the model for this step only (other executor_config keys are
+  # deep-merged so agent/session_key are still inherited from the library):
+  #   - use: sre-investigation
+  #     executor_config:
+  #       model: anthropic/claude-opus-4-8
+  - use: sre-investigation
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+notifications:
+  escalate:
+    channel: telegram
+    template: |
+      ⚠️ Escalated: {{pipeline_name}}
+      Service: {{labels.service}} ({{labels.environment}})
+      Step: {{current_step}}
+      Reason: {{escalation_reason}}{% if confidence is not none %} — confidence {{confidence | round(2)}} below threshold {{confidence_threshold}}{% endif %}
+      Summary: {{step_summary}}
+      {% if contradicts %}Contradicts: {{contradicts}}{% endif %}
+
+  stopped:
+    channel: telegram
+    template: |
+      ✅ Complete: {{pipeline_name}}
+      Service: {{labels.service}}
+      Summary: {{step_summary}}
+
+  notify:
+    channel: telegram
+    template: |
+      Aborted: {{pipeline_name}}
+      Step: {{current_step}}

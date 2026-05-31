@@ -86,6 +86,27 @@ class ScheduleConfig(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict)  # extra labels for prompt context
 
 
+class LibraryStepConfig(BaseModel):
+    """A named, reusable step definition stored in the step library directory.
+
+    Identical to StepConfig but adds description and tags for UI display.
+    Used only for validation at load time; the raw dict is what gets merged
+    into pipelines so description/tags are naturally stripped by StepConfig.
+    """
+    name: str
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    executor: str
+    executor_config: dict = Field(default_factory=dict)
+    confidence_threshold: float = 0.75
+    on_low_confidence: Literal["escalate", "abort", "proceed"] = "escalate"
+    on_abort: str = "notify"
+    prompt_template: str = ""
+    timeout_seconds: int | None = None
+    verifier: VerifierConfig | None = None
+    retry: RetryConfig | None = None
+
+
 class PipelineConfig(BaseModel):
     name: str
     description: str = ""

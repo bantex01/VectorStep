@@ -26,7 +26,7 @@ from .models.context import NormalisedContext
 from .normaliser import PARSERS
 from .normaliser.alertmanager import AlertmanagerStrategy
 from .notifications.telegram import TelegramNotifier
-from .pipeline import PipelineRunner, load_pipelines, resolve_pipeline
+from .pipeline import PipelineRunner, load_pipelines, load_step_library, resolve_pipeline
 from .ui import configure as configure_ui
 from .ui import router as ui_router
 
@@ -105,6 +105,8 @@ def _setup_logging(config: dict) -> None:
 _runner: PipelineRunner | None = None
 _pipelines = []
 _pipeline_dir: str = "./pipelines"
+_step_library: dict = {}
+_step_library_dir: str = "./steps"
 _scheduler: AsyncIOScheduler | None = None
 _app_ref: "FastAPI | None" = None
 _poller_task: asyncio.Task | None = None
@@ -161,12 +163,17 @@ def _register_schedules(pipelines: list) -> None:
 
 
 def _do_reload() -> int:
-    global _pipelines
-    _pipelines = load_pipelines(_pipeline_dir)
+    global _pipelines, _step_library
+    _step_library = load_step_library(_step_library_dir)
+    _pipelines = load_pipelines(_pipeline_dir, step_library=_step_library)
     _register_schedules(_pipelines)
     if _app_ref:
+        _app_ref.state.step_library = _step_library
         _app_ref.state.pipelines = _pipelines
-    logger.info("Pipelines reloaded — %d pipeline(s) loaded", len(_pipelines))
+    logger.info(
+        "Reloaded — %d pipeline(s), %d library step(s)",
+        len(_pipelines), len(_step_library),
+    )
     return len(_pipelines)
 
 
@@ -197,7 +204,7 @@ async def _run_scheduled_pipeline(pipeline_name: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _runner, _pipelines, _pipeline_dir, _scheduler, _app_ref, _poller_task
+    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task
     _app_ref = app
 
     config = _load_config()
@@ -209,9 +216,13 @@ async def lifespan(app: FastAPI):
     await create_tables()
     logger.info("Database initialised: %s", db_url)
 
+    # Step library (load before pipelines so references can be resolved)
+    _step_library_dir = config.get("step_library_dir", "./steps")
+    _step_library = load_step_library(_step_library_dir)
+
     # Pipeline configs
     _pipeline_dir = config.get("pipeline_config_dir", "./pipelines")
-    _pipelines = load_pipelines(_pipeline_dir)
+    _pipelines = load_pipelines(_pipeline_dir, step_library=_step_library)
 
     # Notifiers
     from .notifications.webhook import WebhookNotifier
@@ -286,6 +297,8 @@ async def lifespan(app: FastAPI):
     # Scheduler
     app.state.pipelines = _pipelines
     app.state.pipeline_dir = _pipeline_dir
+    app.state.step_library = _step_library
+    app.state.step_library_dir = _step_library_dir
 
     _scheduler = AsyncIOScheduler()
     _register_schedules(_pipelines)

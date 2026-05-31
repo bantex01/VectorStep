@@ -83,6 +83,11 @@ def _source_label(source: str) -> str:
     )
 
 
+def _to_yaml(obj) -> str:
+    return yaml.dump(obj, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+
+templates.env.filters["to_yaml"] = _to_yaml
 templates.env.globals.update({
     "status_classes": _status_classes,
     "confidence_bar_color": _confidence_bar_color,
@@ -365,6 +370,49 @@ def _read_pipeline_yaml(pipeline_dir: str, pipeline_name: str) -> str | None:
         except Exception:
             continue
     return None
+
+
+# ── Step library ─────────────────────────────────────────────────────────────
+
+def _iter_all_raw_steps(steps: list):
+    """Yield every step dict from a raw YAML steps list, including parallel inner steps."""
+    for step in steps:
+        if isinstance(step, dict) and "parallel" in step:
+            yield from _iter_all_raw_steps(step["parallel"].get("steps", []))
+        else:
+            yield step
+
+
+def _compute_step_usage(pipeline_dir: str, library: dict) -> dict[str, list[str]]:
+    """Scan pipeline YAMLs to find which pipelines reference each library step."""
+    usage: dict[str, list[str]] = {name: [] for name in library}
+    for path in glob.glob(os.path.join(pipeline_dir, "*.yaml")):
+        try:
+            with open(path) as f:
+                raw = yaml.safe_load(f)
+            pipeline_name = raw.get("name", os.path.basename(path))
+            for step in _iter_all_raw_steps(raw.get("steps", [])):
+                use = step.get("use") if isinstance(step, dict) else None
+                if use and use in usage:
+                    usage[use].append(pipeline_name)
+        except Exception:
+            pass
+    return usage
+
+
+@router.get("/steps", response_class=HTMLResponse)
+async def ui_steps(request: Request):
+    step_library: dict = getattr(request.app.state, "step_library", {})
+    pipeline_dir: str = getattr(request.app.state, "pipeline_dir", "./pipelines")
+
+    step_usage = _compute_step_usage(pipeline_dir, step_library)
+    steps = sorted(step_library.values(), key=lambda s: s.get("name", ""))
+
+    return templates.TemplateResponse(request, "steps.html", {
+        "steps": steps,
+        "step_usage": step_usage,
+        "active_page": "steps",
+    })
 
 
 # ── Agent pages ────────────────────────────────────────────────────────────
