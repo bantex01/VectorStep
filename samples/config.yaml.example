@@ -3,24 +3,42 @@ server:
   port: 8000
 
 pipeline_config_dir: ./pipelines
+step_library_dir: ./steps
 
 database:
   url: sqlite+aiosqlite:///./runs.db
 
 executors:
   openclaw:
-    url: ws://127.0.0.1:18789/rpc
-    hooks_token: ${OPENCLAW_HOOKS_TOKEN}
+    url: ws://127.0.0.1:18789/rpc   # OpenClaw Gateway WebSocket URL
+    # identity_dir: ~/.openclaw/identity  # optional — defaults to ~/.openclaw/identity
+    #
+    # OpenClaw authenticates using Ed25519 device-signature auth. The identity files
+    # (device.json and device-auth.json) are created automatically by OpenClaw when
+    # it is installed and run on this machine.
+    #
+    # If OpenClaw is running on a DIFFERENT machine:
+    #   1. Copy ~/.openclaw/identity/ from the OpenClaw machine to this machine
+    #      (or mount it as a secret in Kubernetes)
+    #   2. Set identity_dir to the path where you copied the files
+    #   3. On the OpenClaw machine, run: openclaw devices list
+    #      to confirm the device is approved on the remote gateway
+    #
+    # If identity files are missing at startup, P-Ork will log a warning and the
+    # openclaw executor will be registered — but any step using it will fail until
+    # the files are in place.
+
   gateway:
-    url: ws://localhost:18780/rpc
-    token: some_token 
-    rest_url: http://localhost:18780
+    url: ws://localhost:18780/ws     # P-Ork Gateway WebSocket URL
+    token: ${PORK_GATEWAY_TOKEN}     # Bearer token; empty string disables auth for local dev
+    rest_url: http://localhost:18780 # P-Ork Gateway REST base URL (used by Agents UI)
 
 notifications:
   telegram:
-    bot_token: some_token
-    chat_id: some_chat_id 
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
 
 logging:
   level: INFO
-
+  dir: ./logs   # omit to disable file logging (stdout only)
+                # creates service.log (app logs) and access.log (HTTP) — rotating, 10 MB x 5

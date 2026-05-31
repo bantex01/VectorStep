@@ -24,26 +24,49 @@ _jinja_env = Environment(undefined=Undefined)
 
 _VALID_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
 
-_OPENCLAW_IDENTITY_PATH = Path.home() / ".openclaw" / "identity" / "device.json"
-_OPENCLAW_DEVICE_AUTH_PATH = Path.home() / ".openclaw" / "identity" / "device-auth.json"
+_DEFAULT_IDENTITY_DIR = Path.home() / ".openclaw" / "identity"
 _GATEWAY_WS_URL = "ws://127.0.0.1:18789/rpc"
 
 # Default session key — must start with "agent:{agent}:" for the gateway to accept it.
 _DEFAULT_SESSION_KEY = "agent:{{agent}}:pipeline:{{pipeline_run_id}}:{{current_step}}"
 
+_MISSING_IDENTITY_HINT = (
+    "OpenClaw identity files are created automatically when OpenClaw is installed "
+    "and run on this machine. If OpenClaw is running on a different machine, copy "
+    "~/.openclaw/identity/ from that machine to this one (or to a custom path) and "
+    "set executors.openclaw.identity_dir in config.yaml."
+)
 
-def _load_device_identity() -> tuple[str, object, str]:
+
+def _resolve_identity_dir(identity_dir: str) -> Path:
+    return Path(identity_dir).expanduser() if identity_dir else _DEFAULT_IDENTITY_DIR
+
+
+def validate_identity(identity_dir: str = "") -> None:
+    """Check identity files exist and are readable. Call at startup for early failure."""
+    id_dir = _resolve_identity_dir(identity_dir)
+    for name in ("device.json", "device-auth.json"):
+        path = id_dir / name
+        if not path.exists():
+            raise FileNotFoundError(
+                f"OpenClaw identity file not found: {path}\n{_MISSING_IDENTITY_HINT}"
+            )
+
+
+def _load_device_identity(identity_dir: str) -> tuple[str, object, str]:
     """Return (device_id, private_key, pub_b64url)."""
-    data = json.loads(_OPENCLAW_IDENTITY_PATH.read_text())
+    path = _resolve_identity_dir(identity_dir) / "device.json"
+    data = json.loads(path.read_text())
     priv_key = load_pem_private_key(data["privateKeyPem"].encode(), password=None)
     pub_raw = priv_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     pub_b64url = base64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode()
     return data["deviceId"], priv_key, pub_b64url
 
 
-def _load_operator_token() -> tuple[str, list[str]]:
+def _load_operator_token(identity_dir: str) -> tuple[str, list[str]]:
     """Return (token, scopes) from the cached device-auth store."""
-    data = json.loads(_OPENCLAW_DEVICE_AUTH_PATH.read_text())
+    path = _resolve_identity_dir(identity_dir) / "device-auth.json"
+    data = json.loads(path.read_text())
     entry = data["tokens"]["operator"]
     return entry["token"], entry["scopes"]
 
@@ -101,10 +124,10 @@ class OpenClawWSExecutor(BaseExecutor):
         thinking_level — Thinking budget: off|minimal|low|medium|high|xhigh
     """
 
-    def __init__(self, gateway_url: str = _GATEWAY_WS_URL):
+    def __init__(self, gateway_url: str = _GATEWAY_WS_URL, identity_dir: str = ""):
         self._gateway_url = gateway_url
-        self._device_id, self._priv_key, self._pub_b64url = _load_device_identity()
-        self._op_token, self._scopes = _load_operator_token()
+        self._device_id, self._priv_key, self._pub_b64url = _load_device_identity(identity_dir)
+        self._op_token, self._scopes = _load_operator_token(identity_dir)
 
     async def execute(self, step: StepConfig, context: dict) -> LLMOutput:
         agent = step.executor_config.get("agent")

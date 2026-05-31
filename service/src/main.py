@@ -21,7 +21,7 @@ import functools
 
 from .executors import EXECUTORS
 from .executors.gateway import GatewayExecutor
-from .executors.openclaw_ws import OpenClawWSExecutor
+from .executors.openclaw_ws import OpenClawWSExecutor, validate_identity
 from .models.context import NormalisedContext
 from .normaliser import PARSERS
 from .normaliser.alertmanager import AlertmanagerStrategy
@@ -268,12 +268,21 @@ async def lifespan(app: FastAPI):
         logger.warning("P-Ork Gateway executor not configured — executors.gateway.url missing")
 
     openclaw_url = openclaw_cfg.get("url", "")
+    openclaw_identity_dir = openclaw_cfg.get("identity_dir", "")
     if openclaw_url:
+        try:
+            validate_identity(openclaw_identity_dir)
+            logger.info("OpenClaw executor configured: %s", openclaw_url)
+        except FileNotFoundError as exc:
+            logger.warning(
+                "OpenClaw executor configured but identity files are missing — "
+                "steps using executor: openclaw will fail until this is resolved. %s", exc
+            )
         executors["openclaw"] = functools.partial(
             OpenClawWSExecutor,
             gateway_url=openclaw_url,
+            identity_dir=openclaw_identity_dir,
         )
-        logger.info("OpenClaw executor configured: %s", openclaw_url)
 
     # Configure agent source URLs for the UI layer
     pork_gateway_rest = gateway_cfg.get("rest_url") or os.environ.get("PORK_GATEWAY_URL", "http://localhost:18780")

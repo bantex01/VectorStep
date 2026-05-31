@@ -558,6 +558,13 @@ Executors are registered by name in `src/executors/__init__.py` and referenced b
 | `model` | No | Model override, e.g. `anthropic/claude-sonnet-4-6`. Overrides the agent's configured model. |
 | `thinking_level` | No | `off\|minimal\|low\|medium\|high\|xhigh` — controls model thinking budget |
 
+**Service-level config** (under `executors.openclaw` in `config.yaml`, not per-step):
+
+| Key | Default | Description |
+|---|---|---|
+| `url` | `ws://127.0.0.1:18789/rpc` | OpenClaw Gateway WebSocket URL |
+| `identity_dir` | `~/.openclaw/identity` | Path to the directory containing `device.json` and `device-auth.json`. Override when OpenClaw is on a different machine and you have copied the identity files to a custom path. |
+
 ---
 
 #### `gateway` — P-Ork Gateway WebSocket
@@ -896,6 +903,24 @@ logging:
 - Separate Telegram bot for P-Ork HITL approval steps (different bot required)
 - MCP servers configured: `filesystem`, `grafana`, `grafana_google`, `tavily`, `atlassian`
 - Providers: Anthropic, OpenRouter (free tier), Ollama Cloud (`ollama-cloud/` prefix)
+
+### OpenClaw Identity Files
+
+The `openclaw` executor authenticates to the OpenClaw Gateway using **Ed25519 device-signature auth**. The required files are created automatically by OpenClaw — they are not something P-Ork creates:
+
+| File | Created by | Purpose |
+|---|---|---|
+| `~/.openclaw/identity/device.json` | OpenClaw on first run / `openclaw configure` | Device ID + Ed25519 private key |
+| `~/.openclaw/identity/device-auth.json` | OpenClaw device authorisation flow | Operator token + scopes |
+
+**Co-located setup (P-Ork and OpenClaw on the same machine):** the files are already present and everything works automatically.
+
+**Remote OpenClaw (gateway on a different machine):**
+1. Copy `~/.openclaw/identity/` from the OpenClaw machine to the P-Ork machine (or mount it as a Kubernetes Secret)
+2. Set `executors.openclaw.identity_dir` in `config.yaml` to the path where you copied the files
+3. On the OpenClaw machine, confirm P-Ork's device is approved: `openclaw devices list`
+
+**If the files are missing:** P-Ork logs a warning at startup and the `openclaw` executor is still registered, but any pipeline step using `executor: openclaw` will fail with a clear `FileNotFoundError` until the files are in place. The service continues to run normally — only openclaw steps are affected.
 
 ---
 
