@@ -248,11 +248,13 @@ async def ui_run_detail(request: Request, run_id: str):
             })
 
     normalised = json.loads(run.normalised_context) if run.normalised_context else {}
+    run_log = json.loads(run.logs) if run.logs else []
 
     return templates.TemplateResponse(request, "run_detail.html", {
         "run": run,
         "display_items": display_items,
         "normalised": normalised,
+        "run_log": run_log,
         "active_page": "runs",
     })
 

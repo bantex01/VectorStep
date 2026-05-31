@@ -200,4 +200,35 @@
 {% endfor %}
 </div>
 
+<!-- Run log -->
+{% if run_log %}
+<div x-data="{ open: false }" class="mt-6 bg-zinc-900 rounded-lg border border-zinc-800">
+  <button @click="open = !open"
+          class="w-full flex items-center justify-between px-5 py-3.5 text-left">
+    <div class="flex items-center gap-2">
+      <span class="text-sm font-semibold text-zinc-200">Run log</span>
+      <span class="text-xs text-zinc-500">({{ run_log | length }} events)</span>
+    </div>
+    <svg class="w-4 h-4 text-zinc-500 transition-transform" :class="open ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+    </svg>
+  </button>
+  <div x-show="open" x-cloak class="border-t border-zinc-800 px-5 py-4">
+    <div class="space-y-1 font-mono text-xs">
+      {% for entry in run_log %}
+      {% set time_part = entry.ts[11:23] if entry.ts | length >= 23 else entry.ts %}
+      <div class="flex items-start gap-3 py-0.5">
+        <span class="text-zinc-600 shrink-0 w-28">{{ time_part }}</span>
+        <span class="shrink-0 w-1.5 h-1.5 mt-1 rounded-full
+          {% if entry.level == 'error' %}bg-red-500
+          {% elif entry.level == 'warn' %}bg-amber-400
+          {% else %}bg-zinc-500{% endif %}"></span>
+        <span class="{% if entry.level == 'error' %}text-red-300{% elif entry.level == 'warn' %}text-amber-300{% else %}text-zinc-300{% endif %} leading-relaxed">{{ entry.msg }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% endblock %}

@@ -36,6 +36,17 @@ def _compute_backoff(retry: RetryConfig | None, attempt: int) -> float:
         return retry.delay_seconds
     return retry.delay_seconds * (2 ** (attempt - 1))
 
+
+def _log_event(run_log: list, level: str, event: str, msg: str, **extra) -> None:
+    run_log.append({
+        "ts": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+        "level": level,
+        "event": event,
+        "msg": msg,
+        **extra,
+    })
+
+
 # Built-in prompt used when a verifier fires.
 # Rendered with the same Jinja2 context as the primary step, plus:
 #   {{primary_prompt}}   — the rendered prompt that was sent to the primary agent
@@ -114,7 +125,11 @@ class PipelineRunner:
         run_id: str | None = None,
     ) -> PipelineRunResult:
         run_id = run_id or str(uuid.uuid4())
+        run_log: list[dict] = []
+
         logger.info("Pipeline run started: id=%s pipeline=%s", run_id, pipeline.name)
+        _log_event(run_log, "info", "run_started",
+                   f"Pipeline started: {pipeline.name} (source: {normalised.source})")
 
         await self._db_create_run(run_id, pipeline, normalised)
 
@@ -143,6 +158,9 @@ class PipelineRunner:
                 when_ctx = build_context(pipeline, normalised, run_id, step_name, step_outputs)
                 if not self._eval_when(step_when, when_ctx):
                     logger.info("Step '%s' skipped — when: condition was false", step_name)
+                    _log_event(run_log, "info", "step_skipped",
+                               f"Step skipped: {step_name} — when: condition was false",
+                               step=step_name)
                     continue
 
             if isinstance(step, ParallelGroupConfig):
@@ -153,6 +171,7 @@ class PipelineRunner:
                     normalised=normalised,
                     run_id=run_id,
                     step_outputs=step_outputs,
+                    run_log=run_log,
                 )
                 # Branches saved inside _run_parallel_group; register each individually
                 # so downstream steps can reference {{steps.branch_name.field}}
@@ -167,6 +186,7 @@ class PipelineRunner:
                     normalised=normalised,
                     run_id=run_id,
                     step_outputs=step_outputs,
+                    run_log=run_log,
                 )
                 await self._db_save_step(run_id, step, step_result)
                 if step_result.output:
@@ -190,6 +210,7 @@ class PipelineRunner:
                     pipeline=pipeline,
                     action="stopped",
                     context=stopped_ctx,
+                    run_log=run_log,
                 )
                 break
 
@@ -207,12 +228,15 @@ class PipelineRunner:
                         **build_context(pipeline, normalised, run_id, step_name, step_outputs),
                         **escalation_ctx,
                     },
+                    run_log=run_log,
                 )
                 break
 
             result.final_output = step_result.output
 
-        await self._db_complete_run(run_id, result.status)
+        _log_event(run_log, "info", "run_finished",
+                   f"Pipeline finished: {result.status}")
+        await self._db_complete_run(run_id, result.status, run_log)
 
         logger.info(
             "Pipeline run finished: id=%s pipeline=%s status=%s",
@@ -232,12 +256,18 @@ class PipelineRunner:
         normalised: NormalisedContext,
         run_id: str,
         step_outputs: dict[str, LLMOutput],
+        run_log: list,
     ) -> StepResult:
         start_ms = int(time.time() * 1000)
 
         ctx = build_context(pipeline, normalised, run_id, step.name, step_outputs)
 
-        logger.info("Executing step: %s (%d/%d)", step.name, index + 1, len(pipeline.steps))
+        agent = step.executor_config.get("agent", "")
+        agent_label = f"{step.executor} / {agent}" if agent else step.executor
+        logger.info("Executing step: run_id=%s step=%s (%d/%d)", run_id, step.name, index + 1, len(pipeline.steps))
+        _log_event(run_log, "info", "step_started",
+                   f"Step started: {step.name} [{agent_label}]",
+                   step=step.name, executor=step.executor, agent=agent or None)
 
         max_attempts = step.retry.attempts if step.retry else 1
         last_error: str | None = None
@@ -256,15 +286,19 @@ class PipelineRunner:
             except asyncio.TimeoutError:
                 last_error = f"Step timed out after {step.timeout_seconds}s"
                 logger.error(
-                    "Step '%s' %s (attempt %d/%d)",
-                    step.name, last_error, attempt, max_attempts,
+                    "Step '%s' run_id=%s %s (attempt %d/%d)",
+                    step.name, run_id, last_error, attempt, max_attempts,
                 )
+                _log_event(run_log, "error", "step_error",
+                           f"Step error: {step.name} — {last_error}", step=step.name)
             except Exception as exc:
                 last_error = f"Executor error: {type(exc).__name__}: {exc}"
                 logger.error(
-                    "Step '%s' %s (attempt %d/%d)",
-                    step.name, last_error, attempt, max_attempts,
+                    "Step '%s' run_id=%s %s (attempt %d/%d)",
+                    step.name, run_id, last_error, attempt, max_attempts,
                 )
+                _log_event(run_log, "error", "step_error",
+                           f"Step error: {step.name} — {last_error}", step=step.name)
 
             if attempt < max_attempts:
                 delay = _compute_backoff(step.retry, attempt)
@@ -272,6 +306,9 @@ class PipelineRunner:
                     "Retrying step '%s' in %.1fs (attempt %d/%d)",
                     step.name, delay, attempt + 1, max_attempts,
                 )
+                _log_event(run_log, "warn", "step_retrying",
+                           f"Retrying {step.name} in {delay:.1f}s (attempt {attempt + 1}/{max_attempts})",
+                           step=step.name)
                 await asyncio.sleep(delay)
 
         if last_error:
@@ -303,6 +340,7 @@ class PipelineRunner:
                 step=step,
                 ctx=ctx,
                 primary_output=primary_output,
+                run_log=run_log,
             )
             if verifier_output:
                 effective_confidence = self._combine_confidence(
@@ -317,6 +355,10 @@ class PipelineRunner:
                     verifier_output.confidence,
                     effective_confidence,
                 )
+                _log_event(run_log, "info", "verifier_ran",
+                           f"Verifier ran: {step.name} — primary {primary_output.confidence:.0%} / "
+                           f"verifier {verifier_output.confidence:.0%} → effective {effective_confidence:.0%}",
+                           step=step.name)
 
         if effective_confidence < step.confidence_threshold:
             action = step.on_low_confidence
@@ -324,7 +366,11 @@ class PipelineRunner:
                 "Step '%s' below confidence threshold (%.2f < %.2f): action=%s",
                 step.name, effective_confidence, step.confidence_threshold, action,
             )
+            conf_msg = (f"confidence {effective_confidence:.0%} < "
+                        f"threshold {step.confidence_threshold:.0%}")
             if action == "abort":
+                _log_event(run_log, "warn", "step_aborted",
+                           f"Step aborted: {step.name} — {conf_msg}", step=step.name)
                 return StepResult(
                     step_name=step.name,
                     step_index=index,
@@ -335,6 +381,8 @@ class PipelineRunner:
                     duration_ms=int(time.time() * 1000) - start_ms,
                 )
             if action == "escalate":
+                _log_event(run_log, "warn", "step_escalated",
+                           f"Step escalated: {step.name} — {conf_msg}", step=step.name)
                 return StepResult(
                     step_name=step.name,
                     step_index=index,
@@ -350,6 +398,10 @@ class PipelineRunner:
                 "Step '%s' returned proceed=false (confidence=%.2f) — resolving pipeline",
                 step.name, effective_confidence,
             )
+            _log_event(run_log, "info", "step_stopped",
+                       f"Step stopped pipeline: {step.name} — "
+                       f"{primary_output.proceed_reason or 'proceed=false'}",
+                       step=step.name)
             return StepResult(
                 step_name=step.name,
                 step_index=index,
@@ -360,6 +412,11 @@ class PipelineRunner:
                 duration_ms=int(time.time() * 1000) - start_ms,
             )
 
+        duration_ms = int(time.time() * 1000) - start_ms
+        _log_event(run_log, "info", "step_completed",
+                   f"Step completed: {step.name} — confidence {effective_confidence:.0%} "
+                   f"in {duration_ms / 1000:.1f}s",
+                   step=step.name)
         return StepResult(
             step_name=step.name,
             step_index=index,
@@ -367,7 +424,7 @@ class PipelineRunner:
             output=primary_output,
             verifier_output=verifier_output,
             effective_confidence=effective_confidence,
-            duration_ms=int(time.time() * 1000) - start_ms,
+            duration_ms=duration_ms,
         )
 
     # ------------------------------------------------------------------
@@ -382,6 +439,7 @@ class PipelineRunner:
         normalised: NormalisedContext,
         run_id: str,
         step_outputs: dict[str, LLMOutput],
+        run_log: list,
     ) -> StepResult:
         start_ms = int(time.time() * 1000)
         ctx = build_context(pipeline, normalised, run_id, group.name, step_outputs)
@@ -389,8 +447,13 @@ class PipelineRunner:
         logger.info(
             "Executing parallel group '%s' — %d branch(es)", group.name, len(group.steps)
         )
+        _log_event(run_log, "info", "parallel_group_started",
+                   f"Parallel group started: {group.name} ({len(group.steps)} branches)",
+                   group=group.name)
 
-        branch_coros = [self._run_parallel_branch(branch, ctx) for branch in group.steps]
+        branch_coros = [
+            self._run_parallel_branch(branch, ctx, run_log) for branch in group.steps
+        ]
 
         try:
             if group.timeout_seconds:
@@ -403,6 +466,8 @@ class PipelineRunner:
         except asyncio.TimeoutError:
             msg = f"Parallel group timed out after {group.timeout_seconds}s"
             logger.error("Parallel group '%s' %s", group.name, msg)
+            _log_event(run_log, "error", "parallel_group_failed",
+                       f"Parallel group timed out: {group.name}", group=group.name)
             return StepResult(
                 step_name=group.name,
                 step_index=index,
@@ -419,12 +484,18 @@ class PipelineRunner:
 
         for i, (branch, raw) in enumerate(zip(group.steps, raw_results)):
             if isinstance(raw, Exception):
-                # Unhandled exception escaped _run_parallel_branch — synthesise failure output
                 msg = f"Executor error: {type(raw).__name__}: {raw}"
                 logger.error("Branch '%s' raised unhandled exception: %s", branch.name, raw)
+                _log_event(run_log, "error", "branch_failed",
+                           f"Branch failed: {branch.name} — {msg}",
+                           branch=branch.name, group=group.name)
                 output = LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True)
             else:
                 output = raw
+                if not getattr(output, "failed", False):
+                    _log_event(run_log, "info", "branch_completed",
+                               f"Branch completed: {branch.name} — confidence {output.confidence:.0%}",
+                               branch=branch.name, group=group.name)
 
             branch_outputs[branch.name] = output
             confidences.append(output.confidence)
@@ -441,6 +512,10 @@ class PipelineRunner:
             [f"{c:.2f}" for c in confidences],
             effective_confidence,
         )
+        _log_event(run_log, "info", "parallel_group_completed",
+                   f"Parallel group completed: {group.name} — effective confidence "
+                   f"{effective_confidence:.0%} (join: {group.join})",
+                   group=group.name)
 
         completed = sum(1 for o in branch_outputs.values() if not getattr(o, "failed", False))
         group_output = LLMOutput(
@@ -483,6 +558,7 @@ class PipelineRunner:
         self,
         branch: ParallelStepConfig,
         ctx: dict,
+        run_log: list,
     ) -> LLMOutput:
         # Synthesise a StepConfig so we can reuse executor dispatch and verifier logic.
         # confidence_threshold=0.0 because gating happens at the group level, not per-branch.
@@ -513,7 +589,7 @@ class PipelineRunner:
             return LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True)
 
         if branch.verifier and self._should_verify(branch.verifier, output.confidence):
-            verifier_output = await self._run_verifier(branch_step, ctx, output)
+            verifier_output = await self._run_verifier(branch_step, ctx, output, run_log)
             if verifier_output:
                 adjusted = self._combine_confidence(
                     branch_step, output.confidence, verifier_output.confidence
@@ -523,6 +599,10 @@ class PipelineRunner:
                     "Branch '%s' verifier: primary=%.2f verifier=%.2f effective=%.2f",
                     branch.name, output.confidence, verifier_output.confidence, adjusted,
                 )
+                _log_event(run_log, "info", "verifier_ran",
+                           f"Verifier ran: {branch.name} — primary {output.confidence:.0%} / "
+                           f"verifier {verifier_output.confidence:.0%} → effective {adjusted:.0%}",
+                           branch=branch.name)
 
         logger.debug(
             "Branch '%s' confidence=%.2f summary=%s",
@@ -587,6 +667,7 @@ class PipelineRunner:
         step: StepConfig,
         ctx: dict,
         primary_output: LLMOutput,
+        run_log: list,
     ) -> LLMOutput | None:
         verifier = step.verifier
         assert verifier is not None
@@ -630,6 +711,8 @@ class PipelineRunner:
                 "Verifier for step '%s' failed: %s — using primary confidence only",
                 step.name, exc,
             )
+            _log_event(run_log, "warn", "verifier_failed",
+                       f"Verifier failed for {step.name}: {exc}", step=step.name)
             return None
 
     def _combine_confidence(
@@ -744,7 +827,7 @@ class PipelineRunner:
             ))
             await session.commit()
 
-    async def _db_complete_run(self, run_id: str, status: str) -> None:
+    async def _db_complete_run(self, run_id: str, status: str, run_log: list) -> None:
         if not self._session_factory:
             return
         from sqlalchemy import select
@@ -753,6 +836,7 @@ class PipelineRunner:
             if run:
                 run.status = status
                 run.completed_at = datetime.utcnow()
+                run.logs = json.dumps(run_log)
                 await session.commit()
 
     # ------------------------------------------------------------------
@@ -788,6 +872,7 @@ class PipelineRunner:
         pipeline: PipelineConfig,
         action: str,
         context: dict,
+        run_log: list,
     ) -> None:
         notifications = pipeline.notifications.get(action)
         if not notifications:
@@ -803,6 +888,9 @@ class PipelineRunner:
                 )
                 continue
             await notifier.send(notification, context)
+            _log_event(run_log, "info", "notification_sent",
+                       f"Notification sent: {action} → {notification.channel}",
+                       action=action, channel=notification.channel)
 
     # ------------------------------------------------------------------
     # Executor cache

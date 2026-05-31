@@ -20,6 +20,7 @@ class PipelineRun(Base):
     normalised_context: Mapped[str] = mapped_column(Text, nullable=False)  # JSON
     raw_payload: Mapped[str] = mapped_column(Text, nullable=False)         # JSON
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    logs: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array of run events
 
     steps: Mapped[list["PipelineStep"]] = relationship(
         "PipelineStep", back_populates="run", order_by="PipelineStep.step_index"

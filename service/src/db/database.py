@@ -29,6 +29,7 @@ async def create_tables() -> None:
 
 _MIGRATIONS = [
     "ALTER TABLE pipeline_steps ADD COLUMN verifier_mode TEXT",
+    "ALTER TABLE pipeline_runs ADD COLUMN logs TEXT",
 ]
 
 
