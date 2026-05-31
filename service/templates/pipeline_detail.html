@@ -174,12 +174,12 @@
 
       <div>
         <label class="block text-xs font-medium text-zinc-400 mb-1.5">
-          Data payload <span class="text-zinc-600">(optional JSON — lands in <code class="font-mono text-zinc-500">&#123;&#123;metadata&#125;&#125;</code>)</span>
+          Webhook payload <span class="text-zinc-600">(optional — paste a full generic webhook JSON; <code class="font-mono text-zinc-500">pipeline</code> is always set to this pipeline)</span>
         </label>
-        <textarea x-model="dataJson" rows="5"
+        <textarea x-model="dataJson" rows="8"
                   @input="jsonError = ''"
                   class="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm font-mono text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 resize-none"
-                  placeholder='{"key": "value"}'></textarea>
+                  :placeholder='`{\n  &quot;event&quot;: &quot;something.happened&quot;,\n  &quot;summary&quot;: &quot;...&quot;,\n  &quot;data&quot;: {}\n}`'></textarea>
         <p x-show="jsonError" x-text="jsonError" class="mt-1 text-xs text-red-400"></p>
       </div>
 
@@ -237,12 +237,17 @@ function runPanel(pipelineName) {
       this.jsonError = '';
       this.runError = '';
 
-      const body = { pipeline: pipelineName, source: 'ui' };
-      body.summary = this.summary.trim() || 'Manual trigger from UI';
+      let body = {
+        pipeline: pipelineName,
+        source: 'ui',
+        summary: this.summary.trim() || 'Manual trigger from UI',
+      };
 
       if (this.dataJson.trim()) {
         try {
-          body.data = JSON.parse(this.dataJson);
+          const parsed = JSON.parse(this.dataJson);
+          // Merge pasted payload as the top-level body; always force the correct pipeline
+          body = { ...body, ...parsed, pipeline: pipelineName };
         } catch (e) {
           this.jsonError = 'Invalid JSON: ' + e.message;
           return;
