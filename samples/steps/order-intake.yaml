@@ -1,0 +1,49 @@
+name: order-intake
+description: >
+  Reviews a new order and produces a dispatch brief and customer profile
+  for downstream steps. Confidence reflects how completely the order data
+  could be reasoned about.
+
+  Expects order fields in metadata: order_id, customer_name, customer_email,
+  items, total. These land in context via context_template.include.
+tags:
+  - order
+  - intake
+  - gateway
+
+executor: gateway
+executor_config:
+  agent: order-intake
+  session_key: "agent:order-intake:{{pipeline_run_id}}:{{current_step}}"
+
+confidence_threshold: 0.70
+on_low_confidence: escalate
+on_abort: notify
+timeout_seconds: 120
+
+prompt_template: |
+  A new order has been placed. Review it and produce a dispatch brief and a
+  customer profile summary for the next step.
+
+  Order summary: {{summary}}
+  Order ID: {{order_id}}
+  Customer: {{customer_name}} ({{customer_email}})
+  Items: {{items}}
+  Order total: ${{total}}
+
+  Set confidence based on how completely you could reason about the order —
+  did you have enough data to produce a useful brief and profile?
+
+  Return JSON only, no other text:
+  {
+    "confidence": 0.0,
+    "summary": "One sentence describing the order",
+    "dispatch_brief": "What needs to be picked, packed and shipped",
+    "customer_profile": "Short profile based on what they bought — interests, category affinity, likely use case",
+    "next_step_context": "Concise brief for the customer comms agent",
+    "reasoning": {
+      "supports": "Why this order is straightforward to process",
+      "contradicts": "Anything unusual or worth flagging",
+      "assumptions": "What you assumed in the absence of data"
+    }
+  }

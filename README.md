@@ -32,22 +32,32 @@ Primary use case is observability automation (alert triage, Grafana investigatio
 ## Project Structure
 
 ```
+samples/                      # Copy-and-adapt templates for new deployments (git controlled)
+├── config.yaml.example         # Annotated service config template
+├── pipelines/                  # Pipeline YAML templates — copy to service/pipelines/
+│   ├── alert-triage-investigation-using-steps.yaml
+│   ├── generic-webhook-new-order.yaml
+│   ├── human-approval-test.yaml
+│   └── otel-triage-verified.yaml
+└── steps/                      # Step definition templates — copy to service/steps/
+    ├── first-line-triage.yaml
+    ├── sre-investigation.yaml
+    ├── sre-investigation-verified.yaml
+    ├── order-intake.yaml
+    └── customer-comms.yaml
+
 service/
 ├── agents/                     # Agent SOUL.md drafts (copy into executor workspace)
 │   ├── order-intake/SOUL.md
 │   └── customer-comms/SOUL.md
-├── pipelines/                  # YAML pipeline configs (git controlled)
-│   ├── alert-triage-critical.yaml
-│   ├── feature-test.yaml
-│   ├── generic-webhook-new-order.yaml
-│   ├── human-approval-test.yaml
-│   ├── otel-triage-verified.yaml
-│   ├── pork-triage-test.yaml
-│   └── service-report.yaml
+├── pipelines/                  # Active pipeline configs (git controlled)
+│   └── *.yaml
+├── steps/                      # Reusable step library — gitignored, personal to deployment
+│   └── *.yaml                  # Copy from samples/steps/ and adapt (see §4a)
 ├── src/
 │   ├── main.py                 # FastAPI app entry point, lifespan, webhook endpoint
 │   ├── gateway.py              # Lightweight helper for calling OpenClaw Gateway WS API
-│   ├── ui.py                   # UI routes (agents library, run history)
+│   ├── ui.py                   # UI routes (pipeline/agent/step library, run history)
 │   ├── normaliser/
 │   │   ├── base.py             # BaseParser abstract class
 │   │   ├── alertmanager.py     # Alertmanager-specific parser
@@ -60,13 +70,13 @@ service/
 │   │   ├── human.py            # Human-in-the-loop executor (Telegram inline keyboard)
 │   │   └── webhook.py          # Webhook output executor (HTTP POST)
 │   ├── pipeline/
-│   │   ├── loader.py           # Loads and validates YAML pipeline configs
+│   │   ├── loader.py           # Loads pipelines and step library; resolves use: references
 │   │   ├── resolver.py         # Matches normalised context to a pipeline
-│   │   ├── runner.py           # Executes pipeline steps, manages flow control
+│   │   ├── runner.py           # Executes pipeline steps, manages flow control, emits run log
 │   │   └── context.py          # Builds and passes Jinja2 template context between steps
 │   ├── models/
 │   │   ├── context.py          # NormalisedContext Pydantic model
-│   │   ├── pipeline.py         # PipelineConfig, StepConfig, VerifierConfig Pydantic models
+│   │   ├── pipeline.py         # PipelineConfig, StepConfig, LibraryStepConfig Pydantic models
 │   │   └── llm.py              # LLMOutput Pydantic model (step output contract)
 │   ├── db/
 │   │   ├── database.py         # SQLAlchemy engine, session management
@@ -76,10 +86,13 @@ service/
 │       ├── telegram_poller.py  # Long-poll loop for HITL Telegram button callbacks
 │       └── webhook.py          # Webhook notification handler
 ├── templates/                  # Jinja2 HTML templates for the UI
+├── logs/                       # Rotating log files (auto-created, gitignored)
+│   ├── service.log             # Application logs (10 MB × 5 files)
+│   └── access.log              # HTTP access logs, separated from service logs
 ├── tests/
 │   └── fixtures/               # Test webhook payloads (alertmanager, generic, etc.)
 ├── Dockerfile
-├── config.yaml                 # Service-level config (port, dirs, executor settings)
+├── config.yaml                 # Service-level config — gitignored, copy from samples/config.yaml.example
 └── requirements.txt
 ```
 
@@ -250,6 +263,59 @@ schedule:                        # optional — omit for webhook-only pipelines
     service: my-service
     environment: prod
 ```
+
+---
+
+### 4a. Step Library — Reusable Step Definitions
+
+Named step definitions live in `step_library_dir` (default `./steps`). Each file defines a reusable step config that pipelines can reference by name using a `use:` key. The loader resolves references before Pydantic validation, so the runner is completely unaware of the library mechanism.
+
+**Library step file (`steps/sre-investigation.yaml`):**
+```yaml
+name: sre-investigation
+description: Grafana RED metrics investigation — updates Jira with findings
+tags: [investigation, grafana, openclaw]
+
+executor: openclaw
+executor_config:
+  agent: sre-investigation
+  session_key: "agent:sre-investigation:{{pipeline_run_id}}:{{current_step}}"
+confidence_threshold: 0.60
+on_low_confidence: escalate
+timeout_seconds: 1200
+prompt_template: |
+  ... default prompt ...
+```
+
+**Referencing a library step in a pipeline:**
+```yaml
+steps:
+  - use: first-line-triage          # fully inherits the library step
+
+  - use: sre-investigation          # inherit config, override just the threshold
+    confidence_threshold: 0.80
+
+  - use: sre-investigation          # add a model override — executor_config is deep-merged
+    executor_config:                # so agent/session_key are still inherited
+      model: anthropic/claude-opus-4-8
+
+  - use: sre-investigation          # custom prompt for this pipeline
+    prompt_template: |
+      Pipeline-specific prompt referencing {{steps.first_line_triage.summary}} ...
+```
+
+**Merge rules:**
+- All top-level fields: local value wins if present, library value is the default.
+- `executor_config` only: **deep-merged** — local keys add to or override library keys, rather than replacing the whole block. This lets you add `model` or `thinking_level` without repeating `agent` and `session_key`.
+- `description` and `tags` are library-only metadata and are stripped before the step is passed to the runner.
+
+**Step library UI:** the `/ui/steps` page shows all loaded library steps with their executor/agent, confidence threshold, tags, which pipelines reference each step, and a copy button for the `- use: step-name` snippet.
+
+**Hot reload:** `POST /reload` and SIGHUP reload the step library first, then re-resolve all pipeline references against the updated library.
+
+**The `steps/` directory is gitignored.** Step definitions reference your specific agents, session key patterns, and confidence thresholds — they are personal to your deployment, like `config.yaml`. Copy the starter definitions from `samples/steps/` into `service/steps/` and adapt them to your agents.
+
+**All templates** live in `samples/` at the repo root — `samples/pipelines/` for pipeline YAMLs and `samples/steps/` for step definitions. These are committed reference files. Copy them into the appropriate `service/` subdirectory and fill in your details.
 
 ---
 
@@ -689,6 +755,7 @@ retry:
 | `normalised_context` | json | Full NormalisedContext at trigger time |
 | `raw_payload` | json | Original unmodified webhook payload |
 | `completed_at` | datetime, nullable | |
+| `logs` | json, nullable | Structured run event log — array of `{ts, level, event, msg}` objects. Populated at run completion. Events cover step start/complete/fail/skip/escalate/abort, verifier results, parallel group outcomes, and notifications sent. |
 
 **pipeline_steps**
 
@@ -718,7 +785,7 @@ retry:
 POST /webhook?source=<source>
 # → {"status": "accepted", "run_id": "<uuid>"}
 
-# Reload all pipeline YAMLs from disk without restarting
+# Reload step library and all pipeline YAMLs from disk without restarting
 POST /reload
 # → {"status": "reloaded", "pipelines_loaded": 3}
 
@@ -743,15 +810,34 @@ GET /pipelines
 
 ---
 
-## Agent Library (UI)
+## UI
+
+The web UI is served under `/ui` and provides the following pages:
+
+| Page | Route | Description |
+|---|---|---|
+| Dashboard | `/ui/` | 24h run counts by status, success rate, pipeline activity, recent runs |
+| Runs | `/ui/runs` | Filterable run history with status and pipeline filters |
+| Run detail | `/ui/runs/{id}` | Full step breakdown with confidence bars, parsed output, verifier results, and collapsible run log |
+| Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status and run counts |
+| Pipeline detail | `/ui/pipelines/{name}` | Config summary, recent runs, YAML viewer, and **Run now** button |
+| Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, and copy-ref button |
+| Agents | `/ui/agents` | Unified agent library across all executor backends |
+| Schedules | `/ui/schedules` | Active cron schedules with next-run times |
+
+### Running a pipeline manually
+
+Every pipeline detail page has a **Run now** button. This opens a modal where you can optionally set a summary and paste a full generic webhook payload (JSON). On submit it POSTs to `POST /webhook?source=generic` with `pipeline` forced to the current pipeline name. A banner appears with a link to the new run.
+
+### Run log
+
+Each completed run stores a structured event timeline in `pipeline_runs.logs`. The run detail page shows this as a collapsible log section with timestamped, colour-coded entries (info / warn / error) covering every step start, confidence score, verifier result, skip, escalation, notification, and final status.
+
+### Agent Library
 
 The `/ui/agents` page provides a unified library of agents across all configured executor backends. Agents are fetched live from each backend and merged into a single list with executor badges.
 
-### Executor-prefixed agent identity
-
 Agents are uniquely identified by `executor:name` — e.g. `openclaw:sre-investigation` and `gateway:sre-investigation` are treated as distinct agents. This prefix is stored in `pipeline_steps.agent` so run history, success rates, and model usage are attributed correctly per backend.
-
-### Per-executor discovery
 
 | Executor | Agent list | Soul / Tools files |
 |---|---|---|
@@ -772,6 +858,7 @@ server:
   port: 8000
 
 pipeline_config_dir: ./pipelines
+step_library_dir: ./steps            # reusable step definitions; omit to disable library
 
 database:
   url: sqlite+aiosqlite:///./runs.db
@@ -791,6 +878,8 @@ executors:
 
 logging:
   level: INFO
+  dir: ./logs                          # omit to disable file logging (stdout only)
+                                       # creates service.log and access.log (rotating, 10 MB × 5)
 ```
 
 `${ENV_VAR}` placeholders are resolved at startup. Unresolved placeholders become `""`.
@@ -849,6 +938,14 @@ curl -X POST "http://localhost:8000/webhook?source=generic" \
 
 No other changes required in either case.
 
+## Adding a Library Step
+
+1. Create `steps/<your-step-name>.yaml` with at minimum `name`, `executor`, and `executor_config.agent`
+2. Run `POST /reload` (or send SIGHUP) — the step will appear in `/ui/steps` immediately
+3. Reference it in any pipeline with `- use: <your-step-name>`
+
+The `steps/` directory is gitignored — steps are personal to your deployment. Copy starter definitions from `samples/steps/` and adapt them, or write your own. See `samples/pipelines/alert-triage-investigation-using-steps.yaml` for a worked example of a pipeline that uses library steps.
+
 ---
 
 ## Key Design Decisions
@@ -867,6 +964,10 @@ No other changes required in either case.
 | `executor:name` agent identity in DB | Disambiguates same agent name across different backends in run history and success rates |
 | In-process APScheduler for cron | Zero extra infrastructure; same DB and runner code path as webhooks |
 | `POST /reload` + SIGHUP | Config-driven system should never need a restart for a YAML edit |
+| Step library with `use:` references | Eliminates step config duplication across pipelines; resolved at load time so runner is unaffected |
+| `executor_config` deep-merge on library steps | Lets pipelines add `model` or `thinking_level` without repeating the full agent/session_key block |
+| Structured run event log in DB | Per-run timeline queryable from the UI without grepping stdout; survives process restarts |
+| `uvicorn.access` separated from service logs | HTTP request noise no longer pollutes run event output on stdout or in service.log |
 
 ---
 
@@ -889,6 +990,8 @@ Build for ARM64:
 docker buildx build --platform linux/arm64 -t orchestration-service:latest .
 ```
 
-Pipeline configs delivered via Kubernetes ConfigMap mounted at `/app/pipelines/`.
+Pipeline configs (from `samples/pipelines/` or your own) delivered via Kubernetes ConfigMap mounted at `/app/pipelines/`.
+Step library (from `samples/steps/` or your own) delivered via a separate ConfigMap mounted at `/app/steps/`.
 SQLite database on a PersistentVolumeClaim.
 Secrets (tokens) via Kubernetes Secrets as environment variables.
+Log files written to a PersistentVolumeClaim or redirected to stdout by omitting `logging.dir`.

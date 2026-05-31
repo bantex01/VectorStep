@@ -1,0 +1,53 @@
+name: first-line-triage
+description: >
+  First-line alert triage — looks up service documentation in Confluence,
+  raises a Jira bug ticket, and produces a focused investigation brief for
+  the next step. Confidence reflects task completion, not alert severity.
+
+  Required pipeline vars: confluence_space, confluence_space_url,
+  confluence_service_docs_folder, confluence_service_doc_name,
+  service_doc_schema, jira_project, jira_project_url
+tags:
+  - triage
+  - confluence
+  - jira
+  - openclaw
+
+executor: openclaw
+executor_config:
+  agent: first-line-support
+  session_key: "agent:first-line-support:{{pipeline_run_id}}:{{current_step}}"
+
+confidence_threshold: 0.60
+on_low_confidence: escalate
+on_abort: notify
+timeout_seconds: 300
+
+prompt_template: |
+  Alert severity: {{severity}}
+  Service: {{labels.service}}
+  Environment: {{labels.environment}}
+  Summary: {{summary}}
+
+  Confluence space: {{confluence_space}} ({{confluence_space_url}})
+  Service doc: "{{confluence_service_doc_name}}" in folder "{{confluence_service_docs_folder}}"
+  Expected doc sections: {{service_doc_schema}}
+  Jira project: {{jira_project}} ({{jira_project_url}})
+
+  1. Look up the service documentation in Confluence.
+  2. Raise a Jira issue type "Bug" for this alert in project {{jira_project}}.
+  3. Set confidence based on how completely you executed steps 1–2 — not on alert severity.
+
+  Return ONLY this JSON, no other text:
+  {
+    "confidence": 0.0,
+    "doc_found": true,
+    "summary": "One sentence: what is happening and how serious",
+    "jira_ticket": "{{jira_project}}-<number>",
+    "next_step_context": "Focused investigation brief for the next step",
+    "reasoning": {
+      "supports": "Evidence that makes this alert credible",
+      "contradicts": "Evidence that suggests noise or false positive",
+      "assumptions": "What you are assuming in the absence of data"
+    }
+  }

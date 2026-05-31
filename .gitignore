@@ -53,5 +53,6 @@ htmlcov/
 
 alertmanager/
 service/config.yaml
+service/steps/
 runs.db
 service/runs.db
