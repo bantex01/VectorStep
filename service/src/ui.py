@@ -83,8 +83,24 @@ def _source_label(source: str) -> str:
     )
 
 
+class _LiteralBlockDumper(yaml.Dumper):
+    pass
+
+
+def _literal_str(dumper, data):
+    if "\n" in data:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+
+_LiteralBlockDumper.add_representer(str, _literal_str)
+
+
 def _to_yaml(obj) -> str:
-    return yaml.dump(obj, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    return yaml.dump(
+        obj, Dumper=_LiteralBlockDumper,
+        default_flow_style=False, allow_unicode=True, sort_keys=False,
+    )
 
 
 templates.env.filters["to_yaml"] = _to_yaml

@@ -82,7 +82,7 @@
         <!-- Right: copy ref + expand -->
         <div class="flex items-center gap-2 shrink-0">
           <button
-            @click="navigator.clipboard.writeText('- use: {{ step.name }}').then(() => { copied = true; setTimeout(() => copied = false, 2000) })"
+            @click="copyToClipboard('- use: {{ step.name }}').then(() => { copied = true; setTimeout(() => copied = false, 2000) })"
             class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border border-zinc-700 hover:border-zinc-500 text-zinc-300 hover:text-zinc-100 transition-colors">
             <svg x-show="!copied" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
@@ -113,4 +113,27 @@
 </div>
 {% endif %}
 
+{% endblock %}
+
+{% block scripts %}
+<script>
+function copyToClipboard(text) {
+  // Use Clipboard API where available (HTTPS / localhost).
+  // Fall back to execCommand for plain-HTTP local installs.
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve) => {
+    const el = document.createElement('textarea');
+    el.value = text;
+    el.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(el);
+    el.focus();
+    el.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(el);
+    resolve();
+  });
+}
+</script>
 {% endblock %}
