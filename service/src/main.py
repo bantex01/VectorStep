@@ -65,15 +65,19 @@ def _setup_logging(config: dict) -> None:
     root.addHandler(stdout_handler)
 
     if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
+        abs_log_dir = os.path.abspath(log_dir)
+        os.makedirs(abs_log_dir, exist_ok=True)
         service_handler = RotatingFileHandler(
-            os.path.join(log_dir, "service.log"),
+            os.path.join(abs_log_dir, "service.log"),
             maxBytes=10 * 1024 * 1024,
             backupCount=5,
             encoding="utf-8",
         )
         service_handler.setFormatter(formatter)
         root.addHandler(service_handler)
+        logging.getLogger(__name__).info("File logging enabled: %s", abs_log_dir)
+    else:
+        logging.getLogger(__name__).info("File logging disabled (logging.dir not set)")
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -84,7 +88,7 @@ def _setup_logging(config: dict) -> None:
     access_logger.handlers.clear()
     if log_dir:
         access_handler = RotatingFileHandler(
-            os.path.join(log_dir, "access.log"),
+            os.path.join(abs_log_dir, "access.log"),
             maxBytes=10 * 1024 * 1024,
             backupCount=5,
             encoding="utf-8",
