@@ -8,6 +8,22 @@
 </nav>
 {% endblock %}
 {% block content %}
+<div x-data="runPanel('{{ pipeline.name }}')">
+
+<!-- Success banner -->
+<div x-show="runResult" x-transition
+     class="mb-4 flex items-center justify-between gap-4 bg-green-950 border border-green-800 rounded-lg px-4 py-3 text-sm text-green-300">
+  <span>
+    Run accepted —
+    <a :href="'/ui/runs/' + runResult?.run_id" class="underline underline-offset-2 hover:text-green-200" x-text="'#' + (runResult?.run_id?.slice(0,8) ?? '')"></a>
+    is now running.
+  </span>
+  <button @click="runResult = null" class="text-green-500 hover:text-green-300">
+    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+    </svg>
+  </button>
+</div>
 
 <!-- Header -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 mb-6">
@@ -29,23 +45,32 @@
         <p class="text-sm text-zinc-400">{{ pipeline.description }}</p>
       {% endif %}
     </div>
-    {% if total_runs > 0 %}
-    <div class="flex items-center gap-6 text-right">
-      <div>
-        <p class="text-2xl font-semibold text-zinc-50">{{ total_runs }}</p>
-        <p class="text-xs text-zinc-500">total runs</p>
-      </div>
-      {% set completed = status_counts.get('completed', 0) %}
-      {% set terminal = total_runs - status_counts.get('running', 0) %}
-      {% if terminal > 0 %}
-      <div>
-        {% set rate = (completed / terminal * 100)|round|int %}
-        <p class="text-2xl font-semibold {% if rate >= 80 %}text-green-400{% elif rate >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">{{ rate }}%</p>
-        <p class="text-xs text-zinc-500">success rate</p>
+    <div class="flex items-center gap-6">
+      {% if total_runs > 0 %}
+      <div class="flex items-center gap-6 text-right">
+        <div>
+          <p class="text-2xl font-semibold text-zinc-50">{{ total_runs }}</p>
+          <p class="text-xs text-zinc-500">total runs</p>
+        </div>
+        {% set completed = status_counts.get('completed', 0) %}
+        {% set terminal = total_runs - status_counts.get('running', 0) %}
+        {% if terminal > 0 %}
+        <div>
+          {% set rate = (completed / terminal * 100)|round|int %}
+          <p class="text-2xl font-semibold {% if rate >= 80 %}text-green-400{% elif rate >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">{{ rate }}%</p>
+          <p class="text-xs text-zinc-500">success rate</p>
+        </div>
+        {% endif %}
       </div>
       {% endif %}
+      <button @click="openModal()"
+              class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+        <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M8 5v14l11-7z"/>
+        </svg>
+        Run now
+      </button>
     </div>
-    {% endif %}
   </div>
 
   <!-- Metadata grid -->
@@ -124,4 +149,127 @@
   </div>
 </div>
 
+<!-- Run modal -->
+<div x-show="modalOpen" x-transition.opacity
+     class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+     @keydown.escape.window="closeModal()">
+  <div class="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full max-w-lg"
+       @click.stop>
+    <div class="flex items-center justify-between px-6 py-4 border-b border-zinc-800">
+      <h2 class="text-base font-semibold text-zinc-100">Run pipeline</h2>
+      <button @click="closeModal()" class="text-zinc-500 hover:text-zinc-300">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="px-6 py-5 space-y-4">
+      <div>
+        <label class="block text-xs font-medium text-zinc-400 mb-1.5">Summary <span class="text-zinc-600">(optional)</span></label>
+        <input type="text" x-model="summary"
+               class="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+               placeholder="Manual trigger from UI">
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-zinc-400 mb-1.5">
+          Data payload <span class="text-zinc-600">(optional JSON — lands in <code class="font-mono text-zinc-500">&#123;&#123;metadata&#125;&#125;</code>)</span>
+        </label>
+        <textarea x-model="dataJson" rows="5"
+                  @input="jsonError = ''"
+                  class="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm font-mono text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 resize-none"
+                  placeholder='{"key": "value"}'></textarea>
+        <p x-show="jsonError" x-text="jsonError" class="mt-1 text-xs text-red-400"></p>
+      </div>
+
+      <p x-show="runError" x-text="runError" class="text-xs text-red-400 bg-red-950 border border-red-800 rounded-md px-3 py-2"></p>
+    </div>
+
+    <div class="flex justify-end gap-3 px-6 py-4 border-t border-zinc-800">
+      <button @click="closeModal()"
+              class="px-4 py-2 rounded-md text-sm font-medium text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800 transition-colors">
+        Cancel
+      </button>
+      <button @click="triggerRun()" :disabled="running"
+              class="inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors">
+        <svg x-show="running" class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+        </svg>
+        <svg x-show="!running" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M8 5v14l11-7z"/>
+        </svg>
+        <span x-text="running ? 'Running…' : 'Run now'"></span>
+      </button>
+    </div>
+  </div>
+</div>
+
+</div><!-- end x-data wrapper -->
+{% endblock %}
+
+{% block scripts %}
+<script>
+function runPanel(pipelineName) {
+  return {
+    modalOpen: false,
+    summary: '',
+    dataJson: '',
+    jsonError: '',
+    running: false,
+    runResult: null,
+    runError: '',
+
+    openModal() {
+      this.modalOpen = true;
+      this.summary = '';
+      this.dataJson = '';
+      this.jsonError = '';
+      this.runError = '';
+    },
+
+    closeModal() {
+      if (!this.running) this.modalOpen = false;
+    },
+
+    async triggerRun() {
+      this.jsonError = '';
+      this.runError = '';
+
+      const body = { pipeline: pipelineName, source: 'ui' };
+      body.summary = this.summary.trim() || 'Manual trigger from UI';
+
+      if (this.dataJson.trim()) {
+        try {
+          body.data = JSON.parse(this.dataJson);
+        } catch (e) {
+          this.jsonError = 'Invalid JSON: ' + e.message;
+          return;
+        }
+      }
+
+      this.running = true;
+      try {
+        const resp = await fetch('/webhook?source=generic', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          this.runError = data.detail || `Error ${resp.status}`;
+          return;
+        }
+        this.runResult = data;
+        this.modalOpen = false;
+      } catch (e) {
+        this.runError = 'Request failed: ' + e.message;
+      } finally {
+        this.running = false;
+      }
+    },
+  };
+}
+</script>
 {% endblock %}
