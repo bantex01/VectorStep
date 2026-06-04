@@ -42,3 +42,7 @@ logging:
   level: INFO
   dir: ./logs   # omit to disable file logging (stdout only)
                 # creates service.log (app logs) and access.log (HTTP) — rotating, 10 MB x 5
+
+artifacts:
+  dir: ./artifacts      # omit this block entirely to disable artifact storage
+  retention_days: 7     # artifact directories older than this are removed daily at 02:00

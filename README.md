@@ -346,6 +346,10 @@ class LLMOutput(BaseModel):
                                    # contradicts, assumptions. Available downstream as
                                    # {{steps.name.reasoning.supports}} etc.
 
+    # --- Artifacts (optional) ---
+    artifacts: dict | None = None  # {name: content} — runner writes to disk, replaces
+                                   # content with references. See §5a.
+
     # --- Set by the executor (agents must NOT include these) ---
     model: str | None = None      # Populated from API metadata by the executor.
     raw_response: dict = {}       # Full unparsed response for audit. Set by executor.
@@ -363,6 +367,7 @@ class LLMOutput(BaseModel):
 | `proceed` | No | Defaults to `true`. Only set `false` when the pipeline should stop cleanly. |
 | `proceed_reason` | No | Include whenever `proceed: false` to make the stop auditable. |
 | `reasoning` | No | Recommended for triage/analysis steps; improves verifier quality. |
+| `artifacts` | No | `{name: content}` dict. Runner writes each value to disk; content is not stored in the database. See §5a. |
 | `model` | No | Do not include — the executor sets this from API metadata. |
 | `raw_response` | No | Do not include — set by the executor. |
 | Any extra field | No | Freely add domain fields (`jira_ticket`, `action`, etc.). All are stored and accessible downstream. |
@@ -404,6 +409,70 @@ Hyphens in step names must be written as underscores in template references:
   }
 }
 ```
+
+---
+
+### 5a. Artifact Storage
+
+Steps can produce large artifacts (research reports, scraped data, compiled documents) that would be unwieldy to pass inline through `next_step_context`. The artifact store writes these to disk, keeps them out of the database, and makes them available in downstream prompt templates by content — not by reference.
+
+#### Producing an artifact
+
+An agent returns an `artifacts` dict alongside its normal `LLMOutput` fields. Each key is a name chosen by the agent; each value is the full text content:
+
+```json
+{
+  "confidence": 0.9,
+  "summary": "Research complete — 3 sources compiled",
+  "next_step_context": "Coverage spans Q1–Q4 2025",
+  "artifacts": {
+    "research_report": "# Research Report\n\n## Source 1\n..."
+  }
+}
+```
+
+The runner intercepts the `artifacts` field before anything is stored in the database. The content is written to `{artifacts_dir}/{run_id}/{step_name}/{key}` and replaced with an opaque reference string (`local://...`). SQLite only stores the reference; the blob lives on disk.
+
+#### Consuming an artifact
+
+Downstream steps reference artifact content in their prompt templates using `{{artifacts.step_name.key}}`. The runner loads the content from disk at render time — only for the steps that actually reference it.
+
+```yaml
+steps:
+  - name: research
+    executor: openclaw
+    executor_config:
+      agent: web-researcher
+    prompt_template: |
+      Research the topic and compile a full report.
+      Return JSON with the usual fields plus an "artifacts" key:
+      {"confidence": ..., "summary": ..., "next_step_context": ...,
+       "artifacts": {"research_report": "..."}}
+
+  - name: proofread
+    executor: openclaw
+    executor_config:
+      agent: editor
+    prompt_template: |
+      Proofread and improve the following document:
+
+      {{artifacts.research.research_report}}
+
+      Return the corrected document as an artifact named "final_report".
+```
+
+Hyphens in step names follow the same rule as `steps.*` references — use underscores in template expressions:
+
+```
+# Step named "web-research" is referenced as:
+{{artifacts.web_research.report}}
+```
+
+#### Lifecycle and cleanup
+
+Artifact directories are scoped to a run (`{artifacts_dir}/{run_id}/`). A daily APScheduler job (02:00) removes directories for runs older than `retention_days`. Failed runs retain their artifacts for the same period, which is useful for debugging.
+
+To disable artifact storage entirely, omit the `artifacts:` block from `config.yaml`. Steps that return an `artifacts` field will have it passed through as a regular extra field rather than being written to disk.
 
 ---
 
@@ -725,6 +794,7 @@ Jinja2 renders prompt templates with a context dict containing:
 - `{{pipeline_name}}` — name of the current pipeline
 - `{{current_step}}` — name of the current step
 - `{{steps.step_name.field}}` — output fields from any previously completed step (hyphens → underscores: `first-line-triage` → `steps.first_line_triage`)
+- `{{artifacts.step_name.key}}` — full text content of an artifact produced by a prior step (requires `artifacts:` config block; hyphens → underscores same as above). See §5a.
 - `{{labels.service}}`, `{{labels.environment}}` etc. — `labels` dict is always present
 
 ### 12. Session Keys
@@ -784,6 +854,7 @@ retry:
 | `effective_confidence` | float | Confidence used for threshold gate (post-combination) |
 | `duration_ms` | int | |
 | `executed_at` | datetime | |
+| `artifacts` | json, nullable | `{key: reference}` map — references are opaque strings pointing to artifact files on disk. Content is not stored in the DB. |
 
 ### 15. Management Endpoints
 
@@ -887,6 +958,10 @@ logging:
   level: INFO
   dir: ./logs                          # omit to disable file logging (stdout only)
                                        # creates service.log and access.log (rotating, 10 MB × 5)
+
+artifacts:
+  dir: ./artifacts                     # omit this block entirely to disable artifact storage
+  retention_days: 7                    # artifact directories older than this are removed daily at 02:00
 ```
 
 `${ENV_VAR}` placeholders are resolved at startup. Unresolved placeholders become `""`.
@@ -987,6 +1062,9 @@ The `steps/` directory is gitignored — steps are personal to your deployment. 
 | Adapter pattern for executors | Swap or mix backends with config changes only; steps in the same pipeline can use different executors |
 | Runner owns flow decisions | LLM recommends, service decides — never blindly chain prompts |
 | `executor:name` agent identity in DB | Disambiguates same agent name across different backends in run history and success rates |
+| Artifact content on disk, not in DB | SQLite is not a blob store; large documents stay in the filesystem. DB row holds only the reference. |
+| `{{artifacts.step.key}}` explicit namespace | Template authors know they are pulling a potentially large blob. Keeps `when:` conditions and `steps.*` references unambiguous. |
+| `LocalArtifactStore` behind ABC | Swapping in S3 or another backend requires only a new class implementing four methods — no runner or config changes. |
 | In-process APScheduler for cron | Zero extra infrastructure; same DB and runner code path as webhooks |
 | `POST /reload` + SIGHUP | Config-driven system should never need a restart for a YAML edit |
 | Step library with `use:` references | Eliminates step config duplication across pipelines; resolved at load time so runner is unaffected |

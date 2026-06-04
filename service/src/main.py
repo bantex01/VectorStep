@@ -110,6 +110,8 @@ _step_library_dir: str = "./steps"
 _scheduler: AsyncIOScheduler | None = None
 _app_ref: "FastAPI | None" = None
 _poller_task: asyncio.Task | None = None
+_artifact_store = None
+_artifact_retention_days: int = 7
 
 
 def _load_config() -> dict:
@@ -202,9 +204,23 @@ async def _run_scheduled_pipeline(pipeline_name: str) -> None:
     await _run_pipeline(pipeline, normalised)
 
 
+async def _cleanup_artifacts() -> None:
+    from datetime import timedelta, timezone
+    if _artifact_store is None:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_artifact_retention_days)
+    run_ids = await _artifact_store.runs_older_than(cutoff)
+    if not run_ids:
+        return
+    for run_id in run_ids:
+        await _artifact_store.delete_run(run_id)
+        logger.info("Artifact cleanup: removed run %s", run_id)
+    logger.info("Artifact cleanup complete: removed %d run(s)", len(run_ids))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task
+    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task, _artifact_store, _artifact_retention_days
     _app_ref = app
 
     config = _load_config()
@@ -296,11 +312,25 @@ async def lifespan(app: FastAPI):
         pork_gateway_rest,
     )
 
+    # Artifact store
+    artifacts_cfg = config.get("artifacts", {})
+    _artifact_retention_days = int(artifacts_cfg.get("retention_days", 7))
+    if "dir" in artifacts_cfg:
+        from .artifacts import LocalArtifactStore
+        _artifact_store = LocalArtifactStore(base_dir=artifacts_cfg["dir"])
+        logger.info(
+            "Artifact store configured: %s (retention: %d days)",
+            artifacts_cfg["dir"], _artifact_retention_days,
+        )
+    else:
+        _artifact_store = None
+
     # Runner
     _runner = PipelineRunner(
         executors=executors,
         session_factory=get_session_factory(),
         notifiers=notifiers,
+        artifact_store=_artifact_store,
     )
 
     # Scheduler
@@ -311,6 +341,17 @@ async def lifespan(app: FastAPI):
 
     _scheduler = AsyncIOScheduler()
     _register_schedules(_pipelines)
+    if _artifact_store is not None:
+        _scheduler.add_job(
+            _cleanup_artifacts,
+            CronTrigger.from_crontab("0 2 * * *"),
+            id="artifact:cleanup",
+            replace_existing=True,
+        )
+        logger.info(
+            "Artifact cleanup scheduled (daily at 02:00, retention: %d days)",
+            _artifact_retention_days,
+        )
     _scheduler.start()
     app.state.scheduler = _scheduler
     logger.info("Scheduler started")
@@ -496,6 +537,7 @@ def _format_step(step: PipelineStep) -> dict:
         "duration_ms": step.duration_ms,
         "executed_at": step.executed_at.isoformat(),
         "parsed_output": json.loads(step.parsed_output) if step.parsed_output else None,
+        "artifacts": json.loads(step.artifacts) if step.artifacts else None,
     }
 
 

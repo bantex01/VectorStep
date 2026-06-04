@@ -9,6 +9,7 @@ from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..artifacts.store import ArtifactStore
 from ..db.models import PipelineRun, PipelineStep
 from ..executors.base import BaseExecutor
 from ..models.context import NormalisedContext
@@ -112,11 +113,13 @@ class PipelineRunner:
         executors: dict[str, type[BaseExecutor]],
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         notifiers: dict[str, TelegramNotifier] | None = None,
+        artifact_store: ArtifactStore | None = None,
     ):
         self._executor_classes = executors
         self._executor_instances: dict[str, BaseExecutor] = {}
         self._session_factory = session_factory
         self._notifiers: dict[str, TelegramNotifier] = notifiers or {}
+        self._artifact_store = artifact_store
 
     async def run(
         self,
@@ -155,7 +158,7 @@ class PipelineRunner:
 
             # Evaluate when: condition before doing any work
             if step_when is not None:
-                when_ctx = build_context(pipeline, normalised, run_id, step_name, step_outputs)
+                when_ctx = await build_context(pipeline, normalised, run_id, step_name, step_outputs)
                 if not self._eval_when(step_when, when_ctx):
                     logger.info("Step '%s' skipped — when: condition was false", step_name)
                     _log_event(run_log, "info", "step_skipped",
@@ -202,7 +205,7 @@ class PipelineRunner:
                     step_name,
                     step_result.output.summary if step_result.output else "",
                 )
-                stopped_ctx = build_context(pipeline, normalised, run_id, step_name, step_outputs)
+                stopped_ctx = await build_context(pipeline, normalised, run_id, step_name, step_outputs)
                 if step_result.output:
                     stopped_ctx["step_summary"] = step_result.output.summary
                     stopped_ctx["proceed_reason"] = step_result.output.proceed_reason or ""
@@ -225,7 +228,7 @@ class PipelineRunner:
                     pipeline=pipeline,
                     action=action,
                     context={
-                        **build_context(pipeline, normalised, run_id, step_name, step_outputs),
+                        **await build_context(pipeline, normalised, run_id, step_name, step_outputs),
                         **escalation_ctx,
                     },
                     run_log=run_log,
@@ -260,7 +263,10 @@ class PipelineRunner:
     ) -> StepResult:
         start_ms = int(time.time() * 1000)
 
-        ctx = build_context(pipeline, normalised, run_id, step.name, step_outputs)
+        ctx = await build_context(
+            pipeline, normalised, run_id, step.name, step_outputs,
+            artifact_store=self._artifact_store,
+        )
 
         agent = step.executor_config.get("agent", "")
         agent_label = f"{step.executor} / {agent}" if agent else step.executor
@@ -281,6 +287,10 @@ class PipelineRunner:
                     primary_output = await asyncio.wait_for(coro, timeout=step.timeout_seconds)
                 else:
                     primary_output = await coro
+                if self._artifact_store:
+                    primary_output = await self._intercept_artifacts(
+                        primary_output, run_id, step.name
+                    )
                 last_error = None
                 break
             except asyncio.TimeoutError:
@@ -442,7 +452,10 @@ class PipelineRunner:
         run_log: list,
     ) -> StepResult:
         start_ms = int(time.time() * 1000)
-        ctx = build_context(pipeline, normalised, run_id, group.name, step_outputs)
+        ctx = await build_context(
+            pipeline, normalised, run_id, group.name, step_outputs,
+            artifact_store=self._artifact_store,
+        )
 
         logger.info(
             "Executing parallel group '%s' — %d branch(es)", group.name, len(group.steps)
@@ -452,7 +465,7 @@ class PipelineRunner:
                    group=group.name)
 
         branch_coros = [
-            self._run_parallel_branch(branch, ctx, run_log) for branch in group.steps
+            self._run_parallel_branch(branch, ctx, run_log, run_id) for branch in group.steps
         ]
 
         try:
@@ -559,6 +572,7 @@ class PipelineRunner:
         branch: ParallelStepConfig,
         ctx: dict,
         run_log: list,
+        run_id: str,
     ) -> LLMOutput:
         # Synthesise a StepConfig so we can reuse executor dispatch and verifier logic.
         # confidence_threshold=0.0 because gating happens at the group level, not per-branch.
@@ -579,6 +593,8 @@ class PipelineRunner:
                 output = await asyncio.wait_for(coro, timeout=branch.timeout_seconds)
             else:
                 output = await coro
+            if self._artifact_store:
+                output = await self._intercept_artifacts(output, run_id, branch.name)
         except asyncio.TimeoutError:
             msg = f"Branch timed out after {branch.timeout_seconds}s"
             logger.error("Branch '%s' %s", branch.name, msg)
@@ -737,6 +753,32 @@ class PipelineRunner:
         return primary_confidence
 
     # ------------------------------------------------------------------
+    # Artifact interception
+    # ------------------------------------------------------------------
+
+    async def _intercept_artifacts(
+        self, output: LLMOutput, run_id: str, step_name: str
+    ) -> LLMOutput:
+        """Write any artifacts in the output to the store, replacing content with references."""
+        artifacts_raw = output.model_extra.get("artifacts") if output.model_extra else None
+        if not isinstance(artifacts_raw, dict) or not artifacts_raw:
+            return output
+        refs: dict[str, str] = {}
+        for key, content in artifacts_raw.items():
+            if not isinstance(content, str):
+                continue
+            try:
+                ref = await self._artifact_store.write(run_id, step_name, key, content)
+                refs[key] = ref
+                logger.info(
+                    "Artifact written: run=%s step=%s key=%s (%d chars)",
+                    run_id, step_name, key, len(content),
+                )
+            except Exception as exc:
+                logger.error("Failed to write artifact %s/%s: %s", step_name, key, exc)
+        return output.model_copy(update={"artifacts": refs})
+
+    # ------------------------------------------------------------------
     # DB persistence
     # ------------------------------------------------------------------
 
@@ -770,6 +812,11 @@ class PipelineRunner:
             return
         async with self._session_factory() as session:
             _agent = step.executor_config.get("agent")
+            _artifact_refs = None
+            if result.output and result.output.model_extra:
+                _ar = result.output.model_extra.get("artifacts")
+                if isinstance(_ar, dict) and _ar:
+                    _artifact_refs = json.dumps(_ar)
             session.add(PipelineStep(
                 run_id=run_id,
                 step_name=result.step_name,
@@ -788,6 +835,7 @@ class PipelineRunner:
                 effective_confidence=result.effective_confidence,
                 duration_ms=result.duration_ms,
                 executed_at=datetime.utcnow(),
+                artifacts=_artifact_refs,
             ))
             await session.commit()
 
@@ -804,6 +852,11 @@ class PipelineRunner:
             return
         branch_failed = getattr(output, "failed", False)
         _agent = branch.executor_config.get("agent")
+        _artifact_refs = None
+        if not branch_failed and output.model_extra:
+            _ar = output.model_extra.get("artifacts")
+            if isinstance(_ar, dict) and _ar:
+                _artifact_refs = json.dumps(_ar)
         async with self._session_factory() as session:
             session.add(PipelineStep(
                 run_id=run_id,
@@ -824,6 +877,7 @@ class PipelineRunner:
                 effective_confidence=None if branch_failed else output.confidence,
                 duration_ms=None,
                 executed_at=datetime.utcnow(),
+                artifacts=_artifact_refs,
             ))
             await session.commit()
 

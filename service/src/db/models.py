@@ -48,5 +48,6 @@ class PipelineStep(Base):
     effective_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     executed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    artifacts: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: {key: reference}
 
     run: Mapped["PipelineRun"] = relationship("PipelineRun", back_populates="steps")
