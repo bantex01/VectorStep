@@ -1,0 +1,72 @@
+name: synthesise-report
+description: >
+  Report synthesis step — reads the raw_research artifact from a preceding
+  gather-research step and produces a structured, polished report stored as
+  the report artifact.
+
+  Designed to follow gather-research. The default prompt references
+  {{artifacts.gather_research.raw_research}} — override prompt_template if
+  your preceding research step has a different name.
+
+  Produces artifact "report" available downstream as
+  {{artifacts.synthesise_report.report}}.
+
+  Required context: artifacts.gather_research.raw_research, topic
+  Optional context: audience
+tags:
+  - report
+  - synthesis
+  - artifacts
+  - openclaw
+
+executor: openclaw
+executor_config:
+  agent: report-writer
+  session_key: "agent:report-writer:{{pipeline_run_id}}:{{current_step}}"
+
+confidence_threshold: 0.70
+on_low_confidence: escalate
+on_abort: notify
+timeout_seconds: 300
+
+prompt_template: |
+  Topic: {{topic}}
+  {% if audience %}Target audience: {{audience}}{% endif %}
+
+  Research summary: {{steps.gather_research.summary}}
+  Sources gathered: {{steps.gather_research.source_count}}
+  Key themes and gaps: {{steps.gather_research.next_step_context}}
+
+  Raw research material:
+  ---
+  {{artifacts.gather_research.raw_research}}
+  ---
+
+  Using only the research material above, write a structured report on
+  "{{topic}}" aimed at {{audience if audience else "a general audience"}}.
+
+  Structure:
+  1. Executive summary (3–5 sentences)
+  2. Background and context
+  3. Key findings (one section per major theme, with source attribution)
+  4. Areas of uncertainty or debate
+  5. Conclusions and takeaways
+
+  Ground every claim in the research material. Do not introduce facts or
+  assertions not present in the sources.
+
+  Confidence scoring:
+  - 0.9+ : complete, well-structured report with strong source backing
+  - 0.7–0.9: solid report, minor gaps or thin sections
+  - <0.7  : source material insufficient for a confident synthesis — escalate
+
+  Return ONLY this JSON, no other text:
+  {
+    "confidence": 0.0,
+    "summary": "One sentence: what the report covers and its overall quality",
+    "section_count": 0,
+    "next_step_context": "Sections a reviewer should scrutinise — thin coverage or uncertain claims",
+    "artifacts": {
+      "report": "# {{topic}}\n\n## Executive Summary\n\n[full report here]"
+    }
+  }

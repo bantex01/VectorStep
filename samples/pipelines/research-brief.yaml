@@ -1,0 +1,143 @@
+# Template: Research Brief Pipeline
+#
+# A three-step pipeline demonstrating artifact storage:
+#   1. gather-research   — web research → raw_research artifact
+#   2. synthesise-report — raw_research artifact → report artifact
+#   3. proofread         — report artifact → final_report artifact (inline step)
+#
+# Steps 1 and 2 use reusable library steps. Step 3 is defined inline —
+# its quality criteria are specific to this pipeline so there is no reason
+# to put it in the library.
+#
+# Required agents in your executor backend:
+#   web-researcher, report-writer, proofreader
+#
+# Artifact storage must be enabled in config.yaml:
+#   artifacts:
+#     dir: ./artifacts
+#     retention_days: 7
+#
+# Trigger with:
+#   curl -X POST "http://localhost:8000/webhook?source=generic" \
+#     -H "Content-Type: application/json" \
+#     -d '{
+#       "pipeline": "research-brief",
+#       "summary": "Research request: quantum computing in drug discovery",
+#       "data": {
+#         "topic": "Quantum computing applications in drug discovery",
+#         "audience": "Life science executives",
+#         "depth": "strategic overview"
+#       }
+#     }'
+
+name: research-brief
+description: Research a topic via web search, synthesise a report, and proofread for delivery
+version: 1
+
+trigger:
+  match:
+    event: research.requested     # match on generic source event label
+                                  # or remove and route by pipeline name directly
+
+context_template:
+  include:
+    - summary
+    - metadata.topic
+    - metadata.audience
+    - metadata.depth
+
+vars: {}
+
+steps:
+
+  # Step 1: Gather raw web research.
+  # Produces artifact raw_research — available downstream as
+  # {{artifacts.gather_research.raw_research}}.
+  - use: gather-research
+
+  # Step 2: Synthesise the raw material into a structured report.
+  # Consumes {{artifacts.gather_research.raw_research}}.
+  # Produces artifact report — available downstream as
+  # {{artifacts.synthesise_report.report}}.
+  # Threshold raised: we want a confident synthesis before proofreading.
+  - use: synthesise-report
+    confidence_threshold: 0.75
+
+  # Step 3: Proofread and finalise.
+  # Consumes {{artifacts.synthesise_report.report}}.
+  # Produces artifact final_report as the deliverable.
+  # Defined inline — quality bar is specific to this pipeline.
+  - name: proofread
+    executor: openclaw
+    executor_config:
+      agent: proofreader
+      session_key: "agent:proofreader:{{pipeline_run_id}}:{{current_step}}"
+    confidence_threshold: 0.70
+    on_low_confidence: proceed    # stylistic issues don't block delivery
+    on_abort: notify
+    timeout_seconds: 300
+    prompt_template: |
+      Topic: {{topic}}
+      Audience: {{audience if audience else "general"}}
+
+      Report summary: {{steps.synthesise_report.summary}}
+      Areas to focus on: {{steps.synthesise_report.next_step_context}}
+
+      Draft report:
+      ---
+      {{artifacts.synthesise_report.report}}
+      ---
+
+      Review the draft report above and produce a corrected final version.
+      Focus on:
+      - Factual consistency and internal contradictions
+      - Clarity and flow — restructure sentences but not sections
+      - Appropriate tone for the stated audience
+      - Removing redundancy or padding
+      - Grammar, spelling, and punctuation
+
+      Do not add content not present in the draft. Only correct and clarify.
+
+      Confidence scoring:
+      - 0.9+ : clean draft, only minor edits needed
+      - 0.7–0.9: moderate edits made, report is solid
+      - <0.7  : substantial issues found — flag in next_step_context
+
+      Return ONLY this JSON, no other text:
+      {
+        "confidence": 0.0,
+        "proceed": false,
+        "proceed_reason": "Report proofread and finalised — pipeline complete",
+        "summary": "One sentence: overall quality and what was corrected",
+        "corrections_made": "Brief description of the main edits applied",
+        "next_step_context": "",
+        "artifacts": {
+          "final_report": "# {{topic}}\n\n[corrected final report here]"
+        }
+      }
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+notifications:
+  escalate:
+    channel: telegram
+    template: |
+      ⚠️ Escalated: {{pipeline_name}}
+      Topic: {{topic}}
+      Step: {{current_step}}
+      Reason: {{escalation_reason}}{% if confidence is not none %} — confidence {{confidence | round(2)}} below threshold {{confidence_threshold}}{% endif %}
+      Summary: {{step_summary}}
+      {% if contradicts %}Contradicts: {{contradicts}}{% endif %}
+
+  stopped:
+    channel: telegram
+    template: |
+      ✅ Complete: {{pipeline_name}}
+      Topic: {{topic}}
+      Summary: {{step_summary}}
+
+  notify:
+    channel: telegram
+    template: |
+      Aborted: {{pipeline_name}}
+      Topic: {{topic}}
+      Step: {{current_step}}

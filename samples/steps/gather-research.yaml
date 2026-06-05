@@ -1,0 +1,62 @@
+name: gather-research
+description: >
+  Web research step — searches the internet for material on a topic and stores
+  the compiled raw findings as an artifact (raw_research).
+
+  The artifact is designed to be consumed by a downstream synthesis or report
+  step via {{artifacts.gather_research.raw_research}}.
+
+  Confidence reflects coverage quality: 0.9+ for comprehensive multi-source
+  material, below 0.6 for sparse or unreliable results.
+
+  Required context: topic (from metadata.topic or a pipeline var)
+  Optional context: audience, depth
+tags:
+  - research
+  - web
+  - artifacts
+  - openclaw
+
+executor: openclaw
+executor_config:
+  agent: web-researcher
+  session_key: "agent:web-researcher:{{pipeline_run_id}}:{{current_step}}"
+
+confidence_threshold: 0.60
+on_low_confidence: escalate
+on_abort: notify
+timeout_seconds: 600
+
+prompt_template: |
+  Research topic: {{topic}}
+  {% if audience %}Target audience: {{audience}}{% endif %}
+  {% if depth %}Requested depth: {{depth}}{% endif %}
+
+  Use your web search and browsing tools to research the topic above. Aim for
+  material from at least 3–5 distinct sources. For each source capture: title,
+  URL, date if available, and the most relevant information it contains.
+
+  Compile everything into a structured research document covering:
+  - Overview of the topic
+  - Key facts, findings, and data points (with source attribution)
+  - Notable quotes or statistics
+  - Areas of consensus across sources
+  - Conflicting information or open debates
+  - Gaps — what the sources did not adequately cover
+
+  Confidence scoring:
+  - 0.9+  : comprehensive multi-source coverage, few gaps
+  - 0.7–0.9: solid coverage, minor gaps
+  - 0.5–0.7: partial coverage or low-quality sources
+  - <0.5  : insufficient material to proceed — escalate
+
+  Return ONLY this JSON, no other text:
+  {
+    "confidence": 0.0,
+    "summary": "One sentence: what you found and how complete the coverage is",
+    "source_count": 0,
+    "next_step_context": "Key themes and notable gaps a synthesis step should know about",
+    "artifacts": {
+      "raw_research": "# Raw Research: {{topic}}\n\n[full compiled research here]"
+    }
+  }
