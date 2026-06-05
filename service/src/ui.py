@@ -488,15 +488,18 @@ async def _fetch_openclaw_agent_files(agent_id: str) -> dict[str, str | None]:
 
 
 async def _fetch_pork_gateway_agent_files(agent_id: str) -> dict[str, str | None]:
-    """Fetch soul from the P-Ork Gateway REST /agents/{id}/soul endpoint.
-    Tools and Identity are not yet exposed by the P-Ork Gateway REST API.
-    """
-    result: dict[str, str | None] = {"soul": None, "tools": None, "identity": None}
+    """Fetch soul and agent.yaml from the P-Ork Gateway REST API."""
+    result: dict[str, str | None] = {"soul": None, "tools": None, "identity": None, "agent_file": None}
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{_pork_gateway_base}/agents/{agent_id}/soul")
-            if resp.status_code == 200:
-                result["soul"] = resp.json().get("content") or resp.text
+            soul_resp, agent_resp = await asyncio.gather(
+                client.get(f"{_pork_gateway_base}/agents/{agent_id}/soul"),
+                client.get(f"{_pork_gateway_base}/agents/{agent_id}/agent"),
+            )
+            if soul_resp.status_code == 200:
+                result["soul"] = soul_resp.json().get("content") or soul_resp.text
+            if agent_resp.status_code == 200:
+                result["agent_file"] = agent_resp.json().get("content") or agent_resp.text
     except Exception:
         pass
     return result
@@ -636,6 +639,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
         "soul": agent_files["soul"],
         "tools": agent_files["tools"],
         "identity": agent_files["identity"],
+        "agent_file": agent_files.get("agent_file"),
         "model_stats": model_stats,
         "active_page": "agents",
     })

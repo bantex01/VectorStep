@@ -103,6 +103,13 @@
       Identity
     </button>
     {% endif %}
+    {% if agent_file %}
+    <button @click="tab='agent_file'"
+      :class="tab==='agent_file' ? 'border-indigo-500 text-indigo-400' : 'border-transparent text-zinc-400 hover:text-zinc-100 hover:border-zinc-600'"
+      class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px">
+      Config
+    </button>
+    {% endif %}
   </div>
 
   <!-- Overview -->
@@ -173,6 +180,15 @@
   <div x-show="tab==='identity'" x-cloak>
     <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6">
       <div class="md-content" data-md="{{ identity | e }}"></div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Config (agent.yaml) -->
+  {% if agent_file %}
+  <div x-show="tab==='agent_file'" x-cloak>
+    <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6">
+      <pre class="text-sm text-zinc-300 font-mono whitespace-pre overflow-x-auto leading-relaxed"><code>{{ agent_file | e }}</code></pre>
     </div>
   </div>
   {% endif %}
