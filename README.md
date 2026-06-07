@@ -652,6 +652,14 @@ Executors are registered by name in `src/executors/__init__.py` and referenced b
 
 Requires `executors.gateway.url` (WebSocket) and `executors.gateway.rest_url` (REST) in `config.yaml`.
 
+The P-Ork Gateway exposes three REST endpoints consumed by P-Ork:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /agents` | Agent list (name, model, tools) |
+| `GET /agents/{name}/soul` | `soul.md` content — shown in the Soul tab of the agent detail page |
+| `GET /agents/{name}/agent` | Raw `agent.yaml` content — shown in the Config tab of the agent detail page |
+
 ---
 
 #### `human` — Human-in-the-Loop (Telegram)
@@ -855,6 +863,7 @@ retry:
 | `duration_ms` | int | |
 | `executed_at` | datetime | |
 | `artifacts` | json, nullable | `{key: reference}` map — references are opaque strings pointing to artifact files on disk. Content is not stored in the DB. |
+| `agent_trace` | json, nullable | Ordered execution trace from the P-Ork Gateway executor — array of `{type, ...}` objects. `type` is one of: `llm_call` (iteration marker), `thinking` (extended thinking block), `text` (response text), `tool_call` (MCP tool invoked with arguments), `tool_result` (MCP tool response, truncated at 3 000 chars). NULL for all other executors (`openclaw`, `human`, `webhook`). |
 
 ### 15. Management Endpoints
 
@@ -882,6 +891,9 @@ GET /runs
 # Full run detail — includes all steps with confidence scores and parsed output
 GET /runs/{run_id}
 
+# Server-Sent Events stream for live run tailing (see §UI / Live tail)
+GET /ui/runs/{run_id}/stream
+
 # List loaded pipelines
 GET /pipelines
 ```
@@ -896,7 +908,7 @@ The web UI is served under `/ui` and provides the following pages:
 |---|---|---|
 | Dashboard | `/ui/` | 24h run counts by status, success rate, pipeline activity, recent runs |
 | Runs | `/ui/runs` | Filterable run history with status and pipeline filters |
-| Run detail | `/ui/runs/{id}` | Full step breakdown with confidence bars, parsed output, verifier results, and collapsible run log |
+| Run detail | `/ui/runs/{id}` | Full step breakdown with confidence bars, parsed output, verifier results, collapsible agent trace (gateway steps), collapsible run log, and live tail for in-progress runs |
 | Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status and run counts |
 | Pipeline detail | `/ui/pipelines/{name}` | Config summary, recent runs, YAML viewer, and **Run now** button |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, and copy-ref button |
@@ -911,18 +923,36 @@ Every pipeline detail page has a **Run now** button. This opens a modal where yo
 
 Each completed run stores a structured event timeline in `pipeline_runs.logs`. The run detail page shows this as a collapsible log section with timestamped, colour-coded entries (info / warn / error) covering every step start, confidence score, verifier result, skip, escalation, notification, and final status.
 
+### Live tail
+
+While a run is in progress the run detail page shows a **Live tail** panel. It connects via Server-Sent Events (`GET /ui/runs/{id}/stream`) and streams pipeline log events in real-time. Late-connecting clients (e.g. navigating to the page mid-run) receive a full history replay of everything that happened before they connected, then transition into the live stream — no events are missed.
+
+Event types surfaced in the live tail: `step_started`, `step_completed`, `step_failed`, `step_skipped`, `step_escalated`, `step_aborted`, `verifier_ran`, `parallel_group_started`, `parallel_group_completed`, `notification_sent`, `run_started`, `run_finished`. These fire for **all executor types**.
+
+When the run finishes the page reloads automatically to show the final state. A 5-second polling fallback (`GET /runs/{id}`) reloads the page if the SSE connection was lost.
+
+### Agent trace
+
+Each step's expanded detail panel includes a collapsible **Agent trace** section showing the full internal execution trace: LLM call markers, extended thinking blocks, response text, every tool call with arguments, and every tool result. This is available for **`executor: gateway` steps only** — the trace is captured by the P-Ork Gateway and stored in `pipeline_steps.agent_trace`.
+
+The trace toggle label shows a count of LLM calls and tool calls at a glance (e.g. `3 LLM calls, 12 tool calls`). Tool result content is truncated at 3 000 chars to keep the DB row manageable; full content is always available in the gateway's own logs at `DEBUG` level.
+
+For `openclaw` steps, `agent_trace` is NULL — OpenClaw does not stream intermediate events back to P-Ork.
+
 ### Agent Library
 
 The `/ui/agents` page provides a unified library of agents across all configured executor backends. Agents are fetched live from each backend and merged into a single list with executor badges.
 
 Agents are uniquely identified by `executor:name` — e.g. `openclaw:sre-investigation` and `gateway:sre-investigation` are treated as distinct agents. This prefix is stored in `pipeline_steps.agent` so run history, success rates, and model usage are attributed correctly per backend.
 
-| Executor | Agent list | Soul / Tools files |
+| Executor | Agent list | Agent files |
 |---|---|---|
-| `openclaw` | OpenClaw Gateway WS — `agents.list` RPC | OpenClaw Gateway WS — `agents.files.get` RPC |
-| `gateway` | P-Ork Gateway REST — `GET /agents` | P-Ork Gateway REST — `GET /agents/{name}/soul` |
+| `openclaw` | OpenClaw Gateway WS — `agents.list` RPC | `agents.files.get` RPC — `SOUL.md`, `TOOLS.md`, `IDENTITY.md` tabs |
+| `gateway` | P-Ork Gateway REST — `GET /agents` | `GET /agents/{name}/soul` (Soul tab) · `GET /agents/{name}/agent` (Config tab — raw `agent.yaml`) |
 
 Both backends are queried concurrently. If one is unreachable, the other's agents still show with a warning banner. If both fail, stub entries from DB run history are surfaced.
+
+The **Config** tab on a gateway agent detail page shows the raw `agent.yaml` — model, `max_tokens`, and the list of MCP tool names the agent has access to.
 
 ---
 

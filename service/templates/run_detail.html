@@ -17,7 +17,11 @@
       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
     </svg>
     <span class="uppercase tracking-wide font-medium">Agent trace</span>
-    <span class="text-zinc-600">({{ trace | length }} events)</span>
+    {% set llm_n = trace | selectattr('type', 'equalto', 'llm_call') | list | length %}
+    {% set tool_n = trace | selectattr('type', 'equalto', 'tool_call') | list | length %}
+    <span class="text-zinc-600">
+      ({{ llm_n }} LLM {{ 'call' if llm_n == 1 else 'calls' }}{% if tool_n %}, {{ tool_n }} tool {{ 'call' if tool_n == 1 else 'calls' }}{% endif %})
+    </span>
   </button>
   <div x-show="trace_open" x-cloak class="mt-3 space-y-2">
     {% for event in trace %}
@@ -277,7 +281,25 @@
 
 <script>
 (function () {
-  const runId = {{ run.id | tojson }};
+  const runId = {{ run.id | tojson | safe }};
+
+  // ── Periodic polling — fallback reload when the run finishes ──────────────
+  // The SSE run_complete event triggers the reload first; this is the safety
+  // net in case the SSE connection was lost. Does NOT reload on step changes —
+  // the live tail accumulates the full history so no reload is needed mid-run.
+  const pollTimer = setInterval(async function () {
+    try {
+      const r = await fetch('/runs/' + runId);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.status !== 'running') {
+        clearInterval(pollTimer);
+        location.reload();
+      }
+    } catch (_) {}
+  }, 5000);
+
+  // ── SSE live tail — real-time pipeline event stream ───────────────────────
   const evtSource = new EventSource('/ui/runs/' + runId + '/stream');
   const container = document.getElementById('live-events');
   const statusEl = document.getElementById('live-status');
@@ -291,9 +313,10 @@
 
     if (event.type === 'run_complete') {
       evtSource.close();
+      clearInterval(pollTimer);
       statusEl.textContent = 'run ' + event.status + ' — reloading…';
       document.getElementById('live-tail-panel').classList.add('opacity-50');
-      setTimeout(function () { window.location.reload(); }, 1200);
+      setTimeout(function () { location.reload(); }, 1200);
       return;
     }
 

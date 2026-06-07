@@ -305,19 +305,32 @@ async def ui_run_stream(request: Request, run_id: str):
         raise HTTPException(status_code=404, detail="Run not found")
 
     async def _generate():
-        if run.status != "running":
-            # Replay historical log and signal done
-            if run.logs:
-                for event in json.loads(run.logs):
-                    yield f"data: {json.dumps(event)}\n\n"
-            yield f"data: {json.dumps({'type': 'run_complete', 'status': run.status})}\n\n"
-            return
+        # Flush connection immediately so the browser fires onopen.
+        yield ": connected\n\n"
 
-        q = run_events.subscribe(run_id)
+        # Subscribe and snapshot history atomically (no await between these two
+        # calls, so no events can slip through the gap).
+        q, history = run_events.subscribe(run_id)
         try:
+            # Re-read run status now that we're subscribed.
+            async with sf() as session:
+                fresh_run = await session.get(PipelineRun, run_id)
+
+            if not fresh_run or fresh_run.status != "running":
+                # Run already finished — replay from the DB log then close.
+                status = fresh_run.status if fresh_run else "unknown"
+                if fresh_run and fresh_run.logs:
+                    for event in json.loads(fresh_run.logs):
+                        yield f"data: {json.dumps(event)}\n\n"
+                yield f"data: {json.dumps({'type': 'run_complete', 'status': status})}\n\n"
+                return
+
+            # Run still active — replay everything that happened before we
+            # connected, then stream new events from the queue.
+            for event in history:
+                yield f"data: {json.dumps(event)}\n\n"
+
             while True:
-                if await request.is_disconnected():
-                    break
                 try:
                     event = await asyncio.wait_for(q.get(), timeout=15.0)
                 except asyncio.TimeoutError:

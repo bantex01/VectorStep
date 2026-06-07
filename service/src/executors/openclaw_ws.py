@@ -261,7 +261,12 @@ class OpenClawWSExecutor(BaseExecutor):
                 "params": agent_params,
             }))
 
-            for _ in range(500):
+            # No message-count limit — the real safety nets are the per-recv
+            # timeout=120 below and the step-level timeout_seconds in the pipeline
+            # YAML (which cancels this entire coroutine via asyncio.wait_for in
+            # the runner). Long investigation agents can emit hundreds of event
+            # frames before the final result arrives.
+            while True:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=120)
                 except asyncio.TimeoutError:
@@ -271,7 +276,7 @@ class OpenClawWSExecutor(BaseExecutor):
 
                 msg = json.loads(raw)
                 if msg.get("type") != "res" or msg.get("id") != agent_req_id:
-                    continue  # skip events and unrelated responses
+                    continue  # skip event frames and unrelated responses
 
                 if not msg.get("ok"):
                     err = msg.get("error", {})
@@ -298,10 +303,6 @@ class OpenClawWSExecutor(BaseExecutor):
                 raise RuntimeError(
                     f"Unexpected agent result status '{status}' (session={session_key})"
                 )
-
-            raise RuntimeError(
-                f"Agent run did not complete within message limit (session={session_key})"
-            )
 
     def _extract_text(self, payloads: list, session_key: str) -> str:
         """Scan payloads in reverse for the last one containing valid text."""
