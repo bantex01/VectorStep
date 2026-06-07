@@ -1,12 +1,14 @@
 import json
 import logging
 import uuid
+from datetime import datetime
 
 import websockets
 from jinja2 import Environment, Undefined
 
 from ..models.llm import LLMOutput
 from ..models.pipeline import StepConfig
+from .. import run_events
 from .base import BaseExecutor
 
 logger = logging.getLogger(__name__)
@@ -90,6 +92,8 @@ class GatewayExecutor(BaseExecutor):
             timeout=timeout,
             model_override=model_override,
             thinking_level=thinking_level,
+            run_id=context.get("pipeline_run_id", ""),
+            step_name=step.name,
         )
 
         response_text = (result.get("payloads") or [{}])[0].get("text", "")
@@ -116,6 +120,8 @@ class GatewayExecutor(BaseExecutor):
         timeout: int,
         model_override: str | None,
         thinking_level: str | None,
+        run_id: str = "",
+        step_name: str = "",
     ) -> dict:
         import asyncio
 
@@ -162,26 +168,37 @@ class GatewayExecutor(BaseExecutor):
                     "params": params,
                 }))
 
-                # Step 5: receive two responses with the same id
-                # Frame 1: accepted
-                raw = await ws.recv()
-                frame1 = json.loads(raw)
-                if frame1.get("id") != req_id:
-                    raise RuntimeError(f"Unexpected response id in frame 1: {raw[:200]}")
-                if not frame1.get("ok"):
-                    err = frame1.get("error", {}).get("message", "unknown error")
-                    raise RuntimeError(f"Gateway agent request rejected: {err}")
+                # Step 5: loop until the final 'ok' frame.
+                # Between 'accepted' and 'ok' the gateway may send any number of
+                # 'trace_event' frames — one per LLM output block or tool call/result.
+                while True:
+                    raw = await ws.recv()
+                    frame = json.loads(raw)
+                    if frame.get("id") != req_id:
+                        continue
+                    if not frame.get("ok"):
+                        err = frame.get("error", {}).get("message", "unknown error")
+                        raise RuntimeError(f"Gateway agent run failed: {err}")
 
-                # Frame 2: final result
-                raw = await ws.recv()
-                frame2 = json.loads(raw)
-                if frame2.get("id") != req_id:
-                    raise RuntimeError(f"Unexpected response id in frame 2: {raw[:200]}")
-                if not frame2.get("ok"):
-                    err = frame2.get("error", {}).get("message", "unknown error")
-                    raise RuntimeError(f"Gateway agent run failed: {err}")
+                    payload = frame.get("payload", {})
+                    status = payload.get("status")
 
-                return frame2.get("payload", {}).get("result", {})
+                    if status == "accepted":
+                        logger.debug("Agent run accepted: runId=%s", payload.get("runId"))
+                        continue
+
+                    if status == "trace_event":
+                        event = payload.get("event") or {}
+                        if run_id and event:
+                            self._publish_trace_event(run_id, step_name, event)
+                        continue
+
+                    if status == "ok":
+                        return payload.get("result", {})
+
+                    raise RuntimeError(
+                        f"Unexpected agent result status '{status}' (session={session_key})"
+                    )
 
         try:
             return await asyncio.wait_for(_do_connect(), timeout=timeout)
@@ -190,6 +207,35 @@ class GatewayExecutor(BaseExecutor):
                 f"Gateway agent call timed out after {timeout}s "
                 f"(session={session_key})"
             )
+
+    def _publish_trace_event(self, run_id: str, step_name: str, event: dict) -> None:
+        """Publish a single gateway trace event to the live-tail event bus.
+
+        Content fields are truncated for the live tail — the full content arrives
+        in the batch trace on the final 'ok' frame and is stored in agent_trace.
+        """
+        _LIVE_MAX = 200
+        live: dict = {
+            "ts": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+            "type": "agent_trace",
+            "step": step_name,
+            "trace_type": event.get("type"),
+        }
+        t = event.get("type")
+        if t == "llm_call":
+            live["iteration"] = event.get("iteration")
+        elif t in ("thinking", "text"):
+            c = event.get("content", "")
+            live["content"] = c[:_LIVE_MAX] + "…" if len(c) > _LIVE_MAX else c
+        elif t == "tool_call":
+            live["name"] = event.get("name")
+            live["input"] = event.get("input")
+        elif t == "tool_result":
+            live["name"] = event.get("name")
+            live["is_error"] = event.get("is_error", False)
+            c = event.get("content", "")
+            live["content"] = c[:_LIVE_MAX] + "…" if len(c) > _LIVE_MAX else c
+        run_events.publish(run_id, live)
 
     def _parse_output(self, result: dict, step_name: str) -> LLMOutput:
         payloads = result.get("payloads", [])

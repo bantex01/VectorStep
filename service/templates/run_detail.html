@@ -320,18 +320,66 @@
       return;
     }
 
-    const level = event.level || 'info';
-    const dotCls = level === 'error' ? 'bg-red-500' : level === 'warn' ? 'bg-amber-400' : 'bg-zinc-500';
-    const textCls = level === 'error' ? 'text-red-300' : level === 'warn' ? 'text-amber-300' : 'text-zinc-300';
     const timeStr = (event.ts || '').slice(11, 23);
-    const msg = (event.msg || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-
     const row = document.createElement('div');
-    row.className = 'flex items-start gap-3 py-0.5';
-    row.innerHTML =
-      '<span class="text-zinc-600 shrink-0 w-28">' + timeStr + '</span>' +
-      '<span class="shrink-0 w-1.5 h-1.5 mt-1 rounded-full ' + dotCls + '"></span>' +
-      '<span class="' + textCls + ' leading-relaxed">' + msg + '</span>';
+
+    if (event.type === 'agent_trace') {
+      // ── Gateway agent trace events ─────────────────────────────────
+      const tt = event.trace_type;
+      const step = event.step || '';
+      let dotCls, msgText, textCls = 'text-zinc-400';
+
+      if (tt === 'llm_call') {
+        dotCls = 'bg-zinc-600';
+        msgText = '— LLM call #' + (event.iteration || '') + ' [' + step + '] —';
+        textCls = 'text-zinc-600';
+      } else if (tt === 'thinking') {
+        dotCls = 'bg-violet-500';
+        const c = (event.content || '');
+        msgText = 'Thinking: ' + c.slice(0, 120) + (c.length > 120 ? '…' : '');
+        textCls = 'text-violet-300';
+      } else if (tt === 'text') {
+        dotCls = 'bg-zinc-500';
+        const c = (event.content || '');
+        msgText = c.slice(0, 120) + (c.length > 120 ? '…' : '');
+      } else if (tt === 'tool_call') {
+        dotCls = 'bg-cyan-500';
+        let args = '';
+        try {
+          args = JSON.stringify(event.input || {});
+          if (args.length > 80) args = args.slice(0, 80) + '…}';
+        } catch(_) {}
+        msgText = '→ ' + (event.name || '') + '(' + args + ')';
+        textCls = 'text-cyan-300';
+      } else if (tt === 'tool_result') {
+        dotCls = event.is_error ? 'bg-red-500' : 'bg-emerald-500';
+        const c = (event.content || '');
+        msgText = '← ' + (event.name || '') + ': ' + c.slice(0, 100) + (c.length > 100 ? '…' : '');
+        textCls = event.is_error ? 'text-red-300' : 'text-emerald-300';
+      } else {
+        dotCls = 'bg-zinc-600';
+        msgText = tt || '';
+      }
+
+      const safe = msgText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      row.className = 'flex items-start gap-3 py-0.5 pl-4';
+      row.innerHTML =
+        '<span class="text-zinc-700 shrink-0 w-28">' + timeStr + '</span>' +
+        '<span class="shrink-0 w-1.5 h-1.5 mt-1 rounded-full ' + dotCls + ' opacity-70"></span>' +
+        '<span class="' + textCls + ' leading-relaxed">' + safe + '</span>';
+
+    } else {
+      // ── Pipeline log events ────────────────────────────────────────
+      const level = event.level || 'info';
+      const dotCls = level === 'error' ? 'bg-red-500' : level === 'warn' ? 'bg-amber-400' : 'bg-zinc-500';
+      const textCls = level === 'error' ? 'text-red-300' : level === 'warn' ? 'text-amber-300' : 'text-zinc-300';
+      const msg = (event.msg || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      row.className = 'flex items-start gap-3 py-0.5';
+      row.innerHTML =
+        '<span class="text-zinc-600 shrink-0 w-28">' + timeStr + '</span>' +
+        '<span class="shrink-0 w-1.5 h-1.5 mt-1 rounded-full ' + dotCls + '"></span>' +
+        '<span class="' + textCls + ' leading-relaxed">' + msg + '</span>';
+    }
 
     container.appendChild(row);
     container.scrollTop = container.scrollHeight;

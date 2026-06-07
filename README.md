@@ -311,7 +311,7 @@ steps:
 
 **Step library UI:** the `/ui/steps` page shows all loaded library steps with their executor/agent, confidence threshold, tags, which pipelines reference each step, and a copy button for the `- use: step-name` snippet.
 
-**Hot reload:** `POST /reload` and SIGHUP reload the step library first, then re-resolve all pipeline references against the updated library.
+**Hot reload:** `POST /reload` and SIGHUP reload the step library first, then re-resolve all pipeline references against the updated library. A **Reload config** button on the `/ui/pipelines` page calls this endpoint directly from the browser.
 
 **The `steps/` directory is gitignored.** Step definitions reference your specific agents, session key patterns, and confidence thresholds — they are personal to your deployment, like `config.yaml`. Copy the starter definitions from `samples/steps/` into `service/steps/` and adapt them to your agents.
 

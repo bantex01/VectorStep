@@ -1,6 +1,49 @@
 {% extends "base.html" %}
 {% block title %}Pipelines — P-Ork{% endblock %}
-{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Pipelines</h1>{% endblock %}
+{% block page_heading %}
+<div class="flex items-center justify-between">
+  <h1 class="text-2xl font-semibold text-zinc-50">Pipelines</h1>
+  <button id="reload-btn" onclick="reloadPipelines()"
+          class="inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium
+                 bg-zinc-800 text-zinc-300 ring-1 ring-inset ring-zinc-700
+                 hover:bg-zinc-700 hover:text-zinc-100 transition-colors">
+    <svg id="reload-icon" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+    </svg>
+    Reload config
+  </button>
+</div>
+<div id="reload-msg" class="hidden mt-3 px-4 py-2.5 rounded-md text-sm font-medium"></div>
+<script>
+async function reloadPipelines() {
+  const btn = document.getElementById('reload-btn');
+  const icon = document.getElementById('reload-icon');
+  const msg = document.getElementById('reload-msg');
+  btn.disabled = true;
+  icon.classList.add('animate-spin');
+  try {
+    const r = await fetch('/reload', { method: 'POST' });
+    const data = await r.json();
+    if (r.ok) {
+      msg.textContent = 'Reloaded — ' + data.pipelines_loaded + ' pipeline' + (data.pipelines_loaded === 1 ? '' : 's') + ' loaded.';
+      msg.className = 'mt-3 px-4 py-2.5 rounded-md text-sm font-medium bg-green-950 text-green-400 ring-1 ring-inset ring-green-800';
+      setTimeout(() => location.reload(), 800);
+    } else {
+      msg.textContent = 'Reload failed: ' + (data.detail || r.statusText);
+      msg.className = 'mt-3 px-4 py-2.5 rounded-md text-sm font-medium bg-red-950 text-red-400 ring-1 ring-inset ring-red-800';
+      btn.disabled = false;
+      icon.classList.remove('animate-spin');
+    }
+  } catch (e) {
+    msg.textContent = 'Reload failed: ' + e.message;
+    msg.className = 'mt-3 px-4 py-2.5 rounded-md text-sm font-medium bg-red-950 text-red-400 ring-1 ring-inset ring-red-800';
+    btn.disabled = false;
+    icon.classList.remove('animate-spin');
+  }
+}
+</script>
+{% endblock %}
 {% block content %}
 
 {% if pipelines %}
