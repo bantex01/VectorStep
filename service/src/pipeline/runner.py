@@ -14,6 +14,7 @@ from ..db.models import PipelineRun, PipelineStep
 from ..executors.base import BaseExecutor
 from ..models.context import NormalisedContext
 from ..models.llm import LLMOutput
+from .. import run_events
 from ..models.pipeline import (
     ParallelGroupConfig,
     ParallelGroupInner,
@@ -36,6 +37,22 @@ def _compute_backoff(retry: RetryConfig | None, attempt: int) -> float:
     if retry.backoff == "fixed":
         return retry.delay_seconds
     return retry.delay_seconds * (2 ** (attempt - 1))
+
+
+class _LiveRunLog(list):
+    """list subclass that publishes each appended event to the live event bus.
+
+    Using a subclass means every existing _log_event(run_log, ...) call site
+    automatically gets live-publishing behaviour with no other changes.
+    """
+    def __init__(self, run_id: str) -> None:
+        super().__init__()
+        self._run_id = run_id
+
+    def append(self, entry: object) -> None:
+        super().append(entry)
+        if isinstance(entry, dict):
+            run_events.publish(self._run_id, entry)
 
 
 def _log_event(run_log: list, level: str, event: str, msg: str, **extra) -> None:
@@ -128,7 +145,7 @@ class PipelineRunner:
         run_id: str | None = None,
     ) -> PipelineRunResult:
         run_id = run_id or str(uuid.uuid4())
-        run_log: list[dict] = []
+        run_log: _LiveRunLog = _LiveRunLog(run_id)
 
         logger.info("Pipeline run started: id=%s pipeline=%s", run_id, pipeline.name)
         _log_event(run_log, "info", "run_started",
@@ -240,6 +257,7 @@ class PipelineRunner:
         _log_event(run_log, "info", "run_finished",
                    f"Pipeline finished: {result.status}")
         await self._db_complete_run(run_id, result.status, run_log)
+        run_events.publish_complete(run_id, result.status)
 
         logger.info(
             "Pipeline run finished: id=%s pipeline=%s status=%s",
@@ -817,6 +835,11 @@ class PipelineRunner:
                 _ar = result.output.model_extra.get("artifacts")
                 if isinstance(_ar, dict) and _ar:
                     _artifact_refs = json.dumps(_ar)
+            _trace = None
+            if result.output:
+                _t = (result.output.raw_response or {}).get("trace")
+                if _t is not None:
+                    _trace = json.dumps(_t)
             session.add(PipelineStep(
                 run_id=run_id,
                 step_name=result.step_name,
@@ -836,6 +859,7 @@ class PipelineRunner:
                 duration_ms=result.duration_ms,
                 executed_at=datetime.utcnow(),
                 artifacts=_artifact_refs,
+                agent_trace=_trace,
             ))
             await session.commit()
 
@@ -857,6 +881,10 @@ class PipelineRunner:
             _ar = output.model_extra.get("artifacts")
             if isinstance(_ar, dict) and _ar:
                 _artifact_refs = json.dumps(_ar)
+        _trace = None
+        _t = (output.raw_response or {}).get("trace")
+        if _t is not None:
+            _trace = json.dumps(_t)
         async with self._session_factory() as session:
             session.add(PipelineStep(
                 run_id=run_id,
@@ -878,6 +906,7 @@ class PipelineRunner:
                 duration_ms=None,
                 executed_at=datetime.utcnow(),
                 artifacts=_artifact_refs,
+                agent_trace=_trace,
             ))
             await session.commit()
 

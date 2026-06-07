@@ -31,6 +31,7 @@ _MIGRATIONS = [
     "ALTER TABLE pipeline_steps ADD COLUMN verifier_mode TEXT",
     "ALTER TABLE pipeline_runs ADD COLUMN logs TEXT",
     "ALTER TABLE pipeline_steps ADD COLUMN artifacts TEXT",
+    "ALTER TABLE pipeline_steps ADD COLUMN agent_trace TEXT",
 ]
 
 

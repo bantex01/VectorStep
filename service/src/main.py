@@ -456,6 +456,7 @@ async def webhook(
 
 
 async def _run_pipeline(pipeline, normalised, run_id: str | None = None):
+    from .run_events import publish_complete as _publish_complete
     try:
         result = await _runner.run(pipeline, normalised, run_id=run_id)
         logger.info(
@@ -464,6 +465,8 @@ async def _run_pipeline(pipeline, normalised, run_id: str | None = None):
         )
     except Exception as exc:
         logger.error("Pipeline run raised unhandled exception: %s", exc, exc_info=True)
+        if run_id:
+            _publish_complete(run_id, "failed")
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import httpx
 import yaml
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -16,6 +16,7 @@ from sqlalchemy.orm import selectinload
 from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep
 from .gateway import gateway_call_safe
+from . import run_events
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,12 @@ def _to_yaml(obj) -> str:
     )
 
 
+def _to_json(obj, indent=None) -> str:
+    return json.dumps(obj, indent=indent, ensure_ascii=False)
+
+
 templates.env.filters["to_yaml"] = _to_yaml
+templates.env.filters["tojson"] = _to_json
 templates.env.globals.update({
     "status_classes": _status_classes,
     "confidence_bar_color": _confidence_bar_color,
@@ -242,6 +248,8 @@ async def ui_run_detail(request: Request, run_id: str):
         verifier_pretty = json.dumps(verifier_parsed, indent=2) if verifier_parsed else ""
         verifier_label = "Challenger" if step.verifier_mode == "challenger" else "Verifier"
 
+        trace = json.loads(step.agent_trace) if step.agent_trace else []
+
         if "/" in step.step_name:
             group_name, branch_name = step.step_name.split("/", 1)
             if group_name not in seen_groups:
@@ -256,6 +264,7 @@ async def ui_run_detail(request: Request, run_id: str):
                 "pretty": pretty,
                 "verifier_pretty": verifier_pretty,
                 "verifier_label": verifier_label,
+                "trace": trace,
             })
         else:
             display_items.append({
@@ -266,6 +275,7 @@ async def ui_run_detail(request: Request, run_id: str):
                 "pretty": pretty,
                 "verifier_pretty": verifier_pretty,
                 "verifier_label": verifier_label,
+                "trace": trace,
             })
 
     normalised = json.loads(run.normalised_context) if run.normalised_context else {}
@@ -278,6 +288,52 @@ async def ui_run_detail(request: Request, run_id: str):
         "run_log": run_log,
         "active_page": "runs",
     })
+
+
+@router.get("/runs/{run_id}/stream")
+async def ui_run_stream(request: Request, run_id: str):
+    """Server-Sent Events endpoint for live run tailing.
+
+    - Run still in progress: streams events as they happen, closes on completion.
+    - Run already finished: replays the stored log and closes immediately.
+    """
+    sf = get_session_factory()
+    async with sf() as session:
+        run = await session.get(PipelineRun, run_id)
+
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    async def _generate():
+        if run.status != "running":
+            # Replay historical log and signal done
+            if run.logs:
+                for event in json.loads(run.logs):
+                    yield f"data: {json.dumps(event)}\n\n"
+            yield f"data: {json.dumps({'type': 'run_complete', 'status': run.status})}\n\n"
+            return
+
+        q = run_events.subscribe(run_id)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("type") == "run_complete":
+                    break
+        finally:
+            run_events.unsubscribe(run_id, q)
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/pipelines", response_class=HTMLResponse)

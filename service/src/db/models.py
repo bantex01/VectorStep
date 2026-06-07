@@ -49,5 +49,6 @@ class PipelineStep(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     executed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     artifacts: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: {key: reference}
+    agent_trace: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: ordered trace events
 
     run: Mapped["PipelineRun"] = relationship("PipelineRun", back_populates="steps")
