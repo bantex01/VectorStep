@@ -925,19 +925,26 @@ Each completed run stores a structured event timeline in `pipeline_runs.logs`. T
 
 ### Live tail
 
-While a run is in progress the run detail page shows a **Live tail** panel. It connects via Server-Sent Events (`GET /ui/runs/{id}/stream`) and streams pipeline log events in real-time. Late-connecting clients (e.g. navigating to the page mid-run) receive a full history replay of everything that happened before they connected, then transition into the live stream — no events are missed.
+While a run is in progress the run detail page shows a **Live tail** panel. It connects via Server-Sent Events (`GET /ui/runs/{id}/stream`) and streams two categories of events in real-time:
 
-Event types surfaced in the live tail: `step_started`, `step_completed`, `step_failed`, `step_skipped`, `step_escalated`, `step_aborted`, `verifier_ran`, `parallel_group_started`, `parallel_group_completed`, `notification_sent`, `run_started`, `run_finished`. These fire for **all executor types**.
+**Pipeline log events** — fire for all executor types:
+`step_started`, `step_completed`, `step_failed`, `step_skipped`, `step_escalated`, `step_aborted`, `verifier_ran`, `parallel_group_started`, `parallel_group_completed`, `notification_sent`, `run_started`, `run_finished`.
+
+**Agent trace events** — `executor: gateway` steps only. Each LLM call, thinking block, text response, tool call (with arguments), and tool result streams into the live tail as it happens — not as a batch when the step finishes. These are rendered with compact colour-coded formatting: violet for thinking, cyan for tool calls, green/red for tool results. Content is truncated at 200 chars in the live tail; the full content is in the step detail panel's Agent trace section.
+
+Late-connecting clients receive a full history replay of everything that happened before they connected, then transition into the live stream — no events are missed.
 
 When the run finishes the page reloads automatically to show the final state. A 5-second polling fallback (`GET /runs/{id}`) reloads the page if the SSE connection was lost.
 
 ### Agent trace
 
-Each step's expanded detail panel includes a collapsible **Agent trace** section showing the full internal execution trace: LLM call markers, extended thinking blocks, response text, every tool call with arguments, and every tool result. This is available for **`executor: gateway` steps only** — the trace is captured by the P-Ork Gateway and stored in `pipeline_steps.agent_trace`.
+Each step's expanded detail panel includes a collapsible **Agent trace** section showing the complete internal execution trace: LLM call markers, extended thinking blocks, response text, every tool call with arguments, and every tool result. This is available for **`executor: gateway` steps only** — the gateway streams each event back to P-Ork as it fires, which stores the full trace in `pipeline_steps.agent_trace`.
 
-The trace toggle label shows a count of LLM calls and tool calls at a glance (e.g. `3 LLM calls, 12 tool calls`). Tool result content is truncated at 3 000 chars to keep the DB row manageable; full content is always available in the gateway's own logs at `DEBUG` level.
+The trace toggle label shows a count of LLM calls and tool calls at a glance (e.g. `3 LLM calls, 12 tool calls`). Tool result content is truncated at 3 000 chars in the stored trace; full content is always available in the gateway's own logs at `DEBUG` level.
 
-For `openclaw` steps, `agent_trace` is NULL — OpenClaw does not stream intermediate events back to P-Ork.
+The same events that populate this panel also appear in the **live tail** during the step's execution — the detail panel is the persistent post-run record; the live tail is the real-time view.
+
+For `openclaw` steps, `agent_trace` is NULL — OpenClaw does not expose intermediate events to P-Ork.
 
 ### Agent Library
 
