@@ -16,6 +16,7 @@ from jinja2 import Environment, Undefined
 
 from ..models.llm import LLMOutput
 from ..models.pipeline import StepConfig
+from ..tracing import gen_ai_attrs_from_meta, inject_traceparent, tracer
 from .base import BaseExecutor
 
 logger = logging.getLogger(__name__)
@@ -157,13 +158,24 @@ class OpenClawWSExecutor(BaseExecutor):
         )
         logger.debug("Prompt >>>\n%s", prompt)
 
-        text, model_used, duration_ms = await self._run_agent(
-            agent=agent,
-            session_key=session_key,
-            message=prompt,
-            model=model,
-            thinking_level=thinking_level,
-        )
+        with tracer.start_as_current_span(
+            "gen_ai.openclaw_ws",
+            attributes={
+                "gen_ai.system": "openclaw_ws",
+                "pork.agent": agent,
+                "gen_ai.request.model": model or "",
+            },
+        ) as span:
+            text, model_used, duration_ms = await self._run_agent(
+                agent=agent,
+                session_key=session_key,
+                message=prompt,
+                model=model,
+                thinking_level=thinking_level,
+            )
+            span.set_attributes(gen_ai_attrs_from_meta(
+                {"agentMeta": {"model": model_used}, "durationMs": duration_ms}
+            ))
 
         logger.debug("Response <<<\n%s", text)
         logger.info(
@@ -252,6 +264,8 @@ class OpenClawWSExecutor(BaseExecutor):
                 agent_params["model"] = model
             if thinking_level:
                 agent_params["thinking"] = thinking_level
+
+            agent_params = inject_traceparent(agent_params)
 
             agent_req_id = str(uuid.uuid4())
             await ws.send(json.dumps({

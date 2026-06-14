@@ -8,6 +8,7 @@ from jinja2 import Environment, Undefined
 from ..models.llm import LLMOutput
 from ..models.pipeline import StepConfig
 from .. import run_events
+from ..tracing import gen_ai_attrs_from_meta, inject_traceparent, tracer
 from ..utils import utc_now
 from .base import BaseExecutor
 
@@ -85,16 +86,25 @@ class GatewayExecutor(BaseExecutor):
         )
         logger.debug("Prompt >>>\n%s", prompt)
 
-        result = await self._call_agent(
-            agent=agent,
-            session_key=session_key,
-            message=prompt,
-            timeout=timeout,
-            model_override=model_override,
-            thinking_level=thinking_level,
-            run_id=context.get("pipeline_run_id", ""),
-            step_name=step.name,
-        )
+        with tracer.start_as_current_span(
+            "gen_ai.gateway",
+            attributes={
+                "gen_ai.system": "gateway",
+                "pork.agent": agent,
+                "gen_ai.request.model": model_override or "",
+            },
+        ) as span:
+            result = await self._call_agent(
+                agent=agent,
+                session_key=session_key,
+                message=prompt,
+                timeout=timeout,
+                model_override=model_override,
+                thinking_level=thinking_level,
+                run_id=context.get("pipeline_run_id", ""),
+                step_name=step.name,
+            )
+            span.set_attributes(gen_ai_attrs_from_meta(result.get("meta", {})))
 
         response_text = (result.get("payloads") or [{}])[0].get("text", "")
         logger.debug("Response <<<\n%s", response_text)
@@ -160,6 +170,8 @@ class GatewayExecutor(BaseExecutor):
                     params["model"] = model_override
                 if thinking_level:
                     params["thinkingLevel"] = thinking_level
+
+                params = inject_traceparent(params)
 
                 await ws.send(json.dumps({
                     "type": "req",

@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Literal
 
+from opentelemetry.trace import Status, StatusCode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..artifacts.store import ArtifactStore
@@ -14,6 +15,7 @@ from ..executors.base import BaseExecutor
 from ..models.context import NormalisedContext
 from ..models.llm import LLMOutput
 from .. import run_events
+from ..tracing import record_event, start_root_span, tracer
 from ..utils import utc_now
 from ..models.pipeline import (
     ParallelGroupConfig,
@@ -63,6 +65,7 @@ def _log_event(run_log: list, level: str, event: str, msg: str, **extra) -> None
         "msg": msg,
         **extra,
     })
+    record_event(event, attributes={"level": level, "msg": msg, **extra})
 
 
 # Built-in prompt used when a verifier fires.
@@ -147,6 +150,30 @@ class PipelineRunner:
         run_id = run_id or str(uuid.uuid4())
         run_log: _LiveRunLog = _LiveRunLog(run_id)
 
+        with start_root_span(
+            "pipeline.run",
+            attributes={
+                "pork.pipeline.name": pipeline.name,
+                "pork.run.id": run_id,
+                "pork.source": normalised.source,
+            },
+        ) as run_span:
+            result = await self._run_pipeline_body(pipeline, normalised, run_id, run_log)
+            run_span.set_attribute("pork.run.status", result.status)
+            if result.abort_reason:
+                run_span.set_attribute("pork.run.abort_reason", result.abort_reason)
+            if result.status == "failed":
+                run_span.set_status(Status(StatusCode.ERROR))
+
+        return result
+
+    async def _run_pipeline_body(
+        self,
+        pipeline: PipelineConfig,
+        normalised: NormalisedContext,
+        run_id: str,
+        run_log: "_LiveRunLog",
+    ) -> PipelineRunResult:
         logger.info("Pipeline run started: id=%s pipeline=%s", run_id, pipeline.name)
         _log_event(run_log, "info", "run_started",
                    f"Pipeline started: {pipeline.name} (source: {normalised.source})")
@@ -269,7 +296,46 @@ class PipelineRunner:
     # Sequential step execution
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _set_step_span_attributes(span, result: "StepResult") -> None:
+        span.set_attribute("pork.step.status", result.status)
+        if result.effective_confidence is not None:
+            span.set_attribute("pork.confidence.effective", result.effective_confidence)
+        if result.output:
+            span.set_attribute("pork.confidence.primary", result.output.confidence)
+            if result.output.model:
+                span.set_attribute("pork.model", result.output.model)
+        if result.verifier_output:
+            span.set_attribute("pork.confidence.verifier", result.verifier_output.confidence)
+        if result.status == "failed":
+            span.set_status(Status(StatusCode.ERROR))
+
     async def _run_step(
+        self,
+        step: StepConfig,
+        index: int,
+        pipeline: PipelineConfig,
+        normalised: NormalisedContext,
+        run_id: str,
+        step_outputs: dict[str, LLMOutput],
+        run_log: list,
+    ) -> StepResult:
+        agent = step.executor_config.get("agent", "")
+        with tracer.start_as_current_span(
+            step.name,
+            attributes={
+                "pork.span.kind": "step",
+                "pork.executor": step.executor,
+                "pork.agent": agent,
+            },
+        ) as span:
+            result = await self._run_step_impl(
+                step, index, pipeline, normalised, run_id, step_outputs, run_log
+            )
+            self._set_step_span_attributes(span, result)
+            return result
+
+    async def _run_step_impl(
         self,
         step: StepConfig,
         index: int,
@@ -469,6 +535,30 @@ class PipelineRunner:
         step_outputs: dict[str, LLMOutput],
         run_log: list,
     ) -> StepResult:
+        with tracer.start_as_current_span(
+            group.name,
+            attributes={
+                "pork.span.kind": "parallel_group",
+                "pork.join_strategy": group.join,
+                "pork.branch_count": len(group.steps),
+            },
+        ) as span:
+            result = await self._run_parallel_group_impl(
+                group, index, pipeline, normalised, run_id, step_outputs, run_log
+            )
+            self._set_step_span_attributes(span, result)
+            return result
+
+    async def _run_parallel_group_impl(
+        self,
+        group: ParallelGroupInner,
+        index: int,
+        pipeline: PipelineConfig,
+        normalised: NormalisedContext,
+        run_id: str,
+        step_outputs: dict[str, LLMOutput],
+        run_log: list,
+    ) -> StepResult:
         start_ms = int(time.time() * 1000)
         ctx = await build_context(
             pipeline, normalised, run_id, group.name, step_outputs,
@@ -592,6 +682,30 @@ class PipelineRunner:
         run_log: list,
         run_id: str,
     ) -> LLMOutput:
+        agent = branch.executor_config.get("agent", "")
+        with tracer.start_as_current_span(
+            branch.name,
+            attributes={
+                "pork.span.kind": "branch",
+                "pork.executor": branch.executor,
+                "pork.agent": agent,
+            },
+        ) as span:
+            output = await self._run_parallel_branch_impl(branch, ctx, run_log, run_id)
+            span.set_attribute("pork.confidence", output.confidence)
+            if output.model:
+                span.set_attribute("pork.model", output.model)
+            if getattr(output, "failed", False):
+                span.set_status(Status(StatusCode.ERROR))
+            return output
+
+    async def _run_parallel_branch_impl(
+        self,
+        branch: ParallelStepConfig,
+        ctx: dict,
+        run_log: list,
+        run_id: str,
+    ) -> LLMOutput:
         # Synthesise a StepConfig so we can reuse executor dispatch and verifier logic.
         # confidence_threshold=0.0 because gating happens at the group level, not per-branch.
         branch_step = StepConfig(
@@ -697,6 +811,27 @@ class PipelineRunner:
         )
 
     async def _run_verifier(
+        self,
+        step: StepConfig,
+        ctx: dict,
+        primary_output: LLMOutput,
+        run_log: list,
+    ) -> LLMOutput | None:
+        verifier = step.verifier
+        assert verifier is not None
+        span_name = f"{step.name}:challenger" if verifier.mode == "challenger" else f"{step.name}:verifier"
+        with tracer.start_as_current_span(
+            span_name,
+            attributes={"pork.span.kind": "verifier", "pork.verifier.mode": verifier.mode},
+        ) as span:
+            output = await self._run_verifier_impl(step, ctx, primary_output, run_log)
+            if output is not None:
+                span.set_attribute("pork.confidence", output.confidence)
+            else:
+                span.set_status(Status(StatusCode.ERROR))
+            return output
+
+    async def _run_verifier_impl(
         self,
         step: StepConfig,
         ctx: dict,

@@ -29,6 +29,7 @@ from .normaliser import PARSERS
 from .normaliser.alertmanager import AlertmanagerStrategy
 from .notifications.telegram import TelegramNotifier
 from .pipeline import PipelineRunner, load_pipelines, load_step_library, resolve_pipeline
+from .tracing import setup_tracing, shutdown_tracing
 from .ui import configure as configure_ui
 from .ui import router as ui_router
 
@@ -227,6 +228,7 @@ async def lifespan(app: FastAPI):
 
     config = _load_config()
     _setup_logging(config)
+    setup_tracing(config)
 
     # Database
     db_url = config.get("database", {}).get("url", "sqlite+aiosqlite:///./runs.db")
@@ -381,6 +383,8 @@ async def lifespan(app: FastAPI):
             await _poller_task
         except asyncio.CancelledError:
             pass
+
+    shutdown_tracing()
 
 
 async def _sighup_reload() -> None:

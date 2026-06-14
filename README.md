@@ -26,6 +26,7 @@ Primary use case is observability automation (alert triage, Grafana investigatio
 - **PyYAML** — pipeline config loading
 - **APScheduler 3.x** — in-process cron scheduler for time-triggered pipeline runs
 - **uvicorn** — ASGI server for local development
+- **OpenTelemetry** — optional per-run distributed tracing (disabled by default) — see §15b
 
 ---
 
@@ -56,6 +57,7 @@ service/
 │   └── *.yaml                  # Copy from samples/steps/ and adapt (see §4a)
 ├── src/
 │   ├── main.py                 # FastAPI app entry point, lifespan, webhook endpoint
+│   ├── tracing.py              # OpenTelemetry tracing setup + span helpers (see §15b)
 │   ├── gateway.py              # Lightweight helper for calling OpenClaw Gateway WS API
 │   ├── ui.py                   # UI routes (pipeline/agent/step library, run history)
 │   ├── normaliser/
@@ -921,6 +923,69 @@ frequency rather than relying on pre-baked percentages.
 Standard `python_*` / `process_*` / `python_gc_*` process-health metrics are included
 automatically via `prometheus_client`'s default collectors.
 
+### 15b. OpenTelemetry Tracing
+
+While `/metrics` gives aggregate, all-time counters, **distributed tracing gives a
+per-run drill-down** — one trace per pipeline run, with a span for every step, branch,
+verifier, and underlying LLM call. Use `/metrics` to spot trends ("escalation rate is
+up this week"); use traces to answer "why was *this* run slow / why did *this* step
+escalate".
+
+Tracing is **disabled by default** and adds zero overhead until enabled — the OTel
+SDK's default `TracerProvider` is a no-op.
+
+**Enabling tracing** — add to `config.yaml`:
+
+```yaml
+observability:
+  otel:
+    enabled: true
+    exporter: otlp          # otlp | console
+    endpoint: http://localhost:4318/v1/traces   # OTLP/HTTP collector endpoint
+    service_name: pork-service
+```
+
+`exporter: console` prints spans to stdout — useful for local verification without a
+collector. `exporter: otlp` (default) sends spans via OTLP/HTTP to a collector (e.g.
+Grafana Alloy/Tempo).
+
+**Span hierarchy** — each pipeline run is its own trace root:
+
+```
+pipeline.run                          (pork.pipeline.name, pork.run.id, pork.source, pork.run.status)
+├── <step name>                       (pork.span.kind=step, pork.executor, pork.agent, confidences, pork.model)
+│   ├── gen_ai.<executor>             (pork.span.kind=gen_ai — the LLM call itself)
+│   └── <step>:verifier|:challenger   (pork.span.kind=verifier, pork.verifier.mode, pork.confidence)
+│       └── gen_ai.<executor>
+├── <group name>                      (pork.span.kind=parallel_group, pork.join_strategy, pork.branch_count)
+│   ├── <branch name>                 (pork.span.kind=branch, pork.executor, pork.agent, pork.confidence)
+│   │   └── gen_ai.<executor>
+│   └── ... (concurrent siblings)
+└── ...
+```
+
+Each `pipeline_runs.logs` event (`step_started`, `verifier_ran`, `branch_completed`,
+etc. — see §14) is also recorded as a **span event** on the current span, so the
+structured run log and the trace timeline tell the same story from two angles.
+
+**`gen_ai.*` span attributes:**
+
+| Attribute | Description |
+|---|---|
+| `gen_ai.system` | Executor name (`openclaw`, `openclaw_ws`, `gateway`) |
+| `gen_ai.request.model` | Model override requested, if any |
+| `gen_ai.response.model` | Actual model used, from executor metadata |
+| `pork.gateway.duration_ms` | Backend-reported call duration |
+| `pork.agent` | Agent name |
+
+**Forward compatibility with the P-Ork Gateway:** every `gen_ai.*` span injects the
+current `traceparent`/`tracestate` (W3C Trace Context) into the outbound `agent`
+request sent to the OpenClaw/P-Ork Gateway WebSocket APIs. Today's gateways ignore
+these extra params. Once the P-Ork Gateway adds its own OTel instrumentation, its
+LLM/tool-call spans will automatically nest under the corresponding `gen_ai.*` span —
+giving one connected trace from webhook → pipeline → step → individual LLM/tool calls,
+with no further changes needed on the P-Ork side.
+
 ---
 
 ## UI
@@ -1022,6 +1087,13 @@ logging:
 artifacts:
   dir: ./artifacts                     # omit this block entirely to disable artifact storage
   retention_days: 7                    # artifact directories older than this are removed daily at 02:00
+
+observability:
+  otel:
+    enabled: false                     # omit this block (or set false) to disable tracing entirely
+    exporter: otlp                     # otlp | console — see §15b
+    endpoint: http://localhost:4318/v1/traces
+    service_name: pork-service
 ```
 
 `${ENV_VAR}` placeholders are resolved at startup. Unresolved placeholders become `""`.

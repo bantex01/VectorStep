@@ -7,6 +7,7 @@ from jinja2 import Environment, Undefined
 
 from ..models.llm import LLMOutput
 from ..models.pipeline import StepConfig
+from ..tracing import gen_ai_attrs_from_meta, tracer
 from .base import BaseExecutor
 
 logger = logging.getLogger(__name__)
@@ -105,7 +106,12 @@ class OpenClawExecutor(BaseExecutor):
 
         self._clear_agent_sessions(agent)
 
-        raw = await self._call_agent(agent, session_key, prompt, timeout, thinking_level)
+        with tracer.start_as_current_span(
+            "gen_ai.openclaw",
+            attributes={"gen_ai.system": "openclaw", "pork.agent": agent},
+        ) as span:
+            raw = await self._call_agent(agent, session_key, prompt, timeout, thinking_level)
+            span.set_attributes(gen_ai_attrs_from_meta(raw.get("result", {}).get("meta", {})))
 
         response_text = (raw.get("result", {}).get("payloads") or [{}])[0].get("text", "")
         logger.debug("Response <<<\n%s", response_text)
