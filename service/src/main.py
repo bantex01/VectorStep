@@ -11,7 +11,8 @@ import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -22,6 +23,7 @@ import functools
 from .executors import EXECUTORS
 from .executors.gateway import GatewayExecutor
 from .executors.openclaw_ws import OpenClawWSExecutor, validate_identity
+from .metrics import PorkCollector, fetch_metrics_data
 from .models.context import NormalisedContext
 from .normaliser import PARSERS
 from .normaliser.alertmanager import AlertmanagerStrategy
@@ -480,6 +482,19 @@ async def _run_pipeline(pipeline, normalised, run_id: str | None = None):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus exposition of run/step counts, durations, and verifier stats."""
+    data = await fetch_metrics_data(get_session_factory())
+    collector = PorkCollector(data)
+    REGISTRY.register(collector)
+    try:
+        output = generate_latest(REGISTRY)
+    finally:
+        REGISTRY.unregister(collector)
+    return Response(content=output, media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/pipelines")

@@ -897,7 +897,29 @@ GET /ui/runs/{run_id}/stream
 
 # List loaded pipelines
 GET /pipelines
+
+# Prometheus metrics — runs/steps by status, step duration histograms, verifier veto rate
+GET /metrics
 ```
+
+### 15a. Prometheus Metrics
+
+`GET /metrics` exposes Prometheus text-format metrics, computed from `pipeline_runs` /
+`pipeline_steps` at scrape time. All counters are cumulative all-time totals — use
+`rate()`/ratios in PromQL for escalation rate, per-agent success rate, and verifier veto
+frequency rather than relying on pre-baked percentages.
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `pork_pipeline_runs_total` | counter | `pipeline`, `status` | Total runs by pipeline and terminal status |
+| `pork_pipeline_runs_in_progress` | gauge | — | Runs currently in `status=running` |
+| `pork_pipeline_steps_total` | counter | `executor`, `agent`, `status` | Total steps by executor, agent, and status |
+| `pork_pipeline_step_duration_seconds` | histogram | `executor`, `agent` | Step execution duration (buckets: 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, +Inf seconds) |
+| `pork_verifier_runs_total` | counter | `agent` | Steps where a verifier ran, by primary agent |
+| `pork_verifier_overrides_total` | counter | `agent` | Verifier runs where the verifier lowered the primary's effective confidence |
+
+Standard `python_*` / `process_*` / `python_gc_*` process-health metrics are included
+automatically via `prometheus_client`'s default collectors.
 
 ---
 
