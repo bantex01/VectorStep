@@ -1,6 +1,8 @@
 from datetime import datetime
 from pydantic import BaseModel, Field
 
+from ..utils import utc_now
+
 
 class NormalisedContext(BaseModel):
     source: str
@@ -10,4 +12,4 @@ class NormalisedContext(BaseModel):
     summary: str | None = None
     raw: dict = Field(default_factory=dict)
     metadata: dict = Field(default_factory=dict)
-    received_at: datetime = Field(default_factory=datetime.utcnow)
+    received_at: datetime = Field(default_factory=utc_now)

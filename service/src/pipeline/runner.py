@@ -4,7 +4,6 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -15,6 +14,7 @@ from ..executors.base import BaseExecutor
 from ..models.context import NormalisedContext
 from ..models.llm import LLMOutput
 from .. import run_events
+from ..utils import utc_now
 from ..models.pipeline import (
     ParallelGroupConfig,
     ParallelGroupInner,
@@ -57,7 +57,7 @@ class _LiveRunLog(list):
 
 def _log_event(run_log: list, level: str, event: str, msg: str, **extra) -> None:
     run_log.append({
-        "ts": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+        "ts": utc_now().isoformat(timespec="milliseconds") + "Z",
         "level": level,
         "event": event,
         "msg": msg,
@@ -857,7 +857,7 @@ class PipelineRunner:
                 verifier_confidence=result.verifier_output.confidence if result.verifier_output else None,
                 effective_confidence=result.effective_confidence,
                 duration_ms=result.duration_ms,
-                executed_at=datetime.utcnow(),
+                executed_at=utc_now(),
                 artifacts=_artifact_refs,
                 agent_trace=_trace,
             ))
@@ -904,7 +904,7 @@ class PipelineRunner:
                 verifier_confidence=None,
                 effective_confidence=None if branch_failed else output.confidence,
                 duration_ms=None,
-                executed_at=datetime.utcnow(),
+                executed_at=utc_now(),
                 artifacts=_artifact_refs,
                 agent_trace=_trace,
             ))
@@ -918,7 +918,7 @@ class PipelineRunner:
             run = await session.get(PipelineRun, run_id)
             if run:
                 run.status = status
-                run.completed_at = datetime.utcnow()
+                run.completed_at = utc_now()
                 run.logs = json.dumps(run_log)
                 await session.commit()
 

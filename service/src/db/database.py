@@ -1,8 +1,11 @@
+import json
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from .models import Base
+from ..utils import utc_now
+from .models import Base, PipelineRun
 
 _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -33,6 +36,34 @@ _MIGRATIONS = [
     "ALTER TABLE pipeline_steps ADD COLUMN artifacts TEXT",
     "ALTER TABLE pipeline_steps ADD COLUMN agent_trace TEXT",
 ]
+
+
+async def mark_interrupted_runs() -> int:
+    """Sweep runs left in 'running' state after a crash or forced restart.
+
+    A clean shutdown never leaves a run in 'running' — any such row on startup
+    means the process died mid-run. Mark it 'interrupted' so it stops showing
+    as in-progress forever and doesn't skew success-rate stats.
+    """
+    assert _session_factory is not None, "Database not initialised — call init_db() first"
+    async with _session_factory() as session:
+        result = await session.execute(
+            select(PipelineRun).where(PipelineRun.status == "running")
+        )
+        runs = result.scalars().all()
+        for run in runs:
+            run.status = "interrupted"
+            run.completed_at = utc_now()
+            logs = json.loads(run.logs) if run.logs else []
+            logs.append({
+                "ts": utc_now().isoformat(timespec="milliseconds") + "Z",
+                "level": "warn",
+                "event": "run_interrupted",
+                "msg": "Service restarted while this run was in progress.",
+            })
+            run.logs = json.dumps(logs)
+        await session.commit()
+        return len(runs)
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:

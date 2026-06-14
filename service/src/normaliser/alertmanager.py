@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Literal
 from .base import BaseParser
 from ..models.context import NormalisedContext
+from ..utils import utc_now
 
 SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
 
@@ -41,7 +42,7 @@ class AlertmanagerParser(BaseParser):
             summary=summary,
             raw=payload,
             metadata=self._common_metadata(payload, alerts, alert),
-            received_at=datetime.utcnow(),
+            received_at=utc_now(),
         )
 
     def _parse_common_labels(self, payload: dict, alerts: list) -> NormalisedContext:
@@ -59,7 +60,7 @@ class AlertmanagerParser(BaseParser):
             summary=summary,
             raw=payload,
             metadata=self._common_metadata(payload, alerts, alerts[0] if alerts else {}),
-            received_at=datetime.utcnow(),
+            received_at=utc_now(),
         )
 
     def _common_metadata(self, payload: dict, alerts: list, alert: dict) -> dict:

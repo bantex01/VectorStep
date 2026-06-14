@@ -4,6 +4,8 @@ from datetime import datetime
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from ..utils import utc_now
+
 
 class Base(DeclarativeBase):
     pass
@@ -15,7 +17,7 @@ class PipelineRun(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_name: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)
-    triggered_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    triggered_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
     status: Mapped[str] = mapped_column(String, nullable=False, default="running")
     normalised_context: Mapped[str] = mapped_column(Text, nullable=False)  # JSON
     raw_payload: Mapped[str] = mapped_column(Text, nullable=False)         # JSON
@@ -47,7 +49,7 @@ class PipelineStep(Base):
     verifier_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     effective_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    executed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    executed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
     artifacts: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: {key: reference}
     agent_trace: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: ordered trace events
 

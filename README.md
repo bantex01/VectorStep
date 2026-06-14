@@ -756,6 +756,7 @@ For agent success rate calculations, `failed` is the only status that counts aga
 | `aborted` | A step aborted due to low confidence |
 | `failed` | A step raised an unhandled error |
 | `running` | Currently in progress |
+| `interrupted` | Service restarted/crashed mid-run — set by the startup sweep, not the runner |
 
 ---
 
@@ -840,7 +841,7 @@ retry:
 | `normalised_context` | json | Full NormalisedContext at trigger time |
 | `raw_payload` | json | Original unmodified webhook payload |
 | `completed_at` | datetime, nullable | |
-| `logs` | json, nullable | Structured run event log — array of `{ts, level, event, msg}` objects. Populated at run completion. Events cover step start/complete/fail/skip/escalate/abort, verifier results, parallel group outcomes, and notifications sent. |
+| `logs` | json, nullable | Structured run event log — array of `{ts, level, event, msg}` objects. Populated at run completion. Events cover step start/complete/fail/skip/escalate/abort, verifier results, parallel group outcomes, notifications sent, and (for `interrupted` runs) the startup interruption sweep. |
 
 **pipeline_steps**
 

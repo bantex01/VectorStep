@@ -16,6 +16,7 @@ from sqlalchemy.orm import selectinload
 from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep
 from .gateway import gateway_call_safe
+from .utils import utc_now
 from . import run_events
 
 logger = logging.getLogger(__name__)
@@ -31,12 +32,13 @@ templates = Jinja2Templates(
 
 def _status_classes(status: str) -> str:
     return {
-        "completed": "bg-green-950 text-green-400 ring-green-800",
-        "running":   "bg-blue-950 text-blue-400 ring-blue-800",
-        "escalated": "bg-amber-950 text-amber-400 ring-amber-800",
-        "aborted":   "bg-orange-950 text-orange-400 ring-orange-800",
-        "failed":    "bg-red-950 text-red-400 ring-red-800",
-        "stopped":   "bg-purple-950 text-purple-400 ring-purple-800",
+        "completed":   "bg-green-950 text-green-400 ring-green-800",
+        "running":     "bg-blue-950 text-blue-400 ring-blue-800",
+        "escalated":   "bg-amber-950 text-amber-400 ring-amber-800",
+        "aborted":     "bg-orange-950 text-orange-400 ring-orange-800",
+        "failed":      "bg-red-950 text-red-400 ring-red-800",
+        "stopped":     "bg-purple-950 text-purple-400 ring-purple-800",
+        "interrupted": "bg-zinc-700 text-zinc-300 ring-zinc-500",
     }.get(status or "", "bg-zinc-800 text-zinc-400 ring-zinc-600")
 
 
@@ -66,7 +68,7 @@ def _format_duration(start: datetime, end: datetime | None) -> str:
 
 
 def _format_ago(dt: datetime) -> str:
-    secs = int((datetime.utcnow() - dt.replace(tzinfo=None)).total_seconds())
+    secs = int((utc_now() - dt.replace(tzinfo=None)).total_seconds())
     if secs < 5:
         return "just now"
     if secs < 60:
@@ -125,8 +127,8 @@ templates.env.globals.update({
 @router.get("/", response_class=HTMLResponse)
 async def ui_dashboard(request: Request):
     sf = get_session_factory()
-    cutoff_24h = datetime.utcnow() - timedelta(hours=24)
-    cutoff_7d  = datetime.utcnow() - timedelta(days=7)
+    cutoff_24h = utc_now() - timedelta(hours=24)
+    cutoff_7d  = utc_now() - timedelta(days=7)
 
     async with sf() as session:
         rows = await session.execute(
@@ -165,7 +167,8 @@ async def ui_dashboard(request: Request):
         recent_runs = rows.scalars().all()
 
     total_24h = sum(counts_24h.values())
-    terminal_24h = total_24h - counts_24h.get("running", 0)
+    non_terminal_24h = counts_24h.get("running", 0) + counts_24h.get("interrupted", 0)
+    terminal_24h = total_24h - non_terminal_24h
     success_rate = (
         round((terminal_24h - counts_24h.get("failed", 0)) / terminal_24h * 100)
         if terminal_24h > 0 else None
@@ -216,7 +219,7 @@ async def ui_runs(
         "selected_pipeline": pipeline or "",
         "limit": limit,
         "offset": offset,
-        "statuses": ["completed", "running", "escalated", "aborted", "failed", "stopped"],
+        "statuses": ["completed", "running", "escalated", "aborted", "failed", "stopped", "interrupted"],
         "active_page": "runs",
     })
 

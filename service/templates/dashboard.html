@@ -56,7 +56,7 @@
 
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-4">Status breakdown <span class="text-zinc-500 font-normal">(24h)</span></h2>
-    {% set statuses = ['completed', 'escalated', 'aborted', 'failed', 'stopped', 'running'] %}
+    {% set statuses = ['completed', 'escalated', 'aborted', 'failed', 'stopped', 'running', 'interrupted'] %}
     {% for s in statuses %}
       {% set n = counts_24h.get(s, 0) %}
       {% if n > 0 or s in ['completed', 'escalated'] %}

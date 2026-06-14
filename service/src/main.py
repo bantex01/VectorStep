@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from .db.database import create_tables, get_session_factory, init_db
+from .db.database import create_tables, get_session_factory, init_db, mark_interrupted_runs
 from .db.models import PipelineRun, PipelineStep
 import functools
 
@@ -231,6 +231,10 @@ async def lifespan(app: FastAPI):
     init_db(db_url)
     await create_tables()
     logger.info("Database initialised: %s", db_url)
+
+    interrupted = await mark_interrupted_runs()
+    if interrupted:
+        logger.warning("Marked %d run(s) as 'interrupted' after restart", interrupted)
 
     # Step library (load before pipelines so references can be resolved)
     _step_library_dir = config.get("step_library_dir", "./steps")

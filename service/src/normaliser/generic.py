@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, ValidationError
 
 from ..models.context import NormalisedContext
+from ..utils import utc_now
 from .base import BaseParser
 
 
@@ -32,5 +33,5 @@ class GenericParser(BaseParser):
             summary=parsed.summary,
             raw=payload,
             metadata=parsed.data,
-            received_at=datetime.utcnow(),
+            received_at=utc_now(),
         )

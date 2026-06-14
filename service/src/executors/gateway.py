@@ -1,7 +1,6 @@
 import json
 import logging
 import uuid
-from datetime import datetime
 
 import websockets
 from jinja2 import Environment, Undefined
@@ -9,6 +8,7 @@ from jinja2 import Environment, Undefined
 from ..models.llm import LLMOutput
 from ..models.pipeline import StepConfig
 from .. import run_events
+from ..utils import utc_now
 from .base import BaseExecutor
 
 logger = logging.getLogger(__name__)
@@ -216,7 +216,7 @@ class GatewayExecutor(BaseExecutor):
         """
         _LIVE_MAX = 200
         live: dict = {
-            "ts": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+            "ts": utc_now().isoformat(timespec="milliseconds") + "Z",
             "type": "agent_trace",
             "step": step_name,
             "trace_type": event.get("type"),
