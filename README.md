@@ -1236,6 +1236,20 @@ curl -X POST "http://localhost:8000/webhook?source=generic" \
   -d @tests/fixtures/generic_new_order.json
 ```
 
+### Running Tests
+
+Unit tests cover the pure-function logic: pipeline resolver matching, verifier
+confidence-combination and parallel join strategies, step-library `use:`
+deep-merge, and webhook dedup fingerprinting/settings.
+
+```bash
+# from repo root — installs requirements.txt plus pytest/pytest-asyncio
+pip install -r requirements-dev.txt
+
+cd service
+pytest
+```
+
 ---
 
 ## Adding a New Source Parser
