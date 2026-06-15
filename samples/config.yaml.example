@@ -46,3 +46,10 @@ logging:
 artifacts:
   dir: ./artifacts      # omit this block entirely to disable artifact storage
   retention_days: 7     # artifact directories older than this are removed daily at 02:00
+
+dedup:
+  enabled: true          # omit this block (or set false) to disable dedup entirely
+  window_seconds: 300    # suppress duplicate webhooks (same pipeline+fingerprint) within this window
+                          # — always suppresses while a matching run is still "running",
+                          # regardless of this value. Override per-pipeline via trigger.dedup
+                          # (see README §3a).

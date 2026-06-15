@@ -35,6 +35,8 @@ _MIGRATIONS = [
     "ALTER TABLE pipeline_runs ADD COLUMN logs TEXT",
     "ALTER TABLE pipeline_steps ADD COLUMN artifacts TEXT",
     "ALTER TABLE pipeline_steps ADD COLUMN agent_trace TEXT",
+    "ALTER TABLE pipeline_runs ADD COLUMN fingerprint TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_fingerprint ON pipeline_runs (fingerprint)",
 ]
 
 

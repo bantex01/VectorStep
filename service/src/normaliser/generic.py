@@ -12,6 +12,7 @@ class GenericPayload(BaseModel):
     event: str | None = None
     source: str = "generic"
     summary: str | None = None
+    idempotency_key: str | None = None  # dedup key — see README §3a
     data: dict = {}
 
 
@@ -31,6 +32,7 @@ class GenericParser(BaseParser):
             pipeline=parsed.pipeline,
             labels=labels,
             summary=parsed.summary,
+            fingerprint=parsed.idempotency_key,
             raw=payload,
             metadata=parsed.data,
             received_at=utc_now(),

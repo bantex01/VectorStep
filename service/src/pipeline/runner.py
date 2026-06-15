@@ -952,6 +952,7 @@ class PipelineRunner:
                 status="running",
                 normalised_context=normalised.model_dump_json(),
                 raw_payload=json.dumps(normalised.raw),
+                fingerprint=normalised.fingerprint,
             ))
             await session.commit()
 

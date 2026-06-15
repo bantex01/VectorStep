@@ -23,6 +23,7 @@ class PipelineRun(Base):
     raw_payload: Mapped[str] = mapped_column(Text, nullable=False)         # JSON
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array of run events
+    fingerprint: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # dedup key
 
     steps: Mapped[list["PipelineStep"]] = relationship(
         "PipelineStep", back_populates="run", order_by="PipelineStep.step_index"

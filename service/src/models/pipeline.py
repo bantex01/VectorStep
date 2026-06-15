@@ -71,8 +71,19 @@ class ParallelGroupConfig(BaseModel):
     parallel: ParallelGroupInner
 
 
+class DedupConfig(BaseModel):
+    """Per-pipeline override for webhook deduplication — see README §3a.
+
+    Both fields default to None, meaning "fall back to the service-level
+    dedup.enabled / dedup.window_seconds in config.yaml".
+    """
+    enabled: bool | None = None
+    window_seconds: int | None = None
+
+
 class TriggerConfig(BaseModel):
     match: dict[str, str] = Field(default_factory=dict)
+    dedup: DedupConfig | None = None
 
 
 class ContextTemplateConfig(BaseModel):

@@ -1,0 +1,89 @@
+# Template: Dedup-Aware Alert Triage
+#
+# Demonstrates trigger.dedup (see README §3a) — a per-pipeline override of the
+# webhook deduplication window described in IMPROVEMENTS_PORK.md.
+#
+# Dedup applies automatically to alertmanager-sourced webhooks with NO config
+# needed — every alert carries a fingerprint (Alertmanager's own per-alert
+# `fingerprint`, or `groupKey` for the common_labels strategy), and the service
+# defaults from config.yaml (dedup.enabled: true, dedup.window_seconds: 300)
+# apply to any pipeline that doesn't set trigger.dedup at all.
+#
+# trigger.dedup below only widens the window for THIS pipeline, because its
+# investigation step can run for 10+ minutes — long enough for Alertmanager's
+# repeat-fire to land before the first run finishes.
+#
+# Copy this file to pipelines/, adjust the match block and agent, and reload.
+
+name: my-service-triage-dedup
+description: Critical alert triage with a widened dedup window for slow investigations
+version: 1
+
+trigger:
+  match:
+    severity: critical
+    service: my-service        # match your Alertmanager service label
+
+  dedup:
+    # This investigation can take up to timeout_seconds below (900s). Alertmanager's
+    # default group_interval/repeat_interval can re-fire well inside that — widen the
+    # window so a re-fire mid-investigation is suppressed rather than spawning a
+    # second concurrent triage for the same alert.
+    window_seconds: 900
+
+    # In-flight runs (status="running") are ALWAYS suppressed regardless of
+    # window_seconds — that's the overlap-prevention case and isn't tunable.
+
+    # To opt this pipeline out of dedup entirely (e.g. every alert, however
+    # repetitive, should get its own run):
+    #   enabled: false
+
+context_template:
+  include:
+    - severity
+    - labels.service
+    - labels.environment
+    - summary
+
+steps:
+  - name: investigation
+    executor: openclaw
+    executor_config:
+      agent: main
+      session_key: "agent:main:{{pipeline_run_id}}:investigation"
+    confidence_threshold: 0.70
+    on_low_confidence: escalate
+    on_abort: notify
+    timeout_seconds: 900
+    prompt_template: |
+      You are triaging a {{severity}} alert for {{labels.service}} in
+      {{labels.environment}}.
+
+      Alert summary: {{summary}}
+
+      Investigate and return JSON only, no other text:
+      {
+        "confidence": 0.0,
+        "summary": "...",
+        "next_step_context": "...",
+        "reasoning": {
+          "supports": "...",
+          "contradicts": "...",
+          "assumptions": "..."
+        }
+      }
+
+notifications:
+  escalate:
+    channel: telegram
+    template: |
+      ⚠️ Escalated: {{pipeline_name}}
+      Service: {{labels.service}} ({{labels.environment}})
+      Step: {{current_step}}
+      Summary: {{step_summary}}
+
+  notify:
+    channel: telegram
+    template: |
+      Aborted: {{pipeline_name}}
+      Step: {{current_step}}

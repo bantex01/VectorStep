@@ -5,7 +5,7 @@ import os
 import signal
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -13,7 +13,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from .db.database import create_tables, get_session_factory, init_db, mark_interrupted_runs
@@ -25,6 +25,7 @@ from .executors.gateway import GatewayExecutor
 from .executors.openclaw_ws import OpenClawWSExecutor, validate_identity
 from .metrics import PorkCollector, fetch_metrics_data
 from .models.context import NormalisedContext
+from .models.pipeline import PipelineConfig
 from .normaliser import PARSERS
 from .normaliser.alertmanager import AlertmanagerStrategy
 from .notifications.telegram import TelegramNotifier
@@ -32,6 +33,7 @@ from .pipeline import PipelineRunner, load_pipelines, load_step_library, resolve
 from .tracing import setup_tracing, shutdown_tracing
 from .ui import configure as configure_ui
 from .ui import router as ui_router
+from .utils import utc_now
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,6 +117,8 @@ _app_ref: "FastAPI | None" = None
 _poller_task: asyncio.Task | None = None
 _artifact_store = None
 _artifact_retention_days: int = 7
+_dedup_enabled: bool = True
+_dedup_window_seconds: int = 300
 
 
 def _load_config() -> dict:
@@ -223,12 +227,16 @@ async def _cleanup_artifacts() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task, _artifact_store, _artifact_retention_days
+    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task, _artifact_store, _artifact_retention_days, _dedup_enabled, _dedup_window_seconds
     _app_ref = app
 
     config = _load_config()
     _setup_logging(config)
     setup_tracing(config)
+
+    dedup_cfg = config.get("dedup", {})
+    _dedup_enabled = dedup_cfg.get("enabled", True)
+    _dedup_window_seconds = dedup_cfg.get("window_seconds", 300)
 
     # Database
     db_url = config.get("database", {}).get("url", "sqlite+aiosqlite:///./runs.db")
@@ -403,6 +411,45 @@ app.include_router(ui_router)
 # Webhook endpoint
 # ---------------------------------------------------------------------------
 
+async def _find_duplicate_run(
+    pipeline_name: str, fingerprint: str, window_seconds: int
+) -> PipelineRun | None:
+    """Return a recent or in-progress run with the same pipeline+fingerprint, if any.
+
+    A run with status="running" is always considered a duplicate regardless of
+    window_seconds — this is the race-prevention case (two overlapping triages for
+    the same alert). window_seconds additionally suppresses re-fires shortly after
+    a run has completed (Alertmanager repeat-fire on a flapping alert).
+    """
+    session_factory = get_session_factory()
+    cutoff = utc_now() - timedelta(seconds=window_seconds)
+    async with session_factory() as session:
+        result = await session.execute(
+            select(PipelineRun)
+            .where(PipelineRun.pipeline_name == pipeline_name)
+            .where(PipelineRun.fingerprint == fingerprint)
+            .where(or_(PipelineRun.status == "running", PipelineRun.triggered_at > cutoff))
+            .order_by(PipelineRun.triggered_at.desc())
+        )
+        return result.scalars().first()
+
+
+def _resolve_dedup_settings(pipeline: PipelineConfig) -> tuple[bool, int]:
+    """Resolve effective (enabled, window_seconds) for a pipeline.
+
+    trigger.dedup fields override the service-level config.yaml defaults when set;
+    None means "fall back to the service default".
+    """
+    dedup_cfg = pipeline.trigger.dedup
+    enabled = _dedup_enabled if dedup_cfg is None or dedup_cfg.enabled is None else dedup_cfg.enabled
+    window_seconds = (
+        _dedup_window_seconds
+        if dedup_cfg is None or dedup_cfg.window_seconds is None
+        else dedup_cfg.window_seconds
+    )
+    return enabled, window_seconds
+
+
 @app.post("/webhook")
 async def webhook(
     request: Request,
@@ -445,6 +492,28 @@ async def webhook(
             detail=f"No pipeline matched for source='{normalised.source}' "
                    f"severity='{normalised.severity}' labels={normalised.labels}",
         )
+
+    if normalised.fingerprint:
+        enabled, window_seconds = _resolve_dedup_settings(pipeline)
+        if enabled:
+            duplicate = await _find_duplicate_run(pipeline.name, normalised.fingerprint, window_seconds)
+            if duplicate:
+                logger.info(
+                    "Webhook deduplicated: pipeline=%s fingerprint=%s matches run=%s (status=%s)",
+                    pipeline.name, normalised.fingerprint, duplicate.id, duplicate.status,
+                )
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "status": "deduplicated",
+                        "run_id": duplicate.id,
+                        "source": normalised.source,
+                        "pipeline": pipeline.name,
+                        "severity": normalised.severity,
+                        "summary": normalised.summary,
+                        "reason": f"Duplicate of run {duplicate.id} (status={duplicate.status})",
+                    },
+                )
 
     # Generate run_id here so it can be returned in the 202 response before the
     # background task starts. The runner accepts a pre-supplied run_id and uses it

@@ -123,6 +123,7 @@ class NormalisedContext(BaseModel):
     severity: str | None           # critical / warning / info
     labels: dict[str, str]         # service, environment, etc.
     summary: str | None            # human readable description of the event
+    fingerprint: str | None        # dedup key — see §3a
     raw: dict                      # original unmodified payload
     metadata: dict                 # source-specific extras
     received_at: datetime
@@ -139,6 +140,7 @@ Any tool that can send HTTP can target `POST /webhook?source=generic` using a st
   "event": "order.placed",        // optional — stored in labels["event"] for audit
   "source": "shopify",            // optional — defaults to "generic"
   "summary": "Human readable...", // optional
+  "idempotency_key": "order-12345", // optional — dedup key, see §3a. Omit to disable dedup.
   "data": { ... }                 // optional — free-form dict, lands in metadata
 }
 ```
@@ -148,6 +150,7 @@ Any tool that can send HTTP can target `POST /webhook?source=generic` using a st
 - `event` → `labels["event"]`
 - `source` → `source`
 - `summary` → `summary`
+- `idempotency_key` → `fingerprint`
 - `data` → `metadata` (accessible in prompts as `{{metadata.field_name}}` or just `{{field_name}}` via leaf flattening)
 
 ### 3. Pipeline Resolution
@@ -155,6 +158,79 @@ Any tool that can send HTTP can target `POST /webhook?source=generic` using a st
 The `resolver` loads all YAML configs from `PIPELINE_CONFIG_DIR` and matches the incoming `NormalisedContext` against each config's `trigger.match` block. First match wins. Configs should be ordered by specificity (more specific matches first).
 
 Pipeline name can also be explicitly set by the source parser if the webhook payload contains a pipeline attribute (e.g. an Alertmanager label `pipeline: alert-triage-critical`).
+
+---
+
+### 3a. Idempotency & Deduplication
+
+Alertmanager (and similar sources) re-send the same alert repeatedly — every evaluation
+interval while it's firing, and again on resolve. Without dedup, each resend spawns a
+fresh pipeline run: redundant LLM spend, and worse, **overlapping remediation runs for
+the same alert**.
+
+#### Fingerprint
+
+Each parser populates `NormalisedContext.fingerprint` — the dedup key:
+
+| Source | Fingerprint source |
+|---|---|
+| `alertmanager` | The matched alert's `fingerprint` field (Alertmanager's own label-hash), or the group's `groupKey` for the `common_labels` strategy. Falls back to a hash of the relevant labels if neither is present. The alert `status` (`firing`/`resolved`) is appended, so a resolve notification is never suppressed as a duplicate of the firing run. |
+| `generic` | The optional `idempotency_key` field (see §2a). If omitted, `fingerprint` is `None` and dedup is skipped for that webhook — generic triggers (orders, etc.) are opt-in. |
+
+#### Dedup check
+
+On `POST /webhook`, after the pipeline is resolved and before a run is started, P-Ork
+looks for an existing `pipeline_runs` row with the same `pipeline_name` + `fingerprint`:
+
+- **In-flight** (`status="running"`) — **always** suppressed, regardless of config. This
+  is the race-prevention case: two overlapping triage/remediation runs for the same alert
+  never run concurrently.
+- **Recent** (`triggered_at` within `window_seconds` of now) — suppressed even if the
+  prior run has completed. This absorbs Alertmanager's repeat-fire on a flapping alert.
+
+If either matches, no new run is created. The webhook still gets a `202`, but with
+`status: "deduplicated"` and the matching run's `run_id`:
+
+```json
+{
+  "status": "deduplicated",
+  "run_id": "<existing-run-id>",
+  "source": "alertmanager",
+  "pipeline": "alert-triage-critical",
+  "severity": "critical",
+  "summary": "...",
+  "reason": "Duplicate of run <existing-run-id> (status=running)"
+}
+```
+
+#### Configuration
+
+Service-wide defaults in `config.yaml`:
+
+```yaml
+dedup:
+  enabled: true
+  window_seconds: 300
+```
+
+Per-pipeline override via `trigger.dedup` (both fields optional — `None` falls back to
+the service default):
+
+```yaml
+trigger:
+  match:
+    severity: critical
+  dedup:
+    window_seconds: 600   # this pipeline's triage takes a while — widen the window
+    # enabled: false       # or opt this pipeline out of dedup entirely
+```
+
+**Known limitation:** there's a small TOCTOU race if two webhooks with the same
+fingerprint arrive within milliseconds of each other — both could pass the check before
+either's run row is inserted. Worst case is one extra redundant run, not a correctness
+issue.
+
+---
 
 ### 4. Pipeline Config Schema (YAML)
 
@@ -173,6 +249,8 @@ trigger:
   match:
     severity: critical          # matched against NormalisedContext fields/labels
     environment: prod           # all conditions must match (AND logic)
+  dedup:                        # optional — overrides config.yaml dedup.* for this pipeline
+    window_seconds: 600         # see §3a
 
 context_template:
   include:                      # fields auto-injected into every step prompt
@@ -874,6 +952,7 @@ retry:
 # Trigger a run (returns immediately — pipeline runs in background)
 POST /webhook?source=<source>
 # → {"status": "accepted", "run_id": "<uuid>"}
+# → {"status": "deduplicated", "run_id": "<uuid>", "reason": "..."}  — see §3a
 
 # Reload step library and all pipeline YAMLs from disk without restarting
 POST /reload
@@ -1088,6 +1167,10 @@ artifacts:
   dir: ./artifacts                     # omit this block entirely to disable artifact storage
   retention_days: 7                    # artifact directories older than this are removed daily at 02:00
 
+dedup:
+  enabled: true                        # omit this block (or set false) to disable dedup entirely
+  window_seconds: 300                  # see §3a — overridable per-pipeline via trigger.dedup
+
 observability:
   otel:
     enabled: false                     # omit this block (or set false) to disable tracing entirely
@@ -1203,6 +1286,9 @@ The `steps/` directory is gitignored — steps are personal to your deployment. 
 | `executor_config` deep-merge on library steps | Lets pipelines add `model` or `thinking_level` without repeating the full agent/session_key block |
 | Structured run event log in DB | Per-run timeline queryable from the UI without grepping stdout; survives process restarts |
 | `uvicorn.access` separated from service logs | HTTP request noise no longer pollutes run event output on stdout or in service.log |
+| In-flight dedup always wins regardless of `window_seconds` | Prevents two overlapping triage/remediation runs for the same alert — the dangerous case — independent of how the recency window is tuned |
+| Alert `status` (firing/resolved) folded into the Alertmanager fingerprint | A resolve notification must never be suppressed as a duplicate of the firing run it's closing out |
+| `trigger.dedup` as a sibling of `trigger.match`, not inside it | Keeps `match` purely about resolver conditions (`_matches()` iterates every key as a field/label comparison) — dedup is an execution-policy concern, not a matching condition |
 
 ---
 

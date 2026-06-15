@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import datetime
 from typing import Literal
 from .base import BaseParser
@@ -7,6 +9,18 @@ from ..utils import utc_now
 SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
 
 AlertmanagerStrategy = Literal["most_severe", "common_labels"]
+
+
+def _fingerprint(base: str | None, labels: dict, status: str | None) -> str:
+    """Build a dedup fingerprint from an Alertmanager-supplied base identifier.
+
+    Falls back to a hash of the labels if Alertmanager didn't supply one (older
+    versions omit per-alert `fingerprint`). The alert `status` (firing/resolved) is
+    appended so a resolved notification isn't suppressed as a duplicate of the
+    firing run for the same alert.
+    """
+    key = base or hashlib.sha256(json.dumps(labels, sort_keys=True).encode()).hexdigest()[:16]
+    return f"{key}:{status}" if status else key
 
 
 class AlertmanagerParser(BaseParser):
@@ -40,6 +54,7 @@ class AlertmanagerParser(BaseParser):
             severity=severity,
             labels=labels,
             summary=summary,
+            fingerprint=_fingerprint(alert.get("fingerprint"), labels, payload.get("status")),
             raw=payload,
             metadata=self._common_metadata(payload, alerts, alert),
             received_at=utc_now(),
@@ -58,6 +73,7 @@ class AlertmanagerParser(BaseParser):
             severity=severity,
             labels=labels,
             summary=summary,
+            fingerprint=_fingerprint(payload.get("groupKey"), labels, payload.get("status")),
             raw=payload,
             metadata=self._common_metadata(payload, alerts, alerts[0] if alerts else {}),
             received_at=utc_now(),
