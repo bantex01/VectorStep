@@ -42,6 +42,17 @@ class RetryConfig(BaseModel):
     delay_seconds: float = 1.0
 
 
+class LoopConfig(BaseModel):
+    """Refinement loop: re-run the step until effective confidence reaches the target.
+
+    Each iteration receives {{loop.iteration}}, {{loop.prior_confidence}}, and
+    {{loop.prior_output}} in its Jinja2 context so the prompt can ask the agent
+    to self-correct. The final iteration's output is what gets saved to the DB.
+    """
+    confidence: float
+    max_iterations: int = 3
+
+
 class StepConfig(BaseModel):
     name: str
     executor: str
@@ -54,6 +65,7 @@ class StepConfig(BaseModel):
     when: str | None = None
     verifier: VerifierConfig | None = None
     retry: RetryConfig | None = None
+    loop_until: LoopConfig | None = None
 
 
 class ParallelGroupInner(BaseModel):
@@ -116,6 +128,7 @@ class LibraryStepConfig(BaseModel):
     timeout_seconds: int | None = None
     verifier: VerifierConfig | None = None
     retry: RetryConfig | None = None
+    loop_until: LoopConfig | None = None
 
 
 class PipelineConfig(BaseModel):

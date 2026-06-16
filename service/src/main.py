@@ -563,11 +563,13 @@ async def webhook(
     )
 
 
-async def _run_pipeline(pipeline, normalised, run_id: str | None = None):
+async def _run_pipeline(pipeline, normalised, run_id: str | None = None,
+                        from_step: str | None = None, initial_step_outputs: dict | None = None):
     global _active_runs
     from .run_events import publish_complete as _publish_complete
     try:
-        result = await _runner.run(pipeline, normalised, run_id=run_id)
+        result = await _runner.run(pipeline, normalised, run_id=run_id,
+                                   from_step=from_step, initial_step_outputs=initial_step_outputs)
         logger.info(
             "Pipeline completed: id=%s pipeline=%s status=%s",
             result.run_id, result.pipeline_name, result.status,
@@ -731,3 +733,119 @@ async def get_run(run_id: str):
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
     return _format_run_detail(run)
+
+
+@app.post("/runs/{run_id}/rerun")
+async def rerun_from_step(run_id: str, request: Request):
+    """Create a new pipeline run starting from a specific step.
+
+    Prior step outputs are loaded from the original run's DB rows and injected
+    into the new run so prompt templates referencing {{steps.prior.field}} and
+    {{artifacts.prior.key}} resolve correctly without re-executing those steps.
+    """
+    from .models.llm import LLMOutput as _LLMOutput
+
+    body = await request.json()
+    from_step = body.get("from_step", "").strip()
+    if not from_step:
+        raise HTTPException(status_code=400, detail="from_step is required")
+
+    # Load original run + its steps
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        result = await session.execute(
+            select(PipelineRun)
+            .where(PipelineRun.id == run_id)
+            .options(selectinload(PipelineRun.steps))
+        )
+        original_run = result.scalar_one_or_none()
+
+    if not original_run:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    # Resolve current pipeline config
+    pipeline = next((p for p in _pipelines if p.name == original_run.pipeline_name), None)
+    if not pipeline:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Pipeline '{original_run.pipeline_name}' is not currently loaded",
+        )
+
+    # Validate from_step is a sequential step in the pipeline
+    from .models.pipeline import StepConfig as _StepConfig
+    sequential_names = [s.name for s in pipeline.steps if isinstance(s, _StepConfig)]
+    if from_step not in sequential_names:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"'{from_step}' is not a sequential step in pipeline "
+                f"'{pipeline.name}'. Re-run supports sequential steps only. "
+                f"Available: {sequential_names}"
+            ),
+        )
+
+    # Reconstruct prior step outputs from DB rows that precede from_step
+    sorted_steps = sorted(original_run.steps, key=lambda s: s.step_index)
+    initial_step_outputs: dict[str, _LLMOutput] = {}
+    for step_row in sorted_steps:
+        if step_row.step_name == from_step:
+            break
+        if not step_row.parsed_output:
+            continue
+        parsed = json.loads(step_row.parsed_output)
+        output = _LLMOutput.model_validate(parsed)
+        if "/" in step_row.step_name:
+            # Parallel branch stored as "group/branch" — register under branch name
+            # so {{steps.branch_name.field}} resolves correctly downstream
+            _, branch_name = step_row.step_name.split("/", 1)
+            initial_step_outputs[branch_name] = output
+        else:
+            initial_step_outputs[step_row.step_name] = output
+
+    # Reconstruct NormalisedContext from the original run, with a fresh timestamp
+    # and no fingerprint (re-runs are never deduped against each other)
+    nc_raw = json.loads(original_run.normalised_context)
+    normalised = NormalisedContext(
+        source="rerun",
+        pipeline=nc_raw.get("pipeline", ""),
+        severity=nc_raw.get("severity"),
+        labels=nc_raw.get("labels", {}),
+        summary=nc_raw.get("summary"),
+        fingerprint=None,
+        raw=nc_raw.get("raw", {}),
+        metadata=nc_raw.get("metadata", {}),
+    )
+
+    global _active_runs
+    if _active_runs >= _max_concurrent_runs:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "status": "overloaded",
+                "active_runs": _active_runs,
+                "max_concurrent_runs": _max_concurrent_runs,
+            },
+        )
+
+    new_run_id = str(uuid.uuid4())
+    _active_runs += 1
+    asyncio.create_task(
+        _run_pipeline(pipeline, normalised, new_run_id,
+                      from_step=from_step, initial_step_outputs=initial_step_outputs)
+    )
+
+    logger.info(
+        "Re-run created: original=%s new=%s from_step=%s prior_steps=%d",
+        run_id, new_run_id, from_step, len(initial_step_outputs),
+    )
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "accepted",
+            "run_id": new_run_id,
+            "original_run_id": run_id,
+            "from_step": from_step,
+            "prior_steps_loaded": len(initial_step_outputs),
+        },
+    )

@@ -18,6 +18,7 @@ from .. import run_events
 from ..tracing import record_event, start_root_span, tracer
 from ..utils import utc_now
 from ..models.pipeline import (
+    LoopConfig,
     ParallelGroupConfig,
     ParallelGroupInner,
     ParallelStepConfig,
@@ -146,6 +147,8 @@ class PipelineRunner:
         pipeline: PipelineConfig,
         normalised: NormalisedContext,
         run_id: str | None = None,
+        from_step: str | None = None,
+        initial_step_outputs: "dict[str, LLMOutput] | None" = None,
     ) -> PipelineRunResult:
         run_id = run_id or str(uuid.uuid4())
         run_log: _LiveRunLog = _LiveRunLog(run_id)
@@ -158,7 +161,11 @@ class PipelineRunner:
                 "pork.source": normalised.source,
             },
         ) as run_span:
-            result = await self._run_pipeline_body(pipeline, normalised, run_id, run_log)
+            result = await self._run_pipeline_body(
+                pipeline, normalised, run_id, run_log,
+                from_step=from_step,
+                initial_step_outputs=initial_step_outputs,
+            )
             run_span.set_attribute("pork.run.status", result.status)
             if result.abort_reason:
                 run_span.set_attribute("pork.run.abort_reason", result.abort_reason)
@@ -173,10 +180,18 @@ class PipelineRunner:
         normalised: NormalisedContext,
         run_id: str,
         run_log: "_LiveRunLog",
+        from_step: str | None = None,
+        initial_step_outputs: "dict[str, LLMOutput] | None" = None,
     ) -> PipelineRunResult:
         logger.info("Pipeline run started: id=%s pipeline=%s", run_id, pipeline.name)
         _log_event(run_log, "info", "run_started",
                    f"Pipeline started: {pipeline.name} (source: {normalised.source})")
+
+        if from_step:
+            n = len(initial_step_outputs or {})
+            logger.info("Re-run from step '%s': %d prior step output(s) pre-loaded", from_step, n)
+            _log_event(run_log, "info", "rerun_started",
+                       f"Re-run from step: {from_step} ({n} prior step output(s) replayed)")
 
         await self._db_create_run(run_id, pipeline, normalised)
 
@@ -186,7 +201,8 @@ class PipelineRunner:
             status="completed",
         )
 
-        step_outputs: dict[str, LLMOutput] = {}
+        step_outputs: dict[str, LLMOutput] = dict(initial_step_outputs or {})
+        skipping = from_step is not None
 
         for index, step in enumerate(pipeline.steps):
             if isinstance(step, ParallelGroupConfig):
@@ -199,6 +215,13 @@ class PipelineRunner:
                 step_when = step.when
                 step_on_abort = step.on_abort
                 step_threshold = step.confidence_threshold
+
+            # Skip steps before from_step when replaying a re-run
+            if skipping:
+                if step_name == from_step:
+                    skipping = False
+                else:
+                    continue
 
             # Evaluate when: condition before doing any work
             if step_when is not None:
@@ -347,11 +370,6 @@ class PipelineRunner:
     ) -> StepResult:
         start_ms = int(time.time() * 1000)
 
-        ctx = await build_context(
-            pipeline, normalised, run_id, step.name, step_outputs,
-            artifact_store=self._artifact_store,
-        )
-
         agent = step.executor_config.get("agent", "")
         agent_label = f"{step.executor} / {agent}" if agent else step.executor
         logger.info("Executing step: run_id=%s step=%s (%d/%d)", run_id, step.name, index + 1, len(pipeline.steps))
@@ -359,100 +377,141 @@ class PipelineRunner:
                    f"Step started: {step.name} [{agent_label}]",
                    step=step.name, executor=step.executor, agent=agent or None)
 
-        max_attempts = step.retry.attempts if step.retry else 1
-        last_error: str | None = None
+        loop_cfg = step.loop_until
+        max_iters = loop_cfg.max_iterations if loop_cfg else 1
         primary_output: LLMOutput | None = None
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                executor = self._get_executor(step.executor)
-                coro = executor.execute(step, ctx)
-                if step.timeout_seconds:
-                    primary_output = await asyncio.wait_for(coro, timeout=step.timeout_seconds)
-                else:
-                    primary_output = await coro
-                if self._artifact_store:
-                    primary_output = await self._intercept_artifacts(
-                        primary_output, run_id, step.name
-                    )
-                last_error = None
-                break
-            except asyncio.TimeoutError:
-                last_error = f"Step timed out after {step.timeout_seconds}s"
-                logger.error(
-                    "Step '%s' run_id=%s %s (attempt %d/%d)",
-                    step.name, run_id, last_error, attempt, max_attempts,
-                )
-                _log_event(run_log, "error", "step_error",
-                           f"Step error: {step.name} — {last_error}", step=step.name)
-            except Exception as exc:
-                last_error = f"Executor error: {type(exc).__name__}: {exc}"
-                logger.error(
-                    "Step '%s' run_id=%s %s (attempt %d/%d)",
-                    step.name, run_id, last_error, attempt, max_attempts,
-                )
-                _log_event(run_log, "error", "step_error",
-                           f"Step error: {step.name} — {last_error}", step=step.name)
-
-            if attempt < max_attempts:
-                delay = _compute_backoff(step.retry, attempt)
-                logger.info(
-                    "Retrying step '%s' in %.1fs (attempt %d/%d)",
-                    step.name, delay, attempt + 1, max_attempts,
-                )
-                _log_event(run_log, "warn", "step_retrying",
-                           f"Retrying {step.name} in {delay:.1f}s (attempt {attempt + 1}/{max_attempts})",
-                           step=step.name)
-                await asyncio.sleep(delay)
-
-        if last_error:
-            return StepResult(
-                step_name=step.name,
-                step_index=index,
-                status="failed",
-                output=LLMOutput(
-                    confidence=0.0,
-                    summary=last_error,
-                    next_step_context="",
-                    raw_response={},
-                ),
-                verifier_output=None,
-                effective_confidence=None,
-                duration_ms=int(time.time() * 1000) - start_ms,
-            )
-
-        logger.debug(
-            "Step '%s' parsed output: confidence=%.2f summary=%s",
-            step.name, primary_output.confidence, primary_output.summary,
-        )
-
         verifier_output: LLMOutput | None = None
-        effective_confidence = primary_output.confidence
+        effective_confidence: float = 0.0
 
-        if step.verifier and self._should_verify(step.verifier, primary_output.confidence):
-            verifier_output = await self._run_verifier(
-                step=step,
-                ctx=ctx,
-                primary_output=primary_output,
-                run_log=run_log,
+        for iteration in range(1, max_iters + 1):
+            if loop_cfg and iteration > 1:
+                _log_event(run_log, "info", "loop_iteration",
+                           f"Refinement loop: {step.name} — iteration {iteration}/{max_iters} "
+                           f"(prior confidence {effective_confidence:.0%})",
+                           step=step.name, iteration=iteration, max_iterations=max_iters)
+
+            ctx = await build_context(
+                pipeline, normalised, run_id, step.name, step_outputs,
+                artifact_store=self._artifact_store,
             )
-            if verifier_output:
-                effective_confidence = self._combine_confidence(
+            if loop_cfg:
+                ctx["loop"] = {
+                    "iteration": iteration,
+                    "max_iterations": max_iters,
+                    "prior_confidence": effective_confidence if iteration > 1 else None,
+                    "prior_output": primary_output.model_dump(exclude={"raw_response"}) if iteration > 1 and primary_output else None,
+                }
+
+            max_attempts = step.retry.attempts if step.retry else 1
+            last_error: str | None = None
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    executor = self._get_executor(step.executor)
+                    coro = executor.execute(step, ctx)
+                    if step.timeout_seconds:
+                        primary_output = await asyncio.wait_for(coro, timeout=step.timeout_seconds)
+                    else:
+                        primary_output = await coro
+                    if self._artifact_store:
+                        primary_output = await self._intercept_artifacts(
+                            primary_output, run_id, step.name
+                        )
+                    last_error = None
+                    break
+                except asyncio.TimeoutError:
+                    last_error = f"Step timed out after {step.timeout_seconds}s"
+                    logger.error(
+                        "Step '%s' run_id=%s %s (attempt %d/%d)",
+                        step.name, run_id, last_error, attempt, max_attempts,
+                    )
+                    _log_event(run_log, "error", "step_error",
+                               f"Step error: {step.name} — {last_error}", step=step.name)
+                except Exception as exc:
+                    last_error = f"Executor error: {type(exc).__name__}: {exc}"
+                    logger.error(
+                        "Step '%s' run_id=%s %s (attempt %d/%d)",
+                        step.name, run_id, last_error, attempt, max_attempts,
+                    )
+                    _log_event(run_log, "error", "step_error",
+                               f"Step error: {step.name} — {last_error}", step=step.name)
+
+                if attempt < max_attempts:
+                    delay = _compute_backoff(step.retry, attempt)
+                    logger.info(
+                        "Retrying step '%s' in %.1fs (attempt %d/%d)",
+                        step.name, delay, attempt + 1, max_attempts,
+                    )
+                    _log_event(run_log, "warn", "step_retrying",
+                               f"Retrying {step.name} in {delay:.1f}s (attempt {attempt + 1}/{max_attempts})",
+                               step=step.name)
+                    await asyncio.sleep(delay)
+
+            if last_error:
+                return StepResult(
+                    step_name=step.name,
+                    step_index=index,
+                    status="failed",
+                    output=LLMOutput(
+                        confidence=0.0,
+                        summary=last_error,
+                        next_step_context="",
+                        raw_response={},
+                    ),
+                    verifier_output=None,
+                    effective_confidence=None,
+                    duration_ms=int(time.time() * 1000) - start_ms,
+                )
+
+            logger.debug(
+                "Step '%s' parsed output: confidence=%.2f summary=%s",
+                step.name, primary_output.confidence, primary_output.summary,
+            )
+
+            verifier_output = None
+            effective_confidence = primary_output.confidence
+
+            if step.verifier and self._should_verify(step.verifier, primary_output.confidence):
+                verifier_output = await self._run_verifier(
                     step=step,
-                    primary_confidence=primary_output.confidence,
-                    verifier_confidence=verifier_output.confidence,
+                    ctx=ctx,
+                    primary_output=primary_output,
+                    run_log=run_log,
                 )
-                logger.info(
-                    "Step '%s' verifier: primary=%.2f verifier=%.2f effective=%.2f",
-                    step.name,
-                    primary_output.confidence,
-                    verifier_output.confidence,
-                    effective_confidence,
-                )
-                _log_event(run_log, "info", "verifier_ran",
-                           f"Verifier ran: {step.name} — primary {primary_output.confidence:.0%} / "
-                           f"verifier {verifier_output.confidence:.0%} → effective {effective_confidence:.0%}",
-                           step=step.name)
+                if verifier_output:
+                    effective_confidence = self._combine_confidence(
+                        step=step,
+                        primary_confidence=primary_output.confidence,
+                        verifier_confidence=verifier_output.confidence,
+                    )
+                    logger.info(
+                        "Step '%s' verifier: primary=%.2f verifier=%.2f effective=%.2f",
+                        step.name,
+                        primary_output.confidence,
+                        verifier_output.confidence,
+                        effective_confidence,
+                    )
+                    _log_event(run_log, "info", "verifier_ran",
+                               f"Verifier ran: {step.name} — primary {primary_output.confidence:.0%} / "
+                               f"verifier {verifier_output.confidence:.0%} → effective {effective_confidence:.0%}",
+                               step=step.name)
+
+            if loop_cfg and effective_confidence < loop_cfg.confidence and iteration < max_iters:
+                continue
+
+            break
+
+        if loop_cfg and max_iters > 1:
+            if effective_confidence >= loop_cfg.confidence:
+                _log_event(run_log, "info", "loop_converged",
+                           f"Refinement loop converged: {step.name} — confidence {effective_confidence:.0%} "
+                           f"after {iteration} iteration(s)",
+                           step=step.name, iterations=iteration)
+            else:
+                _log_event(run_log, "info", "loop_exhausted",
+                           f"Refinement loop exhausted: {step.name} — best confidence {effective_confidence:.0%} "
+                           f"after {max_iters} iteration(s)",
+                           step=step.name, iterations=max_iters)
 
         if effective_confidence < step.confidence_threshold:
             action = step.on_low_confidence
