@@ -1,0 +1,171 @@
+# Template: Fan-Out — Multi-Service Triage
+#
+# Demonstrates fan-out: a first step returns a list of affected services and
+# the runner spawns one independent triage branch per service in parallel.
+# Results are joined with the configured strategy before the pipeline continues.
+#
+# Copy to pipelines/, fill in your agent names, and reload.
+#
+# Fan-out YAML shape:
+#   - fan_out:
+#       name: <group name>
+#       over: "<Jinja2 expression that resolves to a list>"
+#       as: <variable name injected into each branch context>
+#       executor: <executor name>
+#       executor_config: { ... }
+#       prompt_template: |
+#         Use {{ <as> }} in the prompt ...
+#       join: all_must_pass | any_must_pass | weighted_average
+#       confidence_threshold: 0.75
+#       on_low_confidence: escalate | abort | proceed
+#       max_items: 20          # hard cap — step fails if list exceeds this
+#       on_empty: complete | skip | abort
+#       timeout_seconds: 120   # per-branch timeout (no group-level timeout)
+#       when: "steps.prior_step.proceed == true"
+#       verifier:              # same verifier block as sequential steps
+#         executor: gateway
+#         executor_config:
+#           agent: reviewer-agent
+#         trigger:
+#           always: true
+
+name: multi-service-triage
+description: >
+  Triage a group alert that spans multiple services. First step identifies
+  which services are affected; fan-out triages each one independently in
+  parallel; final step summarises and decides on remediation.
+version: 1
+
+trigger:
+  match:
+    severity: critical
+    team: platform           # scope to alerts from your team
+
+context_template:
+  include:
+    - severity
+    - summary
+    - labels.environment
+
+steps:
+
+  # ── Step 1: Identify affected services ──────────────────────────────────
+  # This step returns a list of affected services as an extra field named
+  # "items" on its LLMOutput. Fan-out resolves this list at runtime.
+  - name: identify-services
+    executor: gateway
+    executor_config:
+      agent: service-lister-agent   # replace with your agent name
+      session_key: "agent:service-lister-agent:{{pipeline_run_id}}:identify"
+    confidence_threshold: 0.70
+    on_low_confidence: escalate
+    prompt_template: |
+      You are an SRE responding to a {{severity}} alert in {{labels.environment}}.
+      Alert summary: {{summary}}
+
+      Identify which services are likely affected. Return ONLY the following JSON,
+      no other text:
+      {
+        "confidence": 0.0,
+        "summary": "One-line description of the scope",
+        "next_step_context": "Brief for the triage agents",
+        "services": ["service-a", "service-b"]
+      }
+
+      Keep the list short (≤10 services). If the impact is unclear, include all
+      plausible candidates rather than guessing.
+      Use "services" not "items" — "items" shadows the Python dict method in Jinja2.
+
+  # ── Step 2: Fan-out — one triage branch per service ────────────────────
+  # `over` resolves {{ steps.identify_services.services }} at runtime.
+  # Each branch receives:
+  #   {{ service }}        — the current service name (the "as" variable)
+  #   {{ fan_out_index }}  — 0-based index of this branch
+  #   {{ fan_out_total }}  — total number of branches
+  # Branch outputs are registered as steps["triage-services/0"],
+  # steps["triage-services/1"], etc. for downstream reference.
+  - fan_out:
+      name: triage-services
+      over: "{{ steps.identify_services.services }}"
+      as: service
+      executor: gateway
+      executor_config:
+        agent: sre-triage-agent      # replace with your triage agent name
+        session_key: "agent:sre-triage-agent:{{pipeline_run_id}}:triage-{{service}}"
+      join: all_must_pass
+      confidence_threshold: 0.70
+      on_low_confidence: escalate
+      on_abort: notify
+      max_items: 10                  # safety cap — fail clearly if upstream returns too many
+      on_empty: skip                 # if identify-services returns [], skip gracefully
+      timeout_seconds: 90            # per-branch timeout
+      prompt_template: |
+        You are triaging service "{{service}}" (branch {{fan_out_index + 1}} of
+        {{fan_out_total}}) during a {{severity}} incident in {{labels.environment}}.
+
+        Incident context from first-line analysis:
+        {{steps.identify_services.next_step_context}}
+
+        Focus specifically on "{{service}}". Assess:
+        - Is this service directly affected or a downstream casualty?
+        - What is the most likely failure mode for this service?
+        - Is auto-remediation safe, or does this need a human?
+
+        Return ONLY the following JSON, no other text:
+        {
+          "confidence": 0.0,
+          "summary": "One-line verdict for {{service}}",
+          "next_step_context": "Action brief for remediation agent",
+          "action": "remediate | escalate | monitor",
+          "root_cause": "Brief root cause hypothesis"
+        }
+
+  # ── Step 3 (optional): Consolidate and decide ───────────────────────────
+  # This step runs only if all triage branches completed (after the join).
+  # Reference individual branch outputs as steps["triage-services/0"] etc.
+  # For small known service sets you can reference them by index directly.
+  # For dynamic sets, the agent should use next_step_context from step 2.
+  - name: remediation-decision
+    executor: gateway
+    executor_config:
+      agent: remediation-decision-agent   # replace with your agent name
+      session_key: "agent:remediation-decision-agent:{{pipeline_run_id}}:decision"
+    confidence_threshold: 0.80
+    on_low_confidence: escalate
+    on_abort: notify
+    prompt_template: |
+      Fan-out triage is complete. {{fan_out_total}} services were assessed.
+
+      Initial scope: {{steps.identify_services.next_step_context}}
+
+      Triage summaries (first 3 branches shown — check all steps["triage-services/*"]):
+      - triage-services/0: {{steps['triage-services/0'].summary}} (action: {{steps['triage-services/0'].action}})
+      - triage-services/1: {{steps['triage-services/1'].summary}} (action: {{steps['triage-services/1'].action}})
+      - triage-services/2: {{steps['triage-services/2'].summary}} (action: {{steps['triage-services/2'].action}})
+
+      Based on all triage results, decide the overall remediation plan.
+      Return ONLY the following JSON, no other text:
+      {
+        "confidence": 0.0,
+        "summary": "Overall decision and rationale",
+        "next_step_context": "Exact remediation steps for the oncall engineer",
+        "proceed": true
+      }
+
+# ── Notifications ─────────────────────────────────────────────────────────
+notifications:
+  escalate:
+    channel: telegram
+    template: |
+      Escalated: {{pipeline_name}}
+      Environment: {{labels.environment}}
+      Step: {{current_step}}
+      Reason: {{escalation_reason}}{% if confidence is not none %} (confidence {{confidence | round(2)}} < {{confidence_threshold}}){% endif %}
+      Summary: {{step_summary}}
+
+  notify:
+    channel: telegram
+    template: |
+      Aborted: {{pipeline_name}}
+      Environment: {{labels.environment}}
+      Step: {{current_step}}

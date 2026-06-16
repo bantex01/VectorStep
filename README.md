@@ -37,6 +37,7 @@ samples/                      # Copy-and-adapt templates for new deployments (gi
 ├── config.yaml.example         # Annotated service config template
 ├── pipelines/                  # Pipeline YAML templates — copy to service/pipelines/
 │   ├── alert-triage-investigation-using-steps.yaml
+│   ├── fan-out-multi-service-triage.yaml
 │   ├── generic-webhook-new-order.yaml
 │   ├── human-approval-test.yaml
 │   └── otel-triage-verified.yaml
@@ -238,7 +239,7 @@ Model selection is handled by the named agent's own config in the executor backe
 
 Steps support an optional `verifier` block for independent confidence verification by a second agent. The verifier trigger can be set to `always: true` (fires unconditionally), or scoped to a confidence band. See §5 for full trigger configuration examples.
 
-The `steps` list is heterogeneous — each entry is either a sequential step (has a `name:` key) or a parallel group (has a `parallel:` key). See §6 for parallel group configuration.
+The `steps` list is heterogeneous — each entry is a sequential step (has a `name:` key), a parallel group (has a `parallel:` key), or a fan-out (has a `fan_out:` key). See §7 for parallel groups and §7a for fan-out.
 
 ```yaml
 name: alert-triage-critical
@@ -656,6 +657,101 @@ Branch outputs are registered individually so downstream steps reference them as
 
 ---
 
+### 7a. Fan-Out — Dynamic Parallelism
+
+Parallel groups (§7) require branches to be listed in YAML at authoring time. Fan-out makes parallelism dynamic: a step emits a list at runtime and the runner spawns one branch per item, joining the results with the same confidence strategies.
+
+**Example use cases:**
+- A "list affected services" step returns `["api", "worker", "db"]` → fan out one triage branch per service
+- An alert normaliser returns a list of firing alerts → fan out one remediation branch per alert
+
+```yaml
+steps:
+  - name: identify-services
+    executor: gateway
+    executor_config:
+      agent: service-lister
+    prompt_template: |
+      List affected services as a JSON array under the key "services".
+      Alert: {{ summary }}
+      Return JSON: {"confidence": 0.0, "summary": "...", "next_step_context": "...", "services": ["svc-a", "svc-b"]}
+
+  - fan_out:
+      name: triage-services
+      over: "{{ steps.identify_services.services }}"
+      as: service                # variable injected into each branch's Jinja2 context
+      executor: gateway
+      executor_config:
+        agent: sre-triage-agent
+      prompt_template: |
+        Triage service "{{ service }}" (branch {{ fan_out_index + 1 }} of {{ fan_out_total }}).
+        Context: {{ steps.identify_services.next_step_context }}
+      join: all_must_pass        # same strategies as parallel groups
+      confidence_threshold: 0.75
+      on_low_confidence: escalate
+      on_abort: notify
+      max_items: 20              # hard cap — step fails if list exceeds this
+      on_empty: skip             # complete | skip | abort
+      timeout_seconds: 90        # per-branch timeout
+      when: "steps.identify_services.proceed == true"
+      verifier:
+        executor: gateway
+        executor_config:
+          agent: reviewer
+        trigger:
+          always: true
+
+  - name: consolidate
+    executor: gateway
+    executor_config:
+      agent: decision-agent
+    prompt_template: |
+      Branch 0 verdict: {{ steps['triage-services/0'].summary }}
+      Branch 1 verdict: {{ steps['triage-services/1'].summary }}
+```
+
+**`over` resolution:**
+
+The `over` value is a Jinja2 template rendered against the current step context (the same context available in `prompt_template`). The rendered result is interpreted as a Python list — if the agent returned a Python-repr list (e.g. `"['a', 'b']"`), `ast.literal_eval` parses it; if it's a JSON array, `json.loads` is the fallback. A non-list result or parse failure marks the step as `failed`.
+
+**Naming gotcha — avoid Python dict method names as extra field names.** Jinja2 attribute access (`dict.key`) tries `getattr` before `getitem`, so field names that shadow Python dict built-ins (`items`, `keys`, `values`, `get`, `pop`, `update`, etc.) resolve to the method object, not your data. Use descriptive names like `services`, `alerts`, `affected_hosts` rather than `items`.
+
+**Per-branch context additions:**
+
+| Variable | Value |
+|---|---|
+| `{{ service }}` (or whichever `as:` name you chose) | The current item value |
+| `{{ fan_out_index }}` | 0-based position of this branch |
+| `{{ fan_out_total }}` | Total number of branches spawned |
+
+**Branch output references:**
+
+Branch outputs are registered as `"{fan_out_name}/{index}"` — e.g. `triage-services/0`, `triage-services/1`. Reference them downstream using bracket notation (dot-notation breaks on `/`):
+
+```yaml
+{{ steps['triage-services/0'].summary }}
+{{ steps['triage-services/1'].action }}
+```
+
+**Fan-out options:**
+
+| Field | Default | Description |
+|---|---|---|
+| `over` | required | Jinja2 expression that resolves to a list |
+| `as` | `item` | Variable name injected into each branch context |
+| `join` | `all_must_pass` | `all_must_pass` \| `any_must_pass` \| `weighted_average` |
+| `confidence_threshold` | `0.75` | Applied to the joined effective confidence |
+| `on_low_confidence` | `escalate` | `escalate` \| `abort` \| `proceed` |
+| `max_items` | `20` | Hard cap — step fails if the list is longer |
+| `on_empty` | `complete` | `complete` (effective_confidence=1.0) \| `skip` (step skipped, no branch outputs) \| `abort` (step fails) |
+| `timeout_seconds` | `null` | Per-branch timeout |
+| `when` | `null` | Same conditional as sequential steps |
+| `verifier` | `null` | Same verifier block as sequential steps — applied per branch |
+
+See `samples/pipelines/fan-out-multi-service-triage.yaml` for a complete worked example.
+
+---
+
 ### 8. Cron Scheduler
 
 Any pipeline can declare an optional `schedule:` block to run on a cron schedule in addition to (or instead of) webhook triggers.
@@ -1040,6 +1136,10 @@ pipeline.run                          (pork.pipeline.name, pork.run.id, pork.sou
 │   ├── <branch name>                 (pork.span.kind=branch, pork.executor, pork.agent, pork.confidence)
 │   │   └── gen_ai.<executor>
 │   └── ... (concurrent siblings)
+├── <fan_out name>                    (pork.span.kind=fan_out, pork.join_strategy)
+│   ├── <fan_out name>/0              (pork.span.kind=branch, pork.executor, pork.agent, pork.confidence)
+│   │   └── gen_ai.<executor>
+│   └── ... (one branch per runtime list item)
 └── ...
 ```
 

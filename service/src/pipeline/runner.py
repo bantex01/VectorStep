@@ -18,6 +18,8 @@ from .. import run_events
 from ..tracing import record_event, start_root_span, tracer
 from ..utils import utc_now
 from ..models.pipeline import (
+    FanOutConfig,
+    FanOutGroupConfig,
     LoopConfig,
     ParallelGroupConfig,
     ParallelGroupInner,
@@ -210,6 +212,11 @@ class PipelineRunner:
                 step_when = step.parallel.when
                 step_on_abort = step.parallel.on_abort
                 step_threshold = step.parallel.confidence_threshold
+            elif isinstance(step, FanOutGroupConfig):
+                step_name = step.fan_out.name
+                step_when = step.fan_out.when
+                step_on_abort = step.fan_out.on_abort
+                step_threshold = step.fan_out.confidence_threshold
             else:
                 step_name = step.name
                 step_when = step.when
@@ -245,6 +252,19 @@ class PipelineRunner:
                 )
                 # Branches saved inside _run_parallel_group; register each individually
                 # so downstream steps can reference {{steps.branch_name.field}}
+                for branch_name, branch_output in step_result.branch_outputs.items():
+                    if branch_output:
+                        step_outputs[branch_name] = branch_output
+            elif isinstance(step, FanOutGroupConfig):
+                step_result = await self._run_fan_out(
+                    fan_out=step.fan_out,
+                    index=index,
+                    pipeline=pipeline,
+                    normalised=normalised,
+                    run_id=run_id,
+                    step_outputs=step_outputs,
+                    run_log=run_log,
+                )
                 for branch_name, branch_output in step_result.branch_outputs.items():
                     if branch_output:
                         step_outputs[branch_name] = branch_output
@@ -725,6 +745,250 @@ class PipelineRunner:
 
         return StepResult(
             step_name=group.name,
+            step_index=index,
+            status="completed",
+            output=group_output,
+            verifier_output=None,
+            effective_confidence=effective_confidence,
+            duration_ms=int(time.time() * 1000) - start_ms,
+            branch_outputs=branch_outputs,
+        )
+
+    # ------------------------------------------------------------------
+    # Fan-out execution
+    # ------------------------------------------------------------------
+
+    async def _run_fan_out(
+        self,
+        fan_out: FanOutConfig,
+        index: int,
+        pipeline: PipelineConfig,
+        normalised: NormalisedContext,
+        run_id: str,
+        step_outputs: dict[str, LLMOutput],
+        run_log: list,
+    ) -> StepResult:
+        with tracer.start_as_current_span(
+            fan_out.name,
+            attributes={
+                "pork.span.kind": "fan_out",
+                "pork.join_strategy": fan_out.join,
+            },
+        ) as span:
+            result = await self._run_fan_out_impl(
+                fan_out, index, pipeline, normalised, run_id, step_outputs, run_log
+            )
+            self._set_step_span_attributes(span, result)
+            return result
+
+    async def _run_fan_out_impl(
+        self,
+        fan_out: FanOutConfig,
+        index: int,
+        pipeline: PipelineConfig,
+        normalised: NormalisedContext,
+        run_id: str,
+        step_outputs: dict[str, LLMOutput],
+        run_log: list,
+    ) -> StepResult:
+        import ast
+        from jinja2 import Environment
+
+        start_ms = int(time.time() * 1000)
+
+        base_ctx = await build_context(
+            pipeline, normalised, run_id, fan_out.name, step_outputs,
+            artifact_store=self._artifact_store,
+        )
+
+        # Resolve `over` — Jinja2 render always returns a string; ast.literal_eval handles
+        # Python repr of lists (e.g. "['a', 'b']"); json.loads covers valid JSON arrays.
+        try:
+            rendered = Environment().from_string(fan_out.over).render(**base_ctx)
+            try:
+                items = ast.literal_eval(rendered)
+            except (ValueError, SyntaxError):
+                items = json.loads(rendered)
+            if not isinstance(items, list):
+                raise ValueError(
+                    f"'over' expression did not produce a list (got {type(items).__name__})"
+                )
+        except Exception as exc:
+            msg = f"Fan-out '{fan_out.name}': failed to resolve 'over' expression: {exc}"
+            logger.error(msg)
+            _log_event(run_log, "error", "fan_out_failed", msg, step=fan_out.name)
+            return StepResult(
+                step_name=fan_out.name,
+                step_index=index,
+                status="failed",
+                output=LLMOutput(
+                    confidence=0.0, summary=msg, next_step_context="", raw_response={}
+                ),
+                verifier_output=None,
+                effective_confidence=None,
+                duration_ms=int(time.time() * 1000) - start_ms,
+            )
+
+        # Empty list handling
+        if not items:
+            if fan_out.on_empty == "abort":
+                msg = f"Fan-out '{fan_out.name}': empty list — on_empty=abort"
+                logger.warning(msg)
+                _log_event(run_log, "warn", "fan_out_empty", msg, step=fan_out.name)
+                return StepResult(
+                    step_name=fan_out.name,
+                    step_index=index,
+                    status="failed",
+                    output=LLMOutput(
+                        confidence=0.0, summary=msg, next_step_context="", raw_response={}
+                    ),
+                    verifier_output=None,
+                    effective_confidence=None,
+                    duration_ms=int(time.time() * 1000) - start_ms,
+                )
+            empty_msg = f"Fan-out '{fan_out.name}': empty list"
+            if fan_out.on_empty == "skip":
+                _log_event(run_log, "info", "fan_out_skipped",
+                           f"{empty_msg} — skipped", step=fan_out.name)
+            else:
+                logger.warning("Fan-out '%s': empty list — treating as completed", fan_out.name)
+                _log_event(run_log, "warn", "fan_out_empty", empty_msg, step=fan_out.name)
+            return StepResult(
+                step_name=fan_out.name,
+                step_index=index,
+                status="completed",
+                output=LLMOutput(
+                    confidence=1.0, summary=empty_msg, next_step_context="", raw_response={}
+                ),
+                verifier_output=None,
+                effective_confidence=1.0,
+                duration_ms=int(time.time() * 1000) - start_ms,
+            )
+
+        # Hard cap on item count
+        if len(items) > fan_out.max_items:
+            msg = (
+                f"Fan-out '{fan_out.name}': {len(items)} items exceeds "
+                f"max_items={fan_out.max_items}"
+            )
+            logger.error(msg)
+            _log_event(run_log, "error", "fan_out_failed", msg, step=fan_out.name)
+            return StepResult(
+                step_name=fan_out.name,
+                step_index=index,
+                status="failed",
+                output=LLMOutput(
+                    confidence=0.0, summary=msg, next_step_context="", raw_response={}
+                ),
+                verifier_output=None,
+                effective_confidence=None,
+                duration_ms=int(time.time() * 1000) - start_ms,
+            )
+
+        total = len(items)
+        logger.info("Fan-out '%s': %d item(s)", fan_out.name, total)
+        _log_event(run_log, "info", "fan_out_started",
+                   f"Fan-out started: {fan_out.name} ({total} items)", step=fan_out.name)
+
+        branch_coros = []
+        for i, item in enumerate(items):
+            branch_ctx = {
+                **base_ctx,
+                fan_out.as_var: item,
+                "fan_out_index": i,
+                "fan_out_total": total,
+            }
+            branch_step = ParallelStepConfig(
+                name=f"{fan_out.name}/{i}",
+                executor=fan_out.executor,
+                executor_config=fan_out.executor_config,
+                prompt_template=fan_out.prompt_template,
+                timeout_seconds=fan_out.timeout_seconds,
+                verifier=fan_out.verifier,
+            )
+            branch_coros.append(
+                self._run_parallel_branch(branch_step, branch_ctx, run_log, run_id)
+            )
+
+        raw_results = await asyncio.gather(*branch_coros, return_exceptions=True)
+
+        branch_outputs: dict[str, LLMOutput] = {}
+        confidences: list[float] = []
+        weights: list[float] = []
+
+        for i, (item, raw) in enumerate(zip(items, raw_results)):
+            branch_name = f"{fan_out.name}/{i}"
+            if isinstance(raw, Exception):
+                msg = f"Executor error: {type(raw).__name__}: {raw}"
+                output = LLMOutput(
+                    confidence=0.0, summary=msg, next_step_context="", raw_response={},
+                    failed=True,
+                )
+                _log_event(run_log, "error", "fan_out_branch_failed",
+                           f"Fan-out branch failed: {branch_name} — {msg}",
+                           step=fan_out.name, branch=branch_name)
+            else:
+                output = raw
+                if not getattr(output, "failed", False):
+                    _log_event(run_log, "info", "fan_out_branch_completed",
+                               f"Fan-out branch completed: {branch_name} — "
+                               f"confidence {output.confidence:.0%}",
+                               step=fan_out.name, branch=branch_name)
+
+            branch_outputs[branch_name] = output
+            confidences.append(output.confidence)
+            weights.append(1.0)
+
+            # DB branch name is str(i) so stored step_name = "{fan_out.name}/{i}"
+            db_branch = ParallelStepConfig(
+                name=str(i),
+                executor=fan_out.executor,
+                executor_config=fan_out.executor_config,
+                prompt_template=fan_out.prompt_template,
+            )
+            await self._db_save_branch(run_id, fan_out.name, db_branch, index, i, output)
+
+        effective_confidence = self._join_confidences(fan_out.join, confidences, weights)
+        logger.info(
+            "Fan-out '%s' join=%s confidences=%s effective=%.2f",
+            fan_out.name,
+            fan_out.join,
+            [f"{c:.2f}" for c in confidences],
+            effective_confidence,
+        )
+        _log_event(run_log, "info", "fan_out_completed",
+                   f"Fan-out completed: {fan_out.name} — {total} branches, "
+                   f"effective confidence {effective_confidence:.0%}",
+                   step=fan_out.name)
+
+        completed = sum(1 for o in branch_outputs.values() if not getattr(o, "failed", False))
+        group_output = LLMOutput(
+            confidence=effective_confidence,
+            summary=f"Fan-out '{fan_out.name}': {completed}/{total} branches completed",
+            next_step_context="",
+            raw_response={},
+        )
+
+        if effective_confidence < fan_out.confidence_threshold:
+            action = fan_out.on_low_confidence
+            logger.info(
+                "Fan-out '%s' below threshold (%.2f < %.2f): action=%s",
+                fan_out.name, effective_confidence, fan_out.confidence_threshold, action,
+            )
+            if action in ("abort", "escalate"):
+                return StepResult(
+                    step_name=fan_out.name,
+                    step_index=index,
+                    status="aborted" if action == "abort" else "escalated",
+                    output=group_output,
+                    verifier_output=None,
+                    effective_confidence=effective_confidence,
+                    duration_ms=int(time.time() * 1000) - start_ms,
+                    branch_outputs=branch_outputs,
+                )
+
+        return StepResult(
+            step_name=fan_out.name,
             step_index=index,
             status="completed",
             output=group_output,

@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class NotificationConfig(BaseModel):
@@ -83,6 +83,31 @@ class ParallelGroupConfig(BaseModel):
     parallel: ParallelGroupInner
 
 
+class FanOutConfig(BaseModel):
+    """Fan-out: resolve a Jinja2 expression to a list at runtime and spawn one branch per item."""
+    name: str
+    over: str                  # Jinja2 expression that resolves to a list
+    as_var: str = Field(default="item", alias="as")  # variable injected into each branch context
+    executor: str
+    executor_config: dict = Field(default_factory=dict)
+    prompt_template: str = ""
+    timeout_seconds: int | None = None
+    join: Literal["all_must_pass", "any_must_pass", "weighted_average"] = "all_must_pass"
+    confidence_threshold: float = 0.75
+    on_low_confidence: Literal["escalate", "abort", "proceed"] = "escalate"
+    on_abort: str = "notify"
+    max_items: int = 20
+    on_empty: Literal["complete", "skip", "abort"] = "complete"
+    when: str | None = None
+    verifier: VerifierConfig | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class FanOutGroupConfig(BaseModel):
+    fan_out: FanOutConfig
+
+
 class DedupConfig(BaseModel):
     """Per-pipeline override for webhook deduplication — see README §3a.
 
@@ -138,7 +163,7 @@ class PipelineConfig(BaseModel):
     trigger: TriggerConfig
     vars: dict[str, str] = Field(default_factory=dict)
     context_template: ContextTemplateConfig = Field(default_factory=ContextTemplateConfig)
-    steps: list[StepConfig | ParallelGroupConfig]
+    steps: list[StepConfig | ParallelGroupConfig | FanOutGroupConfig]
     notifications: dict[str, list[NotificationConfig]] = Field(default_factory=dict)
     schedule: ScheduleConfig | None = None
 
