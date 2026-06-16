@@ -119,6 +119,9 @@ _artifact_store = None
 _artifact_retention_days: int = 7
 _dedup_enabled: bool = True
 _dedup_window_seconds: int = 300
+_webhook_token: str | None = None
+_active_runs: int = 0
+_max_concurrent_runs: int = 10
 
 
 def _load_config() -> dict:
@@ -227,7 +230,7 @@ async def _cleanup_artifacts() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task, _artifact_store, _artifact_retention_days, _dedup_enabled, _dedup_window_seconds
+    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task, _artifact_store, _artifact_retention_days, _dedup_enabled, _dedup_window_seconds, _webhook_token, _max_concurrent_runs
     _app_ref = app
 
     config = _load_config()
@@ -237,6 +240,15 @@ async def lifespan(app: FastAPI):
     dedup_cfg = config.get("dedup", {})
     _dedup_enabled = dedup_cfg.get("enabled", True)
     _dedup_window_seconds = dedup_cfg.get("window_seconds", 300)
+
+    auth_token = config.get("auth", {}).get("token", "") or ""
+    _webhook_token = auth_token if auth_token else None
+
+    _max_concurrent_runs = config.get("concurrency", {}).get("max_runs", 10)
+    if _webhook_token:
+        logger.info("Webhook auth enabled — Bearer token required on POST /webhook")
+    else:
+        logger.warning("Webhook auth disabled — POST /webhook is unauthenticated")
 
     # Database
     db_url = config.get("database", {}).get("url", "sqlite+aiosqlite:///./runs.db")
@@ -457,6 +469,11 @@ async def webhook(
     x_pipeline_source: str | None = Header(default=None),
     strategy: AlertmanagerStrategy = Query(default="most_severe"),
 ):
+    if _webhook_token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header != f"Bearer {_webhook_token}":
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
     payload = await request.json()
 
     resolved_source = source or x_pipeline_source
@@ -515,10 +532,22 @@ async def webhook(
                     },
                 )
 
+    global _active_runs
+    if _active_runs >= _max_concurrent_runs:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "status": "overloaded",
+                "active_runs": _active_runs,
+                "max_concurrent_runs": _max_concurrent_runs,
+            },
+        )
+
     # Generate run_id here so it can be returned in the 202 response before the
     # background task starts. The runner accepts a pre-supplied run_id and uses it
     # directly rather than generating a new one.
     run_id = str(uuid.uuid4())
+    _active_runs += 1
     asyncio.create_task(_run_pipeline(pipeline, normalised, run_id))
 
     return JSONResponse(
@@ -535,6 +564,7 @@ async def webhook(
 
 
 async def _run_pipeline(pipeline, normalised, run_id: str | None = None):
+    global _active_runs
     from .run_events import publish_complete as _publish_complete
     try:
         result = await _runner.run(pipeline, normalised, run_id=run_id)
@@ -546,6 +576,8 @@ async def _run_pipeline(pipeline, normalised, run_id: str | None = None):
         logger.error("Pipeline run raised unhandled exception: %s", exc, exc_info=True)
         if run_id:
             _publish_complete(run_id, "failed")
+    finally:
+        _active_runs -= 1
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +586,11 @@ async def _run_pipeline(pipeline, normalised, run_id: str | None = None):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "active_runs": _active_runs,
+        "max_concurrent_runs": _max_concurrent_runs,
+    }
 
 
 @app.get("/metrics")

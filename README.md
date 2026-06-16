@@ -1171,6 +1171,16 @@ dedup:
   enabled: true                        # omit this block (or set false) to disable dedup entirely
   window_seconds: 300                  # see §3a — overridable per-pipeline via trigger.dedup
 
+concurrency:
+  max_runs: 10                         # maximum simultaneous pipeline executions (default: 10).
+                                       # POST /webhook returns 429 when at capacity.
+                                       # GET /health exposes active_runs / max_concurrent_runs.
+
+auth:
+  token: ${PORK_WEBHOOK_TOKEN}         # Bearer token required on POST /webhook. Omit this block
+                                       # (or leave token blank) to run unauthenticated.
+                                       # Alertmanager sends it via http_config.authorization.credentials.
+
 observability:
   otel:
     enabled: false                     # omit this block (or set false) to disable tracing entirely

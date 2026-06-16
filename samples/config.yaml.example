@@ -53,3 +53,16 @@ dedup:
                           # — always suppresses while a matching run is still "running",
                           # regardless of this value. Override per-pipeline via trigger.dedup
                           # (see README §3a).
+
+concurrency:
+  max_runs: 10   # maximum simultaneous pipeline executions. POST /webhook returns 429
+                  # when this limit is reached. Raise for high-volume deployments;
+                  # lower to protect LLM spend on constrained hardware.
+
+auth:
+  token: ${PORK_WEBHOOK_TOKEN}   # Bearer token required on POST /webhook.
+                                  # Omit this block (or leave blank) to run unauthenticated —
+                                  # fine on a private VPN, but set this before exposing the
+                                  # port more broadly. Alertmanager sends it via
+                                  # http_config.authorization.credentials in the webhook
+                                  # receiver config.
