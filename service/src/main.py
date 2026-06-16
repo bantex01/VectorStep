@@ -179,6 +179,8 @@ def _do_reload() -> int:
     _step_library = load_step_library(_step_library_dir)
     _pipelines = load_pipelines(_pipeline_dir, step_library=_step_library)
     _register_schedules(_pipelines)
+    if _runner is not None:
+        _runner.set_pipeline_registry({p.name: p for p in _pipelines})
     if _app_ref:
         _app_ref.state.step_library = _step_library
         _app_ref.state.pipelines = _pipelines
@@ -359,6 +361,7 @@ async def lifespan(app: FastAPI):
         session_factory=get_session_factory(),
         notifiers=notifiers,
         artifact_store=_artifact_store,
+        pipeline_registry={p.name: p for p in _pipelines},
     )
 
     # Scheduler

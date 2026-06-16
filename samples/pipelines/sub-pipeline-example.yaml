@@ -1,0 +1,165 @@
+# Template: Sub-Pipeline Composition
+#
+# Demonstrates executor: pipeline — a step that calls another named pipeline as
+# a sub-pipeline, treating its final step output as the current step's LLMOutput.
+#
+# Use cases:
+#   - Shared triage logic reused across many alert pipelines
+#   - Multi-stage workflows with independently testable phases
+#   - Fan-out where each branch delegates to a specialist sub-pipeline
+#
+# Key behaviours:
+#   - The sub-pipeline inherits the parent's NormalisedContext by default.
+#     Use the optional context: block to pass overrides (Jinja2-rendered).
+#   - The sub-pipeline runs as its own DB row with its own run_id, linked via
+#     parent_run_id for full traceability.
+#   - The sub-pipeline's final step output becomes the parent step's LLMOutput,
+#     so downstream steps can reference it as {{steps.step_name.summary}} etc.
+#   - Extra fields sub_run_id and sub_pipeline_status are always set on the
+#     parent step's output for audit purposes.
+#   - Dedup is bypassed for sub-pipeline runs (fingerprint cleared).
+#   - Sub-pipeline must be listed in the pipeline_config_dir and loaded at startup.
+#   - Hot reload (POST /reload / SIGHUP) updates the registry; sub-pipeline
+#     changes take effect without restarting the service.
+#
+# executor_config keys:
+#   pipeline:  (required) name of the pipeline to call
+#   context:   (optional) Jinja2-rendered NormalisedContext overrides
+#              Top-level scalar fields: rendered as strings
+#              labels/metadata: rendered as dicts, merged with parent values
+#              (parent keys preserved; overrides add or replace individual keys)
+
+# ── Sub-pipeline: shared-triage ─────────────────────────────────────────────
+# This would live in a separate YAML file: shared-triage.yaml
+# It is a standalone pipeline that can also be triggered directly.
+#
+# name: shared-triage
+# trigger:
+#   match:
+#     pipeline: shared-triage     # only called directly or as sub-pipeline
+# steps:
+#   - name: triage
+#     executor: gateway
+#     executor_config:
+#       agent: sre-triage-agent
+#     confidence_threshold: 0.75
+#     on_low_confidence: escalate
+#     prompt_template: |
+#       You are triaging a {{severity}} alert for {{labels.service}}.
+#       Summary: {{summary}}
+#       Focus: {{metadata.focus | default("general")}}
+#       Return JSON: {"confidence": 0.0, "summary": "...", "next_step_context": "..."}
+
+# ── Parent pipeline: composite-incident-response ─────────────────────────────
+
+name: composite-incident-response
+description: >
+  Composite incident response pipeline. Calls a shared triage sub-pipeline,
+  then routes to remediation or escalation based on the triage output.
+version: 1
+
+trigger:
+  match:
+    severity: critical
+    environment: prod
+
+context_template:
+  include:
+    - severity
+    - summary
+    - labels.service
+    - labels.environment
+
+steps:
+
+  # ── Step 1: Delegate triage to a shared sub-pipeline ─────────────────────
+  # `executor: pipeline` calls the named pipeline as a sub-pipeline.
+  # The sub-pipeline inherits this run's NormalisedContext (severity, labels, etc.).
+  # context: overrides pass additional data the sub-pipeline might need.
+  - name: triage
+    executor: pipeline
+    executor_config:
+      pipeline: shared-triage     # must match `name:` in shared-triage.yaml
+      context:
+        # Pass a focus hint via metadata — sub-pipeline reads {{metadata.focus}}
+        metadata:
+          focus: "Check database connection pool and query latency first"
+        # Override labels to add a routing tag visible in the sub-pipeline's run row
+        labels:
+          routed_by: composite-incident-response
+    confidence_threshold: 0.75
+    on_low_confidence: escalate
+    on_abort: notify
+    timeout_seconds: 180
+    prompt_template: ""   # unused for executor: pipeline — executor_config drives everything
+
+  # ── Step 2a: Auto-remediation (conditional) ──────────────────────────────
+  - name: auto-remediation
+    when: "steps.triage.action == 'remediate'"
+    executor: gateway
+    executor_config:
+      agent: sre-remediator
+      session_key: "agent:sre-remediator:{{pipeline_run_id}}:remediation"
+    confidence_threshold: 0.80
+    on_low_confidence: escalate
+    on_abort: notify
+    prompt_template: |
+      Triage summary (sub-pipeline run {{steps.triage.sub_run_id}}):
+      {{steps.triage.next_step_context}}
+
+      Triage verdict: {{steps.triage.summary}}
+      Attempt safe remediation for {{labels.service}} in {{labels.environment}}.
+
+      Return JSON: {"confidence": 0.0, "summary": "...", "next_step_context": "...", "proceed": true}
+
+  # ── Step 3: Notify oncall (conditional) ──────────────────────────────────
+  - name: notify-oncall
+    when: "steps.triage.action == 'escalate_human' or steps.triage.action == 'remediate'"
+    executor: webhook
+    executor_config:
+      url: https://hooks.slack.com/services/YOUR_WEBHOOK_URL
+      content_type: application/json
+    confidence_threshold: 0.0
+    on_low_confidence: proceed
+    prompt_template: |
+      {
+        "text": "*[{{labels.environment}}]* {{labels.service}} — {{severity}} alert\nTriage: {{steps.triage.summary}}\nSub-run: {{steps.triage.sub_run_id}}"
+      }
+
+# ── Sub-pipeline in a fan-out branch ─────────────────────────────────────
+# You can also use executor: pipeline inside a fan-out, so each branch
+# delegates to a specialist sub-pipeline:
+#
+#   - fan_out:
+#       name: per-service-triage
+#       over: "{{ steps.identify_services.services }}"
+#       as: service
+#       executor: pipeline
+#       executor_config:
+#         pipeline: shared-triage
+#         context:
+#           labels:
+#             service: "{{ service }}"
+#           metadata:
+#             focus: "Focus specifically on {{ service }}"
+#       join: all_must_pass
+#       confidence_threshold: 0.75
+#       on_low_confidence: escalate
+
+notifications:
+  escalate:
+    channel: telegram
+    template: |
+      Escalated: {{pipeline_name}}
+      Service: {{labels.service}}
+      Environment: {{labels.environment}}
+      Step: {{current_step}}
+      Reason: low confidence{% if confidence is not none %} ({{confidence | round(2)}} < {{confidence_threshold}}){% endif %}
+      Summary: {{step_summary}}
+
+  notify:
+    channel: telegram
+    template: |
+      Aborted: {{pipeline_name}}
+      Service: {{labels.service}}
+      Step: {{current_step}}

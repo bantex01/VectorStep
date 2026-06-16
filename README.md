@@ -38,6 +38,7 @@ samples/                      # Copy-and-adapt templates for new deployments (gi
 ├── pipelines/                  # Pipeline YAML templates — copy to service/pipelines/
 │   ├── alert-triage-investigation-using-steps.yaml
 │   ├── fan-out-multi-service-triage.yaml
+│   ├── sub-pipeline-example.yaml
 │   ├── generic-webhook-new-order.yaml
 │   ├── human-approval-test.yaml
 │   └── otel-triage-verified.yaml
@@ -69,8 +70,9 @@ service/
 │   │   ├── base.py             # BaseExecutor abstract class
 │   │   ├── openclaw_ws.py      # OpenClaw executor — Gateway WebSocket API (Ed25519 auth)
 │   │   ├── openclaw.py         # OpenClaw executor — CLI subprocess (legacy, not registered)
-│   │   ├── gateway.py          # P-Ork Gateway executor — WebSocket API (token auth)
+│   │   │   ├── gateway.py          # P-Ork Gateway executor — WebSocket API (token auth)
 │   │   ├── human.py            # Human-in-the-loop executor (Telegram inline keyboard)
+│   │   ├── pipeline.py         # Sub-pipeline executor — calls another pipeline by name
 │   │   └── webhook.py          # Webhook output executor (HTTP POST)
 │   ├── pipeline/
 │   │   ├── loader.py           # Loads pipelines and step library; resolves use: references
@@ -239,7 +241,7 @@ Model selection is handled by the named agent's own config in the executor backe
 
 Steps support an optional `verifier` block for independent confidence verification by a second agent. The verifier trigger can be set to `always: true` (fires unconditionally), or scoped to a confidence band. See §5 for full trigger configuration examples.
 
-The `steps` list is heterogeneous — each entry is a sequential step (has a `name:` key), a parallel group (has a `parallel:` key), or a fan-out (has a `fan_out:` key). See §7 for parallel groups and §7a for fan-out.
+The `steps` list is heterogeneous — each entry is a sequential step (has a `name:` key), a parallel group (has a `parallel:` key), or a fan-out (has a `fan_out:` key). See §7 for parallel groups, §7a for fan-out, and §9 (`executor: pipeline`) for sub-pipeline calls.
 
 ```yaml
 name: alert-triage-critical
@@ -786,7 +788,7 @@ class BaseExecutor(ABC):
         pass
 ```
 
-Executors are registered by name in `src/executors/__init__.py` and referenced by name in pipeline YAML step `executor:` fields. Steps within the same pipeline can freely mix executors.
+Executors are registered by name in `src/executors/__init__.py` and referenced by name in pipeline YAML step `executor:` fields. Steps within the same pipeline can freely mix executors. Registered executors: `openclaw`, `gateway`, `human`, `webhook`, `pipeline`.
 
 ---
 
@@ -891,6 +893,75 @@ The `prompt_template` renders to the Telegram message text. Default timeout is 3
   prompt_template: |
     {"text": "Alert resolved: {{labels.service}} — {{steps.triage.summary}}"}
 ```
+
+---
+
+#### `pipeline` — Sub-Pipeline Call
+
+**`executor: pipeline`** — Calls another named pipeline as a sub-pipeline. The sub-pipeline runs through the standard runner — full step execution, DB row, tracing — and its final step's `LLMOutput` becomes the current step's output. This turns pipelines into composable building blocks.
+
+`executor_config` keys:
+
+| Key | Required | Description |
+|---|---|---|
+| `pipeline` | **Yes** | Name of the pipeline to call. Must be loaded and present in the pipeline registry at call time. |
+| `context` | No | `NormalisedContext` field overrides. Scalar fields are Jinja2-rendered strings. `labels` and `metadata` are dicts — rendered keys are **merged** with the parent values (parent keys preserved; overrides add or replace individual keys). |
+
+The sub-pipeline inherits the parent's `NormalisedContext` by default. The `pipeline` and `source` fields are updated (`source` → `"sub-pipeline"`) and `fingerprint` is cleared (bypasses dedup). Use `context:` to pass step-specific values:
+
+```yaml
+- name: triage
+  executor: pipeline
+  executor_config:
+    pipeline: shared-triage
+    context:
+      # Scalar field override — Jinja2-rendered
+      summary: "{{ steps.pre_filter.next_step_context }}"
+      # Dict field override — merged with parent labels
+      labels:
+        routed_by: "{{ pipeline_name }}"
+      metadata:
+        focus: "Check database connection pool first"
+  confidence_threshold: 0.75
+  on_low_confidence: escalate
+```
+
+**Sub-pipeline DB linkage:** the sub-pipeline runs with its own `run_id`, stored in `pipeline_runs` with `parent_run_id` set to the parent run's ID. This makes sub-pipeline runs fully traceable — you can query `SELECT * FROM pipeline_runs WHERE parent_run_id = '<parent-run-id>'` to see all sub-pipeline invocations for a parent run.
+
+**Extra fields on the parent step output:**
+
+| Field | Description |
+|---|---|
+| `sub_run_id` | The `run_id` assigned to the sub-pipeline run |
+| `sub_pipeline_status` | Terminal status of the sub-pipeline (`completed`, `failed`, `escalated`, etc.) |
+
+These are available downstream as `{{ steps.triage.sub_run_id }}` and `{{ steps.triage.sub_pipeline_status }}`.
+
+**Failure behaviour:** if the sub-pipeline has a `final_output` (its last step ran and produced output), that output is used as-is regardless of sub-pipeline status. If the sub-pipeline has no `final_output` (it was aborted/escalated before any step completed), the parent step synthesises an `LLMOutput` with `confidence=1.0` (completed) or `confidence=0.0` (any other status).
+
+**Hot reload:** `POST /reload` and SIGHUP update the pipeline registry, so changes to a sub-pipeline YAML take effect immediately without restarting the service.
+
+**Using `executor: pipeline` in a fan-out:** each fan-out branch can delegate to a sub-pipeline, passing the branch item via `context:`:
+
+```yaml
+- fan_out:
+    name: per-service-triage
+    over: "{{ steps.identify_services.services }}"
+    as: service
+    executor: pipeline
+    executor_config:
+      pipeline: shared-triage
+      context:
+        labels:
+          service: "{{ service }}"
+        metadata:
+          focus: "Focus specifically on {{ service }}"
+    join: all_must_pass
+    confidence_threshold: 0.75
+    on_low_confidence: escalate
+```
+
+See `samples/pipelines/sub-pipeline-example.yaml` for a complete worked example including conditional routing based on sub-pipeline output.
 
 ---
 
@@ -1018,6 +1089,7 @@ retry:
 | `raw_payload` | json | Original unmodified webhook payload |
 | `completed_at` | datetime, nullable | |
 | `logs` | json, nullable | Structured run event log — array of `{ts, level, event, msg}` objects. Populated at run completion. Events cover step start/complete/fail/skip/escalate/abort, verifier results, parallel group outcomes, notifications sent, and (for `interrupted` runs) the startup interruption sweep. |
+| `parent_run_id` | uuid, nullable, indexed | Set for sub-pipeline runs (`executor: pipeline`). Links back to the parent run. NULL for top-level runs. |
 
 **pipeline_steps**
 

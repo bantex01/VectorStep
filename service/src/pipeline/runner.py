@@ -137,12 +137,17 @@ class PipelineRunner:
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         notifiers: dict[str, TelegramNotifier] | None = None,
         artifact_store: ArtifactStore | None = None,
+        pipeline_registry: "dict[str, PipelineConfig] | None" = None,
     ):
         self._executor_classes = executors
         self._executor_instances: dict[str, BaseExecutor] = {}
         self._session_factory = session_factory
         self._notifiers: dict[str, TelegramNotifier] = notifiers or {}
         self._artifact_store = artifact_store
+        self._pipeline_registry = pipeline_registry
+
+    def set_pipeline_registry(self, registry: "dict[str, PipelineConfig]") -> None:
+        self._pipeline_registry = registry
 
     async def run(
         self,
@@ -151,6 +156,7 @@ class PipelineRunner:
         run_id: str | None = None,
         from_step: str | None = None,
         initial_step_outputs: "dict[str, LLMOutput] | None" = None,
+        parent_run_id: str | None = None,
     ) -> PipelineRunResult:
         run_id = run_id or str(uuid.uuid4())
         run_log: _LiveRunLog = _LiveRunLog(run_id)
@@ -161,12 +167,14 @@ class PipelineRunner:
                 "pork.pipeline.name": pipeline.name,
                 "pork.run.id": run_id,
                 "pork.source": normalised.source,
+                **({"pork.parent_run_id": parent_run_id} if parent_run_id else {}),
             },
         ) as run_span:
             result = await self._run_pipeline_body(
                 pipeline, normalised, run_id, run_log,
                 from_step=from_step,
                 initial_step_outputs=initial_step_outputs,
+                parent_run_id=parent_run_id,
             )
             run_span.set_attribute("pork.run.status", result.status)
             if result.abort_reason:
@@ -184,6 +192,7 @@ class PipelineRunner:
         run_log: "_LiveRunLog",
         from_step: str | None = None,
         initial_step_outputs: "dict[str, LLMOutput] | None" = None,
+        parent_run_id: str | None = None,
     ) -> PipelineRunResult:
         logger.info("Pipeline run started: id=%s pipeline=%s", run_id, pipeline.name)
         _log_event(run_log, "info", "run_started",
@@ -195,7 +204,7 @@ class PipelineRunner:
             _log_event(run_log, "info", "rerun_started",
                        f"Re-run from step: {from_step} ({n} prior step output(s) replayed)")
 
-        await self._db_create_run(run_id, pipeline, normalised)
+        await self._db_create_run(run_id, pipeline, normalised, parent_run_id=parent_run_id)
 
         result = PipelineRunResult(
             run_id=run_id,
@@ -339,6 +348,13 @@ class PipelineRunner:
     # Sequential step execution
     # ------------------------------------------------------------------
 
+    def _inject_pork_context(self, ctx: dict, normalised: "NormalisedContext") -> None:
+        """Inject internal runner references so executor: pipeline can call sub-pipelines."""
+        if self._pipeline_registry is not None:
+            ctx["_pork_runner"] = self
+            ctx["_pork_normalised"] = normalised
+            ctx["_pork_registry"] = self._pipeline_registry
+
     @staticmethod
     def _set_step_span_attributes(span, result: "StepResult") -> None:
         span.set_attribute("pork.step.status", result.status)
@@ -414,6 +430,7 @@ class PipelineRunner:
                 pipeline, normalised, run_id, step.name, step_outputs,
                 artifact_store=self._artifact_store,
             )
+            self._inject_pork_context(ctx, normalised)
             if loop_cfg:
                 ctx["loop"] = {
                     "iteration": iteration,
@@ -643,6 +660,7 @@ class PipelineRunner:
             pipeline, normalised, run_id, group.name, step_outputs,
             artifact_store=self._artifact_store,
         )
+        self._inject_pork_context(ctx, normalised)
 
         logger.info(
             "Executing parallel group '%s' — %d branch(es)", group.name, len(group.steps)
@@ -800,6 +818,7 @@ class PipelineRunner:
             pipeline, normalised, run_id, fan_out.name, step_outputs,
             artifact_store=self._artifact_store,
         )
+        self._inject_pork_context(base_ctx, normalised)
 
         # Resolve `over` — Jinja2 render always returns a string; ast.literal_eval handles
         # Python repr of lists (e.g. "['a', 'b']"); json.loads covers valid JSON arrays.
@@ -1263,6 +1282,7 @@ class PipelineRunner:
         run_id: str,
         pipeline: PipelineConfig,
         normalised: NormalisedContext,
+        parent_run_id: str | None = None,
     ) -> None:
         if not self._session_factory:
             return
@@ -1276,6 +1296,7 @@ class PipelineRunner:
                 normalised_context=normalised.model_dump_json(),
                 raw_payload=json.dumps(normalised.raw),
                 fingerprint=normalised.fingerprint,
+                parent_run_id=parent_run_id,
             ))
             await session.commit()
 
