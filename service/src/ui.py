@@ -112,6 +112,7 @@ def _to_json(obj, indent=None) -> str:
 
 templates.env.filters["to_yaml"] = _to_yaml
 templates.env.filters["tojson"] = _to_json
+templates.env.filters["format_number"] = lambda n: f"{int(n):,}"
 templates.env.globals.update({
     "status_classes": _status_classes,
     "confidence_bar_color": _confidence_bar_color,
@@ -284,11 +285,16 @@ async def ui_run_detail(request: Request, run_id: str):
     normalised = json.loads(run.normalised_context) if run.normalised_context else {}
     run_log = json.loads(run.logs) if run.logs else []
 
+    total_input_tokens = sum(s.input_tokens or 0 for s in run.steps)
+    total_output_tokens = sum(s.output_tokens or 0 for s in run.steps)
+
     return templates.TemplateResponse(request, "run_detail.html", {
         "run": run,
         "display_items": display_items,
         "normalised": normalised,
         "run_log": run_log,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
         "active_page": "runs",
     })
 

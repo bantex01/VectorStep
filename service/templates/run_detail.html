@@ -77,7 +77,7 @@
     <a href="/ui/pipelines/{{ run.pipeline_name }}" class="text-xs text-indigo-400 hover:text-indigo-300">View pipeline →</a>
   </div>
 
-  <div class="grid grid-cols-3 gap-6 mt-5 pt-5 border-t border-zinc-800">
+  <div class="grid grid-cols-4 gap-6 mt-5 pt-5 border-t border-zinc-800">
     <div>
       <p class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Source</p>
       <p class="text-sm font-medium text-zinc-200">{{ source_label(run.source) }}</p>
@@ -91,6 +91,18 @@
     <div>
       <p class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Duration</p>
       <p class="text-sm font-medium text-zinc-200">{{ format_duration(run.triggered_at, run.completed_at) }}</p>
+    </div>
+    <div>
+      <p class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Tokens</p>
+      {% if total_input_tokens or total_output_tokens %}
+        <p class="text-sm font-medium text-zinc-200"
+           title="{{ total_input_tokens | format_number }} in / {{ total_output_tokens | format_number }} out">
+          {{ (total_input_tokens + total_output_tokens) | format_number }}
+          <span class="text-xs text-zinc-500 font-normal ml-1">↑{{ total_input_tokens | format_number }} ↓{{ total_output_tokens | format_number }}</span>
+        </p>
+      {% else %}
+        <p class="text-sm font-medium text-zinc-500">—</p>
+      {% endif %}
     </div>
   </div>
 </div>
@@ -220,6 +232,13 @@
         <span class="text-xs text-zinc-500 shrink-0">
           {% set s = item.step.duration_ms // 1000 %}
           {% if s < 60 %}{{ s }}s{% else %}{{ s // 60 }}m {{ s % 60 }}s{% endif %}
+        </span>
+      {% endif %}
+
+      {% if item.step.input_tokens or item.step.output_tokens %}
+        <span class="text-xs text-zinc-600 shrink-0 font-mono"
+              title="{{ (item.step.input_tokens or 0) | format_number }} in / {{ (item.step.output_tokens or 0) | format_number }} out">
+          {{ ((item.step.input_tokens or 0) + (item.step.output_tokens or 0)) | format_number }}tok
         </span>
       {% endif %}
 

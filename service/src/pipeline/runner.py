@@ -118,6 +118,9 @@ class StepResult:
     # Populated for parallel groups — each branch output keyed by branch name.
     # Empty for sequential steps.
     branch_outputs: dict[str, "LLMOutput | None"] = field(default_factory=dict)
+    # Token usage from the primary executor (+ verifier for sequential steps;
+    # sum of all branches for parallel/fan-out groups). 0 when unavailable.
+    total_tokens: int = 0
 
 
 @dataclass
@@ -148,6 +151,12 @@ class PipelineRunner:
 
     def set_pipeline_registry(self, registry: "dict[str, PipelineConfig]") -> None:
         self._pipeline_registry = registry
+
+    @staticmethod
+    def _extract_usage(raw_response: dict) -> tuple[int, int]:
+        """Return (input_tokens, output_tokens) from a gateway raw_response, or (0, 0)."""
+        usage = ((raw_response or {}).get("meta") or {}).get("agentMeta", {}).get("usage") or {}
+        return (int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0))
 
     async def run(
         self,
@@ -214,6 +223,7 @@ class PipelineRunner:
 
         step_outputs: dict[str, LLMOutput] = dict(initial_step_outputs or {})
         skipping = from_step is not None
+        accumulated_tokens = 0
 
         for index, step in enumerate(pipeline.steps):
             if isinstance(step, ParallelGroupConfig):
@@ -332,6 +342,28 @@ class PipelineRunner:
                 break
 
             result.final_output = step_result.output
+
+            # Budget guardrail — check after registering the completed step's output
+            accumulated_tokens += step_result.total_tokens
+            if (
+                pipeline.budget
+                and pipeline.budget.max_tokens
+                and accumulated_tokens > pipeline.budget.max_tokens
+            ):
+                msg = (
+                    f"Token budget exceeded: {accumulated_tokens:,} tokens used "
+                    f"(limit: {pipeline.budget.max_tokens:,})"
+                )
+                logger.warning("Pipeline '%s' %s", pipeline.name, msg)
+                _log_event(run_log, "warn", "budget_exceeded", msg)
+                result.status = "aborted"
+                result.abort_reason = msg
+                budget_ctx = await build_context(pipeline, normalised, run_id, step_name, step_outputs)
+                budget_ctx["step_summary"] = msg
+                await self._dispatch_notification(
+                    pipeline=pipeline, action="notify", context=budget_ctx, run_log=run_log,
+                )
+                break
 
         _log_event(run_log, "info", "run_finished",
                    f"Pipeline finished: {result.status}")
@@ -550,6 +582,13 @@ class PipelineRunner:
                            f"after {max_iters} iteration(s)",
                            step=step.name, iterations=max_iters)
 
+        _in_tok, _out_tok = self._extract_usage(primary_output.raw_response)
+        if verifier_output:
+            _vi, _vo = self._extract_usage(verifier_output.raw_response)
+            _in_tok += _vi
+            _out_tok += _vo
+        _step_tokens = _in_tok + _out_tok
+
         if effective_confidence < step.confidence_threshold:
             action = step.on_low_confidence
             logger.info(
@@ -569,6 +608,7 @@ class PipelineRunner:
                     verifier_output=verifier_output,
                     effective_confidence=effective_confidence,
                     duration_ms=int(time.time() * 1000) - start_ms,
+                    total_tokens=_step_tokens,
                 )
             if action == "escalate":
                 _log_event(run_log, "warn", "step_escalated",
@@ -581,6 +621,7 @@ class PipelineRunner:
                     verifier_output=verifier_output,
                     effective_confidence=effective_confidence,
                     duration_ms=int(time.time() * 1000) - start_ms,
+                    total_tokens=_step_tokens,
                 )
 
         if not primary_output.proceed:
@@ -600,6 +641,7 @@ class PipelineRunner:
                 verifier_output=verifier_output,
                 effective_confidence=effective_confidence,
                 duration_ms=int(time.time() * 1000) - start_ms,
+                total_tokens=_step_tokens,
             )
 
         duration_ms = int(time.time() * 1000) - start_ms
@@ -615,6 +657,7 @@ class PipelineRunner:
             verifier_output=verifier_output,
             effective_confidence=effective_confidence,
             duration_ms=duration_ms,
+            total_tokens=_step_tokens,
         )
 
     # ------------------------------------------------------------------
@@ -743,6 +786,8 @@ class PipelineRunner:
             raw_response={},
         )
 
+        _group_tokens = sum(sum(self._extract_usage(o.raw_response)) for o in branch_outputs.values())
+
         if effective_confidence < group.confidence_threshold:
             action = group.on_low_confidence
             logger.info(
@@ -759,6 +804,7 @@ class PipelineRunner:
                     effective_confidence=effective_confidence,
                     duration_ms=int(time.time() * 1000) - start_ms,
                     branch_outputs=branch_outputs,
+                    total_tokens=_group_tokens,
                 )
 
         return StepResult(
@@ -770,6 +816,7 @@ class PipelineRunner:
             effective_confidence=effective_confidence,
             duration_ms=int(time.time() * 1000) - start_ms,
             branch_outputs=branch_outputs,
+            total_tokens=_group_tokens,
         )
 
     # ------------------------------------------------------------------
@@ -988,6 +1035,8 @@ class PipelineRunner:
             raw_response={},
         )
 
+        _fan_out_tokens = sum(sum(self._extract_usage(o.raw_response)) for o in branch_outputs.values())
+
         if effective_confidence < fan_out.confidence_threshold:
             action = fan_out.on_low_confidence
             logger.info(
@@ -1004,6 +1053,7 @@ class PipelineRunner:
                     effective_confidence=effective_confidence,
                     duration_ms=int(time.time() * 1000) - start_ms,
                     branch_outputs=branch_outputs,
+                    total_tokens=_fan_out_tokens,
                 )
 
         return StepResult(
@@ -1015,6 +1065,7 @@ class PipelineRunner:
             effective_confidence=effective_confidence,
             duration_ms=int(time.time() * 1000) - start_ms,
             branch_outputs=branch_outputs,
+            total_tokens=_fan_out_tokens,
         )
 
     async def _run_parallel_branch(
@@ -1320,6 +1371,7 @@ class PipelineRunner:
                 _t = (result.output.raw_response or {}).get("trace")
                 if _t is not None:
                     _trace = json.dumps(_t)
+            _in_tok, _out_tok = self._extract_usage(result.output.raw_response if result.output else {})
             session.add(PipelineStep(
                 run_id=run_id,
                 step_name=result.step_name,
@@ -1340,6 +1392,8 @@ class PipelineRunner:
                 executed_at=utc_now(),
                 artifacts=_artifact_refs,
                 agent_trace=_trace,
+                input_tokens=_in_tok or None,
+                output_tokens=_out_tok or None,
             ))
             await session.commit()
 
@@ -1365,6 +1419,7 @@ class PipelineRunner:
         _t = (output.raw_response or {}).get("trace")
         if _t is not None:
             _trace = json.dumps(_t)
+        _in_tok, _out_tok = self._extract_usage(output.raw_response)
         async with self._session_factory() as session:
             session.add(PipelineStep(
                 run_id=run_id,
@@ -1387,6 +1442,8 @@ class PipelineRunner:
                 executed_at=utc_now(),
                 artifacts=_artifact_refs,
                 agent_trace=_trace,
+                input_tokens=_in_tok or None,
+                output_tokens=_out_tok or None,
             ))
             await session.commit()
 

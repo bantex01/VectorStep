@@ -345,7 +345,14 @@ schedule:                        # optional — omit for webhook-only pipelines
   labels:
     service: my-service
     environment: prod
+
+budget:                          # optional — omit to run with no token limit
+  max_tokens: 50000              # abort run if accumulated tokens across all steps exceeds this
 ```
+
+**Token budget guardrail:** if `budget.max_tokens` is set, the runner accumulates `input_tokens + output_tokens` from each completed step (including all branches of parallel/fan-out groups) and aborts the run with `status=aborted` if the total exceeds the ceiling. The check runs after each successful step — a step that's already failed or escalated won't trigger a second abort. A `budget_exceeded` event is appended to the run log.
+
+Token counts come from `meta.agentMeta.usage` in the P-Ork Gateway response. Steps using other executors (`openclaw`, `human`, `webhook`) contribute 0 tokens to the accumulator — set `max_tokens` conservatively if your pipeline mixes executor types.
 
 ---
 
@@ -1113,6 +1120,8 @@ retry:
 | `executed_at` | datetime | |
 | `artifacts` | json, nullable | `{key: reference}` map — references are opaque strings pointing to artifact files on disk. Content is not stored in the DB. |
 | `agent_trace` | json, nullable | Ordered execution trace from the P-Ork Gateway executor — array of `{type, ...}` objects. `type` is one of: `llm_call` (iteration marker), `thinking` (extended thinking block), `text` (response text), `tool_call` (MCP tool invoked with arguments), `tool_result` (MCP tool response, truncated at 3 000 chars). NULL for all other executors (`openclaw`, `human`, `webhook`). |
+| `input_tokens` | int, nullable | Input tokens consumed by this step's primary executor call. Populated for `gateway` steps; NULL for others. For parallel/fan-out branches, each branch row has its own token count. |
+| `output_tokens` | int, nullable | Output tokens produced by this step's primary executor call. |
 
 ### 15. Management Endpoints
 

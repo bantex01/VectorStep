@@ -123,6 +123,10 @@ class TriggerConfig(BaseModel):
     dedup: DedupConfig | None = None
 
 
+class BudgetConfig(BaseModel):
+    max_tokens: int | None = None  # abort run if accumulated tokens across all steps exceeds this
+
+
 class ContextTemplateConfig(BaseModel):
     include: list[str] = Field(default_factory=list)
 
@@ -166,6 +170,7 @@ class PipelineConfig(BaseModel):
     steps: list[StepConfig | ParallelGroupConfig | FanOutGroupConfig]
     notifications: dict[str, list[NotificationConfig]] = Field(default_factory=dict)
     schedule: ScheduleConfig | None = None
+    budget: BudgetConfig | None = None
 
     @field_validator("notifications", mode="before")
     @classmethod
