@@ -16,7 +16,7 @@ from jinja2 import Environment, Undefined
 
 from ..models.llm import LLMOutput
 from ..models.pipeline import StepConfig
-from ..tracing import gen_ai_attrs_from_meta, inject_traceparent, tracer
+from ..tracing import gen_ai_attrs_from_meta, tracer
 from .base import BaseExecutor
 
 logger = logging.getLogger(__name__)
@@ -265,7 +265,11 @@ class OpenClawWSExecutor(BaseExecutor):
             if thinking_level:
                 agent_params["thinking"] = thinking_level
 
-            agent_params = inject_traceparent(agent_params)
+            # NOTE: inject_traceparent() is intentionally NOT called here.
+            # The OpenClaw gateway does not accept unknown params (like W3C
+            # traceparent) and rejects the request with a validation error.
+            # Trace context propagation is only used with the P-Ork Gateway
+            # executor, which explicitly supports it.
 
             agent_req_id = str(uuid.uuid4())
             await ws.send(json.dumps({
