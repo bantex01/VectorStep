@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from opentelemetry.trace import Status, StatusCode
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..artifacts.store import ArtifactStore
@@ -127,7 +128,7 @@ class StepResult:
 class PipelineRunResult:
     run_id: str
     pipeline_name: str
-    status: Literal["completed", "stopped", "aborted", "escalated", "failed"]
+    status: Literal["completed", "stopped", "aborted", "escalated", "failed", "deduplicated"]
     steps: list[StepResult] = field(default_factory=list)
     final_output: LLMOutput | None = None
     abort_reason: str | None = None
@@ -213,7 +214,17 @@ class PipelineRunner:
             _log_event(run_log, "info", "rerun_started",
                        f"Re-run from step: {from_step} ({n} prior step output(s) replayed)")
 
-        await self._db_create_run(run_id, pipeline, normalised, parent_run_id=parent_run_id)
+        created = await self._db_create_run(run_id, pipeline, normalised, parent_run_id=parent_run_id)
+        if not created:
+            _log_event(run_log, "warn", "run_deduplicated",
+                       "Duplicate run rejected at insert time — another run is already "
+                       "in flight for this pipeline+fingerprint.")
+            run_events.publish_complete(run_id, "deduplicated")
+            return PipelineRunResult(
+                run_id=run_id,
+                pipeline_name=pipeline.name,
+                status="deduplicated",
+            )
 
         result = PipelineRunResult(
             run_id=run_id,
@@ -1334,9 +1345,20 @@ class PipelineRunner:
         pipeline: PipelineConfig,
         normalised: NormalisedContext,
         parent_run_id: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """Insert the run row. Returns False if a 'running' row for the same
+        pipeline+fingerprint already exists (the DB's unique partial index — see
+        database.py — rejects the insert), True otherwise (including when no DB is
+        configured, e.g. unit tests with session_factory=None).
+
+        This closes the dedup TOCTOU race documented in README §3a: the pre-check in
+        main.py's webhook handler narrows the window, but two requests can still both
+        pass it before either's row is committed. The DB constraint is the actual
+        guarantee; this is the last line of defence so a race never results in two
+        pipelines executing concurrently for the same alert.
+        """
         if not self._session_factory:
-            return
+            return True
         async with self._session_factory() as session:
             session.add(PipelineRun(
                 id=run_id,
@@ -1349,7 +1371,17 @@ class PipelineRunner:
                 fingerprint=normalised.fingerprint,
                 parent_run_id=parent_run_id,
             ))
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                logger.warning(
+                    "Duplicate run insert rejected by DB: pipeline=%s fingerprint=%s run_id=%s "
+                    "— another run is already in flight for this fingerprint",
+                    pipeline.name, normalised.fingerprint, run_id,
+                )
+                return False
+        return True
 
     async def _db_save_step(
         self,

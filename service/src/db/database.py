@@ -1,11 +1,15 @@
 import json
+import logging
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from ..utils import utc_now
 from .models import Base, PipelineRun
+
+logger = logging.getLogger(__name__)
 
 _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -21,26 +25,54 @@ async def create_tables() -> None:
     assert _engine is not None, "Database not initialised — call init_db() first"
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
         # Add columns introduced after initial schema — safe to run on every boot.
-        # SQLite raises OperationalError if the column already exists; we ignore that.
-        for statement in _MIGRATIONS:
-            try:
-                await conn.exec_driver_sql(statement)
-            except Exception:
-                pass
+        # Postgres supports IF NOT EXISTS directly. SQLite's ALTER TABLE ADD COLUMN
+        # has no IF NOT EXISTS form (confirmed unsupported as of SQLite 3.51), so it
+        # falls back to attempt-and-ignore-if-already-there, narrowed to
+        # OperationalError (the exception SQLite/aiosqlite actually raises for a
+        # duplicate column) rather than a bare except, so unrelated DB errors aren't
+        # silently swallowed.
+        is_postgres = conn.dialect.name == "postgresql"
+        for table, column, column_type in _COLUMN_MIGRATIONS:
+            if is_postgres:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}"
+                )
+            else:
+                try:
+                    await conn.exec_driver_sql(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+                    )
+                except OperationalError:
+                    logger.debug("Column %s.%s already exists, skipping", table, column)
+
+        # CREATE [UNIQUE] INDEX IF NOT EXISTS is portable across both dialects.
+        for statement in _INDEX_MIGRATIONS:
+            await conn.exec_driver_sql(statement)
 
 
-_MIGRATIONS = [
-    "ALTER TABLE pipeline_steps ADD COLUMN verifier_mode TEXT",
-    "ALTER TABLE pipeline_runs ADD COLUMN logs TEXT",
-    "ALTER TABLE pipeline_steps ADD COLUMN artifacts TEXT",
-    "ALTER TABLE pipeline_steps ADD COLUMN agent_trace TEXT",
-    "ALTER TABLE pipeline_runs ADD COLUMN fingerprint TEXT",
+_COLUMN_MIGRATIONS = [
+    ("pipeline_steps", "verifier_mode", "TEXT"),
+    ("pipeline_runs", "logs", "TEXT"),
+    ("pipeline_steps", "artifacts", "TEXT"),
+    ("pipeline_steps", "agent_trace", "TEXT"),
+    ("pipeline_runs", "fingerprint", "TEXT"),
+    ("pipeline_runs", "parent_run_id", "TEXT"),
+    ("pipeline_steps", "input_tokens", "INTEGER"),
+    ("pipeline_steps", "output_tokens", "INTEGER"),
+]
+
+_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_fingerprint ON pipeline_runs (fingerprint)",
-    "ALTER TABLE pipeline_runs ADD COLUMN parent_run_id TEXT",
     "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_parent_run_id ON pipeline_runs (parent_run_id)",
-    "ALTER TABLE pipeline_steps ADD COLUMN input_tokens INTEGER",
-    "ALTER TABLE pipeline_steps ADD COLUMN output_tokens INTEGER",
+    # Closes the dedup TOCTOU race (README §3a "Known limitation"): the DB itself now
+    # refuses a second 'running' row for the same pipeline+fingerprint, regardless of
+    # how close together two webhook deliveries land. NULLs are never considered equal
+    # in a unique index, so pipelines/sources that opt out of dedup (fingerprint=None,
+    # e.g. sub-pipelines, re-runs) are correctly unaffected.
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_pipeline_runs_running_fingerprint "
+    "ON pipeline_runs (pipeline_name, fingerprint) WHERE status = 'running'",
 ]
 
 

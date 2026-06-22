@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -119,7 +119,9 @@ class DedupConfig(BaseModel):
 
 
 class TriggerConfig(BaseModel):
-    match: dict[str, str] = Field(default_factory=dict)
+    # Value is either a plain string (exact match) or a single-key operator dict,
+    # e.g. {"in": ["prod", "staging"]} or {"regex": "^api-.*"} — see resolver._matches.
+    match: dict[str, Any] = Field(default_factory=dict)
     dedup: DedupConfig | None = None
 
 

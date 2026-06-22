@@ -1,5 +1,6 @@
 apscheduler>=3.10,<4
 aiosqlite==0.22.1
+asyncpg==0.30.0
 greenlet==3.4.0
 annotated-doc==0.0.4
 annotated-types==0.7.0

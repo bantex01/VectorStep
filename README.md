@@ -19,7 +19,7 @@ Primary use case is observability automation (alert triage, Grafana investigatio
 - **Python 3.11+**
 - **FastAPI** — webhook endpoint, status/runs API, and UI routes
 - **Pydantic v2** — normalised context schema, pipeline config models, LLM output validation
-- **SQLAlchemy + aiosqlite** — async SQLite for pipeline run storage
+- **SQLAlchemy (async)** — pipeline run storage; SQLite (`aiosqlite`) for zero-infra local dev, PostgreSQL (`asyncpg`) recommended for production — see §Database below
 - **httpx** — async HTTP client for webhook executor and notification delivery
 - **websockets** — async WebSocket client for OpenClaw and P-Ork Gateway executors
 - **Jinja2** — prompt template rendering (`{{variable}}` syntax in YAML configs) and HTML UI templates
@@ -162,6 +162,35 @@ The `resolver` loads all YAML configs from `PIPELINE_CONFIG_DIR` and matches the
 
 Pipeline name can also be explicitly set by the source parser if the webhook payload contains a pipeline attribute (e.g. an Alertmanager label `pipeline: alert-triage-critical`).
 
+**Match operators:** a `trigger.match` value can be a plain scalar (exact equality, the original behaviour) or a single-key operator dict for richer matching:
+
+```yaml
+trigger:
+  match:
+    severity: critical                    # exact match (unchanged)
+    environment:
+      in: [prod, staging]                 # membership
+    service:
+      not_in: [test-runner]                # exclusion
+    summary:
+      regex: "(?i)timeout"                 # regex search (re.search, not full match)
+    error_rate:
+      gt: "5"                              # numeric comparison — gt | gte | lt | lte
+    severity:
+      ne: info                             # not-equal
+```
+
+| Operator | Behaviour |
+|---|---|
+| `eq` | Same as a plain scalar — exact equality |
+| `ne` | Not equal |
+| `in` | Value is a member of the given list |
+| `not_in` | Value is not a member of the given list |
+| `regex` | `re.search(pattern, str(actual))` — `None` actual never matches |
+| `gt` / `gte` / `lt` / `lte` | Numeric comparison — both sides are cast with `float()`; a non-numeric actual or expected value never matches |
+
+A match value dict must have exactly one key; an unknown operator or a multi-key dict logs a warning and never matches (fails closed).
+
 ---
 
 ### 3a. Idempotency & Deduplication
@@ -228,10 +257,19 @@ trigger:
     # enabled: false       # or opt this pipeline out of dedup entirely
 ```
 
-**Known limitation:** there's a small TOCTOU race if two webhooks with the same
-fingerprint arrive within milliseconds of each other — both could pass the check before
-either's run row is inserted. Worst case is one extra redundant run, not a correctness
-issue.
+**Race safety:** the application-level check above narrows the window but two webhooks
+with the same fingerprint arriving within milliseconds of each other can both pass it
+before either's run row is inserted. The actual guarantee comes from a partial unique
+index — `UNIQUE (pipeline_name, fingerprint) WHERE status = 'running'` (migration in
+`service/src/db/database.py`). If both requests' inserts race, the database accepts
+exactly one; the loser's insert raises `IntegrityError`, which `PipelineRunner` catches
+in `_db_create_run()` and turns into an early `status="deduplicated"` result — no second
+pipeline ever executes. NULL fingerprints are never equal in a unique index, so
+fingerprint-less sources (sub-pipelines, re-runs) are unaffected. The one rough edge: the
+loser's HTTP response was already sent as `"status": "accepted"` with its own `run_id`
+before the conflict was discovered (responses are returned before the background task
+runs), so that particular `run_id` 404s on `GET /runs/{run_id}` — the work itself is
+never duplicated, only that one run_id is left unrealized.
 
 ---
 
@@ -1081,7 +1119,7 @@ retry:
   delay_seconds: 2.0
 ```
 
-### 14. Run Storage (SQLite)
+### 14. Run Storage
 
 **pipeline_runs**
 
@@ -1325,6 +1363,7 @@ step_library_dir: ./steps            # reusable step definitions; omit to disabl
 
 database:
   url: sqlite+aiosqlite:///./runs.db
+  # url: postgresql+asyncpg://user:password@localhost:5432/pork   # production — see §Database
 
 notifications:
   telegram:
@@ -1371,6 +1410,41 @@ observability:
 ```
 
 `${ENV_VAR}` placeholders are resolved at startup. Unresolved placeholders become `""`.
+
+---
+
+## Database
+
+The ORM layer (SQLAlchemy async) is dialect-agnostic — switching backends is a
+`database.url` change only, no code changes. Two supported backends:
+
+| Backend | URL | When to use |
+|---|---|---|
+| SQLite (`aiosqlite`) | `sqlite+aiosqlite:///./runs.db` | Local dev, zero infrastructure, single process |
+| PostgreSQL (`asyncpg`) | `postgresql+asyncpg://user:pass@host:5432/dbname` | Production — concurrent writers, real backup/replication story |
+
+**Setup (Postgres):**
+```bash
+createdb pork
+# config.yaml:
+database:
+  url: postgresql+asyncpg://user:password@localhost:5432/pork
+```
+
+Tables and migrations run automatically on startup (`create_tables()` in
+`service/src/db/database.py`) — same as SQLite, no Alembic or manual migration step.
+
+**Migration mechanism:** new columns are added via a small `_COLUMN_MIGRATIONS` list run
+on every boot. Postgres uses native `ADD COLUMN IF NOT EXISTS`; SQLite has no such syntax
+(confirmed unsupported as of SQLite 3.51), so it attempts the plain `ADD COLUMN` and
+ignores `OperationalError` (logged at `DEBUG`) when the column is already there. Index
+creation (`_INDEX_MIGRATIONS`, including `CREATE UNIQUE INDEX IF NOT EXISTS`) is portable
+across both dialects as-is.
+
+**Dedup race hardening:** a partial unique index —
+`UNIQUE (pipeline_name, fingerprint) WHERE status = 'running'` — closes the TOCTOU race
+described in §3a at the database layer, not just the application-level pre-check. See
+§3a "Race safety" for the full mechanism.
 
 ---
 
@@ -1478,7 +1552,8 @@ The `steps/` directory is gitignored — steps are personal to your deployment. 
 | Structured JSON output from LLM | Makes flow control deterministic — runner reads `confidence`/`proceed`, not prose |
 | Extra fields allowed on LLMOutput | Domain fields (`jira_ticket`, `action`, etc.) pass between steps without schema changes |
 | Isolated session key per step | Prevents context bleed between concurrent runs and between steps |
-| SQLite for run storage | Zero infrastructure dependency, file-based, easy backup, queryable |
+| SQLAlchemy async ORM, dialect swap via config only | SQLite for zero-infra local dev, Postgres for production — same code path, no Alembic |
+| DB-level partial unique index for in-flight dedup | The application-level pre-check (§3a) narrows but cannot close a TOCTOU race on its own — the DB constraint is the actual correctness guarantee, the pre-check just avoids the round-trip in the common case |
 | Adapter pattern for executors | Swap or mix backends with config changes only; steps in the same pipeline can use different executors |
 | Runner owns flow decisions | LLM recommends, service decides — never blindly chain prompts |
 | `executor:name` agent identity in DB | Disambiguates same agent name across different backends in run history and success rates |
@@ -1518,6 +1593,8 @@ docker buildx build --platform linux/arm64 -t orchestration-service:latest .
 
 Pipeline configs (from `samples/pipelines/` or your own) delivered via Kubernetes ConfigMap mounted at `/app/pipelines/`.
 Step library (from `samples/steps/` or your own) delivered via a separate ConfigMap mounted at `/app/steps/`.
-SQLite database on a PersistentVolumeClaim.
+Database: SQLite on a PersistentVolumeClaim for a single-replica deployment, or PostgreSQL
+(in-cluster or managed) for multi-replica — see §Database. PostgreSQL is the only option
+once you run more than one replica, since SQLite has no concept of a network connection.
 Secrets (tokens) via Kubernetes Secrets as environment variables.
 Log files written to a PersistentVolumeClaim or redirected to stdout by omitting `logging.dir`.

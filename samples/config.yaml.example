@@ -7,6 +7,8 @@ step_library_dir: ./steps
 
 database:
   url: sqlite+aiosqlite:///./runs.db
+  # Postgres (recommended for production — see README §Database):
+  # url: postgresql+asyncpg://user:password@localhost:5432/pork
 
 executors:
   openclaw:
