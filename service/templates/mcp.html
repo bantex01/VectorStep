@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}MCP Tools — P-Ork{% endblock %}
+{% block page_heading %}
+<div class="flex items-center justify-between">
+  <h1 class="text-2xl font-semibold text-zinc-50">MCP Tools</h1>
+  <span class="text-sm text-zinc-500">
+    {{ server_count }} server{% if server_count != 1 %}s{% endif %},
+    {{ total_tools }} tool{% if total_tools != 1 %}s{% endif %}
+  </span>
+</div>
+{% endblock %}
+{% block content %}
+
+{% if gateway_error %}
+<div class="flex items-start gap-3 bg-amber-950 border border-amber-800 rounded-lg px-4 py-3 text-sm text-amber-300 mb-6">
+  <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+  </svg>
+  <span>{{ gateway_error }}</span>
+</div>
+{% endif %}
+
+{% if not servers %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 px-5 py-16 text-center">
+  <p class="text-sm text-zinc-400 mb-2">No MCP servers configured.</p>
+  <p class="text-xs text-zinc-600">Add entries under <code class="font-mono">mcp_servers:</code> in the Gateway's <code class="font-mono">config.yaml</code> and restart it.</p>
+</div>
+{% else %}
+<div class="grid grid-cols-1 gap-4">
+  {% for server in servers %}
+  <div x-data="{ open: {{ 'true' if loop.first else 'false' }} }" class="bg-zinc-900 rounded-lg border border-zinc-800">
+
+    <!-- Server header -->
+    <button @click="open = !open" class="w-full flex items-center justify-between gap-4 p-5 text-left">
+      <div class="flex items-center gap-3 min-w-0">
+        <div class="w-2 h-2 rounded-full shrink-0 {{ 'bg-green-500' if server.running else 'bg-red-500' }}"></div>
+        <h2 class="text-base font-semibold text-zinc-100 font-mono">{{ server.name }}</h2>
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset
+          {% if server.running %}bg-green-950 text-green-400 ring-green-800{% else %}bg-red-950 text-red-400 ring-red-800{% endif %}">
+          {{ 'running' if server.running else 'stopped' }}
+        </span>
+        {% if server.pid %}
+          <span class="text-xs text-zinc-500 font-mono">pid {{ server.pid }}</span>
+        {% endif %}
+        {% if server.restart_count %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800">
+            {{ server.restart_count }} restart{% if server.restart_count != 1 %}s{% endif %}
+          </span>
+        {% endif %}
+      </div>
+      <div class="flex items-center gap-3 shrink-0">
+        <span class="text-sm text-zinc-500">{{ server.tools | length }} tool{% if server.tools | length != 1 %}s{% endif %}</span>
+        <svg class="w-4 h-4 text-zinc-600 transition-transform" :class="open ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </div>
+    </button>
+
+    <!-- Tool list -->
+    <div x-show="open" x-cloak class="border-t border-zinc-800 divide-y divide-zinc-800">
+      {% if not server.tools %}
+      <p class="px-5 py-4 text-sm text-zinc-500">
+        {% if server.running %}No tools registered yet.{% else %}Server is not running — no tools cached.{% endif %}
+      </p>
+      {% endif %}
+      {% for tool in server.tools %}
+      <div x-data="{ schemaOpen: false }" class="px-5 py-4">
+        <div class="flex items-start justify-between gap-4">
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-sm font-mono text-zinc-100">{{ tool.name }}</span>
+              <span class="text-xs font-mono text-zinc-600">{{ tool.registeredName }}</span>
+            </div>
+            {% if tool.description %}
+              <p class="text-sm text-zinc-400 mt-1">{{ tool.description }}</p>
+            {% else %}
+              <p class="text-sm text-zinc-600 mt-1 italic">No description provided.</p>
+            {% endif %}
+          </div>
+          {% if tool.inputSchema %}
+          <button @click="schemaOpen = !schemaOpen" class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border border-zinc-700 hover:border-zinc-500 text-zinc-300 hover:text-zinc-100 transition-colors">
+            <span x-text="schemaOpen ? 'Hide schema' : 'Show schema'"></span>
+            <svg class="w-3.5 h-3.5 transition-transform" :class="schemaOpen ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+            </svg>
+          </button>
+          {% endif %}
+        </div>
+        {% if tool.inputSchema %}
+        <pre x-show="schemaOpen" x-cloak class="mt-3 text-xs font-mono text-zinc-300 bg-zinc-800 rounded-lg p-4 overflow-x-auto leading-relaxed">{{ tool.inputSchema | tojson(indent=2) }}</pre>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% endblock %}

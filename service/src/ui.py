@@ -548,6 +548,26 @@ async def _fetch_pork_gateway_agents() -> tuple[list[dict], str | None]:
         return [], f"Could not reach P-Ork Gateway at {_pork_gateway_base} — is it running?"
 
 
+async def _fetch_pork_gateway_mcp() -> tuple[dict, dict, str | None]:
+    """Fetch the MCP tool registry + server status from the P-Ork Gateway REST API.
+
+    GET /mcp/tools returns {server_name: [{name, registeredName, description, inputSchema}, ...]}
+    GET /mcp/servers returns {server_name: {running, pid, restart_count}}
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            tools_resp, servers_resp = await asyncio.gather(
+                client.get(f"{_pork_gateway_base}/mcp/tools"),
+                client.get(f"{_pork_gateway_base}/mcp/servers"),
+            )
+            tools_resp.raise_for_status()
+            servers_resp.raise_for_status()
+            return tools_resp.json(), servers_resp.json(), None
+    except Exception as exc:
+        logger.debug("P-Ork Gateway MCP endpoints failed: %s", exc)
+        return {}, {}, f"Could not reach P-Ork Gateway at {_pork_gateway_base} — is it running?"
+
+
 async def _fetch_openclaw_agent_files(agent_id: str) -> dict[str, str | None]:
     """Fetch SOUL.md / TOOLS.md / IDENTITY.md from the OpenClaw Gateway WS API."""
     def _content(payload: dict | None) -> str | None:
@@ -720,4 +740,36 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
         "agent_file": agent_files.get("agent_file"),
         "model_stats": model_stats,
         "active_page": "agents",
+    })
+
+
+# ── MCP tools ─────────────────────────────────────────────────────────────────
+
+@router.get("/mcp", response_class=HTMLResponse)
+async def ui_mcp(request: Request):
+    """Browse the MCP tool registry exposed by the P-Ork Gateway.
+
+    OpenClaw isn't included here — it has no REST endpoint for tool
+    introspection (the gateway executor is the only one that exposes
+    GET /mcp/tools and GET /mcp/servers).
+    """
+    tools_by_server, servers_status, error = await _fetch_pork_gateway_mcp()
+
+    servers = []
+    for name in sorted(set(tools_by_server) | set(servers_status)):
+        status = servers_status.get(name, {})
+        servers.append({
+            "name": name,
+            "tools": sorted(tools_by_server.get(name, []), key=lambda t: t.get("name", "")),
+            "running": status.get("running"),
+            "pid": status.get("pid"),
+            "restart_count": status.get("restart_count", 0),
+        })
+
+    return templates.TemplateResponse(request, "mcp.html", {
+        "servers": servers,
+        "gateway_error": error,
+        "server_count": len(servers),
+        "total_tools": sum(len(s["tools"]) for s in servers),
+        "active_page": "mcp",
     })
