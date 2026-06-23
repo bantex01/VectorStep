@@ -38,7 +38,7 @@ context_template:
 
 steps:
   - name: first-line-triage
-    executor: openclaw
+    executor: gateway 
     executor_config:
       agent: first-line-support
       session_key: "agent:first-line-support:{{pipeline_run_id}}"
@@ -76,7 +76,7 @@ steps:
       }
 
   - name: sre-investigation
-    executor: openclaw
+    executor: gateway 
     timeout_seconds: 1200
     executor_config:
       agent: sre-investigation
@@ -125,7 +125,7 @@ steps:
         }
       }
     verifier:
-      executor: openclaw
+      executor: gateway 
       executor_config:
         agent: principal-sre
         session_key: "agent:principal-sre:{{pipeline_run_id}}:investigation-verify"
