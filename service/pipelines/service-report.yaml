@@ -22,7 +22,7 @@ context_template:
 
 steps:
   - name: gather-data
-    executor: openclaw
+    executor: gateway 
     timeout_seconds: 1200
     executor_config:
       agent: sre-investigation
@@ -53,7 +53,7 @@ steps:
       }
 
   - name: write-report
-    executor: openclaw
+    executor: gateway 
     timeout_seconds: 1200
     executor_config:
       agent: first-line-support   # needs Confluence MCP access
