@@ -12,7 +12,7 @@ context_template:
 
 steps:
   - name: pre-check
-    executor: gateway
+    executor: openclaw 
     executor_config:
       agent: baldrick
       session_key: "agent:baldrick:{{pipeline_run_id}}:pre-check"
@@ -49,7 +49,7 @@ steps:
       Approve to continue to the post-approval step, or reject to abort.
 
   - name: post-approval
-    executor: gateway
+    executor: openclaw 
     executor_config:
       agent: baldrick
       session_key: "agent:baldrick:{{pipeline_run_id}}:post-approval"
