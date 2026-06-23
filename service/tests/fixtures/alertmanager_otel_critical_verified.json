@@ -36,7 +36,7 @@
         "summary": "OTEL Collector scrape duration p99 exceeded 500ms for 5 minutes",
         "description": "The otel-collector scrape_duration_seconds p99 is 0.82s, breaching the 500ms SLO threshold. This may indicate the collector is under resource pressure or experiencing backpressure from upstream telemetry producers."
       },
-      "startsAt": "2026-05-22T07:00:00Z",
+      "startsAt": "2026-06-23T07:00:00Z",
       "endsAt": "0001-01-01T00:00:00Z",
       "generatorURL": "http://prometheus:9090/graph?g0.expr=scrape_duration_seconds"
     }
