@@ -12,10 +12,10 @@ context_template:
 
 steps:
   - name: pre-check
-    executor: openclaw
+    executor: gateway
     executor_config:
-      agent: main
-      session_key: "agent:main:{{pipeline_run_id}}:pre-check"
+      agent: baldrick
+      session_key: "agent:baldrick:{{pipeline_run_id}}:pre-check"
     confidence_threshold: 0.5
     on_low_confidence: proceed
     prompt_template: |
@@ -49,10 +49,10 @@ steps:
       Approve to continue to the post-approval step, or reject to abort.
 
   - name: post-approval
-    executor: openclaw
+    executor: gateway
     executor_config:
-      agent: main
-      session_key: "agent:main:{{pipeline_run_id}}:post-approval"
+      agent: baldrick
+      session_key: "agent:baldrick:{{pipeline_run_id}}:post-approval"
     confidence_threshold: 0.5
     on_low_confidence: proceed
     prompt_template: |
