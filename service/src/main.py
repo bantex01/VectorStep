@@ -306,11 +306,32 @@ async def lifespan(app: FastAPI):
 
         from .notifications.telegram_poller import poll_telegram_updates
         port = config.get("server", {}).get("port", 8000)
+
+        # /run commands POST to our own /webhook over HTTP, so they need a
+        # token themselves once auth.teams is configured — same as any other
+        # caller. notifications.telegram.team picks which team Telegram-
+        # triggered runs are attributed to; falls back to the legacy single
+        # token (no team) if auth.teams isn't in use.
+        telegram_team = telegram_cfg.get("team", "") or ""
+        telegram_webhook_token = None
+        if telegram_team:
+            telegram_webhook_token = next(
+                (e.get("token") for e in teams_cfg if e.get("name") == telegram_team), None
+            )
+            if not telegram_webhook_token:
+                logger.warning(
+                    "notifications.telegram.team '%s' not found in auth.teams — "
+                    "/run commands will be unauthenticated and may 401", telegram_team,
+                )
+        elif not teams_cfg and legacy_token:
+            telegram_webhook_token = legacy_token
+
         _poller_task = asyncio.create_task(
             poll_telegram_updates(
                 bot_token,
                 webhook_base_url=f"http://localhost:{port}",
                 allowed_chat_id=chat_id,
+                webhook_token=telegram_webhook_token,
             )
         )
     else:

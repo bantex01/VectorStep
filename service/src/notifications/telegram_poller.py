@@ -48,6 +48,7 @@ async def poll_telegram_updates(
     bot_token: str,
     webhook_base_url: str = "http://localhost:8000",
     allowed_chat_id: str | int | None = None,
+    webhook_token: str | None = None,
 ) -> None:
     """Long-poll Telegram getUpdates, resolve HITL approval futures, and handle /run commands.
 
@@ -56,7 +57,9 @@ async def poll_telegram_updates(
 
     /run <pipeline-name> [key=value ...] triggers a generic webhook POST to the
     local service. Commands from chats other than allowed_chat_id are ignored when
-    allowed_chat_id is set.
+    allowed_chat_id is set. webhook_token, if set, is sent as a Bearer token on that
+    POST — required once auth.teams/auth.token is configured (see README §3b),
+    otherwise the call 401s like any other unauthenticated caller.
     """
     offset = 0
     updates_url = _GET_UPDATES_API.format(token=bot_token)
@@ -158,6 +161,7 @@ async def poll_telegram_updates(
                     chat_id=chat_id,
                     pipeline_name=pipeline_name,
                     data=run_data,
+                    webhook_token=webhook_token,
                 )
 
         except asyncio.CancelledError:
@@ -176,6 +180,7 @@ async def _trigger_pipeline(
     chat_id: int,
     pipeline_name: str,
     data: dict,
+    webhook_token: str | None = None,
 ) -> None:
     """POST a generic webhook to the local service and confirm to the user."""
     webhook_url = f"{webhook_base_url}/webhook?source=generic"
@@ -185,10 +190,11 @@ async def _trigger_pipeline(
         "summary": f"Triggered from Telegram (chat {chat_id})",
         "data": data,
     }
+    headers = {"Authorization": f"Bearer {webhook_token}"} if webhook_token else {}
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(webhook_url, json=payload)
+            resp = await client.post(webhook_url, json=payload, headers=headers)
             resp.raise_for_status()
             run_id = resp.json().get("run_id", "unknown")
 
