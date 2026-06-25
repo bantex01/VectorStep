@@ -17,8 +17,14 @@
         <option value="{{ name }}" {% if selected_pipeline == name %}selected{% endif %}>{{ name }}</option>
       {% endfor %}
     </select>
+    <select name="team" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="">All teams</option>
+      {% for name in team_names %}
+        <option value="{{ name }}" {% if selected_team == name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
     <button type="submit" class="text-sm bg-indigo-600 text-white px-3 py-1.5 rounded-md hover:bg-indigo-500 transition-colors">Filter</button>
-    {% if selected_status or selected_pipeline %}
+    {% if selected_status or selected_pipeline or selected_team %}
       <a href="/ui/runs" class="text-sm text-zinc-500 hover:text-zinc-300 px-2">Clear</a>
     {% endif %}
   </form>
@@ -31,6 +37,7 @@
       <tr class="text-xs text-zinc-500 uppercase tracking-wide border-b border-zinc-800">
         <th class="text-left px-5 py-3 font-medium">Status</th>
         <th class="text-left px-5 py-3 font-medium">Pipeline</th>
+        <th class="text-left px-5 py-3 font-medium">Team</th>
         <th class="text-left px-5 py-3 font-medium">Source</th>
         <th class="text-left px-5 py-3 font-medium">Triggered</th>
         <th class="text-left px-5 py-3 font-medium">Duration</th>
@@ -47,6 +54,13 @@
         </td>
         <td class="px-5 py-3">
           <span class="text-sm font-medium text-zinc-100">{{ run.pipeline_name }}</span>
+        </td>
+        <td class="px-5 py-3">
+          {% if run.team %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">{{ run.team }}</span>
+          {% else %}
+          <span class="text-sm text-zinc-600">—</span>
+          {% endif %}
         </td>
         <td class="px-5 py-3 text-sm text-zinc-400">{{ source_label(run.source) }}</td>
         <td class="px-5 py-3 text-sm text-zinc-400" title="{{ run.triggered_at.isoformat() }}">
@@ -68,11 +82,11 @@
     <span class="text-xs text-zinc-500">Showing {{ runs | length }} runs</span>
     <div class="flex gap-2">
       {% if offset > 0 %}
-        <a href="/ui/runs?status={{ selected_status }}&pipeline={{ selected_pipeline }}&limit={{ limit }}&offset={{ [offset - limit, 0] | max }}"
+        <a href="/ui/runs?status={{ selected_status }}&pipeline={{ selected_pipeline }}&team={{ selected_team }}&limit={{ limit }}&offset={{ [offset - limit, 0] | max }}"
            class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 border border-zinc-700 rounded-md">← Previous</a>
       {% endif %}
       {% if runs | length == limit %}
-        <a href="/ui/runs?status={{ selected_status }}&pipeline={{ selected_pipeline }}&limit={{ limit }}&offset={{ offset + limit }}"
+        <a href="/ui/runs?status={{ selected_status }}&pipeline={{ selected_pipeline }}&team={{ selected_team }}&limit={{ limit }}&offset={{ offset + limit }}"
            class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 border border-zinc-700 rounded-md">Next →</a>
       {% endif %}
     </div>
@@ -80,7 +94,7 @@
 
   {% else %}
   <div class="px-5 py-16 text-center text-sm text-zinc-500">
-    {% if selected_status or selected_pipeline %}
+    {% if selected_status or selected_pipeline or selected_team %}
       No runs match the selected filters.
     {% else %}
       No runs yet.

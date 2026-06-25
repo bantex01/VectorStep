@@ -71,6 +71,11 @@
         <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(run.status) }}">
           {{ run.status }}
         </span>
+        {% if run.team %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">
+          {{ run.team }}
+        </span>
+        {% endif %}
       </div>
       <p class="text-sm text-zinc-500 font-mono">{{ run.id }}</p>
     </div>

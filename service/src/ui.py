@@ -195,6 +195,7 @@ async def ui_runs(
     request: Request,
     status: str | None = None,
     pipeline: str | None = None,
+    team: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ):
@@ -205,6 +206,8 @@ async def ui_runs(
             q = q.where(PipelineRun.status == status)
         if pipeline:
             q = q.where(PipelineRun.pipeline_name == pipeline)
+        if team:
+            q = q.where(PipelineRun.team == team)
         rows = await session.execute(q.limit(limit).offset(offset))
         runs = rows.scalars().all()
 
@@ -213,11 +216,18 @@ async def ui_runs(
         )
         pipeline_names = [r[0] for r in rows.all()]
 
+        rows = await session.execute(
+            select(PipelineRun.team).distinct().where(PipelineRun.team.is_not(None)).order_by(PipelineRun.team)
+        )
+        team_names = [r[0] for r in rows.all()]
+
     return templates.TemplateResponse(request, "runs.html", {
         "runs": runs,
         "pipeline_names": pipeline_names,
+        "team_names": team_names,
         "selected_status": status or "",
         "selected_pipeline": pipeline or "",
+        "selected_team": team or "",
         "limit": limit,
         "offset": offset,
         "statuses": ["completed", "running", "escalated", "aborted", "failed", "stopped", "interrupted"],
