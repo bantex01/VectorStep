@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Insights — By Agent — P-Ork{% endblock %}
 {% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Insights</h1>{% endblock %}
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+{% endblock %}
 {% block content %}
 
 <div class="flex items-center justify-between mb-6">
@@ -19,6 +22,29 @@
   </form>
 </div>
 
+<!-- Charts -->
+<div class="grid grid-cols-2 gap-6 mb-6">
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Avg step duration by agent</h2>
+    {% if duration_chart.labels %}
+      <div class="h-56"><canvas id="chart-duration"></canvas></div>
+    {% else %}
+      <p class="text-sm text-zinc-500">No step durations recorded in range</p>
+    {% endif %}
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Tokens by agent</h2>
+    {% if token_chart.labels %}
+      <div class="h-56"><canvas id="chart-tokens"></canvas></div>
+    {% else %}
+      <p class="text-sm text-zinc-500">No gateway steps in range</p>
+    {% endif %}
+  </div>
+
+</div>
+
 <div class="bg-zinc-900 rounded-lg border border-zinc-800">
   {% if agent_rows %}
   <table class="w-full">
@@ -27,6 +53,7 @@
         <th class="text-left px-5 py-3 font-medium">Agent</th>
         <th class="text-left px-5 py-3 font-medium">Steps</th>
         <th class="text-left px-5 py-3 font-medium">Success rate</th>
+        <th class="text-left px-5 py-3 font-medium">Avg duration</th>
         <th class="text-left px-5 py-3 font-medium">Tokens</th>
         <th class="text-left px-5 py-3 font-medium">Models</th>
       </tr>
@@ -48,6 +75,7 @@
             <span class="text-sm text-zinc-600">—</span>
           {% endif %}
         </td>
+        <td class="px-5 py-3 text-sm text-zinc-200">{{ format_seconds(row.avg_duration_secs) }}</td>
         <td class="px-5 py-3">
           {% if row.input_tokens or row.output_tokens %}
             <span class="text-sm text-zinc-200" title="↑{{ row.input_tokens | format_number }} ↓{{ row.output_tokens | format_number }}">
@@ -72,5 +100,49 @@
   <div class="px-5 py-16 text-center text-sm text-zinc-500">No steps in range.</div>
   {% endif %}
 </div>
+
+<script>
+  const PALETTE = ['#6366f1', '#22d3ee', '#fbbf24', '#34d399', '#fb7185', '#a78bfa', '#71717a'];
+  Chart.defaults.color = '#a1a1aa';
+  Chart.defaults.borderColor = '#27272a';
+  Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
+
+  const durationData = {{ duration_chart | tojson | safe }};
+  if (durationData.labels.length) {
+    new Chart(document.getElementById('chart-duration'), {
+      type: 'bar',
+      data: {
+        labels: durationData.labels,
+        datasets: [{ label: 'Avg seconds', data: durationData.data, backgroundColor: PALETTE[2] }],
+      },
+      options: {
+        indexAxis: 'y',
+        maintainAspectRatio: false,
+        scales: { x: { grid: { color: '#27272a' } }, y: { grid: { display: false } } },
+        plugins: { legend: { display: false } },
+      },
+    });
+  }
+
+  const tokenData = {{ token_chart | tojson | safe }};
+  if (tokenData.labels.length) {
+    new Chart(document.getElementById('chart-tokens'), {
+      type: 'bar',
+      data: {
+        labels: tokenData.labels,
+        datasets: [
+          { label: 'Input', data: tokenData.input, backgroundColor: PALETTE[0] },
+          { label: 'Output', data: tokenData.output, backgroundColor: PALETTE[1] },
+        ],
+      },
+      options: {
+        indexAxis: 'y',
+        maintainAspectRatio: false,
+        scales: { x: { stacked: true, grid: { color: '#27272a' } }, y: { stacked: true, grid: { display: false } } },
+        plugins: { legend: { position: 'top', labels: { boxWidth: 12 } } },
+      },
+    });
+  }
+</script>
 
 {% endblock %}

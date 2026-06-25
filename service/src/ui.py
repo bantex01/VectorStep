@@ -43,6 +43,33 @@ def _status_classes(status: str) -> str:
     }.get(status or "", "bg-zinc-800 text-zinc-400 ring-zinc-600")
 
 
+_CHART_PALETTE = ["#6366f1", "#22d3ee", "#fbbf24", "#34d399", "#fb7185", "#a78bfa", "#71717a"]
+
+_STATUS_HEX = {
+    "completed":   "#4ade80",
+    "running":     "#60a5fa",
+    "escalated":   "#fbbf24",
+    "aborted":     "#fb923c",
+    "failed":      "#f87171",
+    "stopped":     "#c084fc",
+    "interrupted": "#a1a1aa",
+}
+
+
+def _format_seconds(secs: float | None) -> str:
+    """Like _format_duration, but takes a raw seconds value (e.g. an average) rather than two datetimes."""
+    if secs is None:
+        return "—"
+    secs = int(secs)
+    if secs < 60:
+        return f"{secs}s"
+    m, s = divmod(secs, 60)
+    if m < 60:
+        return f"{m}m {s}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m"
+
+
 def _confidence_bar_color(c: float | None) -> str:
     if c is None:
         return "bg-gray-300"
@@ -134,6 +161,7 @@ templates.env.globals.update({
     "status_classes": _status_classes,
     "confidence_bar_color": _confidence_bar_color,
     "format_duration": _format_duration,
+    "format_seconds": _format_seconds,
     "format_ago": _format_ago,
     "source_label": _source_label,
 })
@@ -456,6 +484,21 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         traces = [r[0] for r in rows.all()]
 
+        q = (
+            select(
+                PipelineStep.model,
+                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
+                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.input_tokens.is_not(None))
+            .group_by(PipelineStep.model)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        tokens_by_model = rows.all()
+
     tool_counter: Counter = Counter()
     for trace_json in traces:
         try:
@@ -476,7 +519,32 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         ((team or "Unattributed", n) for team, n in team_counts),
         key=lambda t: t[1], reverse=True,
     )
-    max_team_count = runs_by_team[0][1] if runs_by_team else 0
+    team_count = len(runs_by_team)
+
+    tokens_by_model_sorted = sorted(
+        ((model or "Unknown model", i, o) for model, i, o in tokens_by_model),
+        key=lambda t: t[1] + t[2], reverse=True,
+    )
+
+    status_chart = {
+        "labels": list(status_counts.keys()),
+        "data": list(status_counts.values()),
+        "colors": [_STATUS_HEX.get(s, "#71717a") for s in status_counts.keys()],
+    }
+    team_chart = {
+        "labels": [t for t, _ in runs_by_team],
+        "data": [n for _, n in runs_by_team],
+        "colors": [_CHART_PALETTE[i % len(_CHART_PALETTE)] for i in range(len(runs_by_team))],
+    }
+    model_token_chart = {
+        "labels": [m for m, _, _ in tokens_by_model_sorted],
+        "input": [i for _, i, _ in tokens_by_model_sorted],
+        "output": [o for _, _, o in tokens_by_model_sorted],
+    }
+    tool_chart = {
+        "labels": [name for name, _ in top_tools],
+        "data": [count for _, count in top_tools],
+    }
 
     return templates.TemplateResponse(request, "insights_overview.html", {
         "time_range": time_range,
@@ -486,11 +554,11 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         "failure_rate": failure_rate,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
-        "runs_by_team": runs_by_team,
-        "max_team_count": max_team_count,
-        "team_count": len(runs_by_team),
-        "top_tools": top_tools,
-        "max_tool_count": max_tool_count,
+        "team_count": team_count,
+        "status_chart": status_chart,
+        "team_chart": team_chart,
+        "model_token_chart": model_token_chart,
+        "tool_chart": tool_chart,
         "active_page": "insights_overview",
     })
 
@@ -544,11 +612,32 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         for name, team in rows.all():
             teams_by_pipeline[name].append(team or "Unattributed")
 
+        # No duration column on pipeline_runs — compute from timestamps in Python
+        # (same approach _format_duration already uses) rather than a cross-dialect
+        # SQL timestamp-diff. Only terminal runs (completed_at set) count.
+        q = (
+            select(PipelineRun.pipeline_name, PipelineRun.triggered_at, PipelineRun.completed_at)
+            .where(PipelineRun.completed_at.is_not(None))
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        durations_by_pipeline: dict[str, list[float]] = defaultdict(list)
+        for name, triggered_at, completed_at in rows.all():
+            secs = (completed_at.replace(tzinfo=None) - triggered_at.replace(tzinfo=None)).total_seconds()
+            if secs >= 0:
+                durations_by_pipeline[name].append(secs)
+
+    avg_duration_by_pipeline = {
+        name: sum(secs) / len(secs) for name, secs in durations_by_pipeline.items() if secs
+    }
+
     pipeline_rows = [
         {
             "name": name,
             "run_count": n,
             "failed_count": failed_counts.get(name, 0),
+            "avg_duration_secs": avg_duration_by_pipeline.get(name),
             "input_tokens": token_totals.get(name, (0, 0))[0],
             "output_tokens": token_totals.get(name, (0, 0))[1],
             "teams": sorted(teams_by_pipeline.get(name, [])),
@@ -556,10 +645,31 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         for name, n in sorted(run_counts.items(), key=lambda t: t[1], reverse=True)
     ]
 
+    duration_chart_rows = sorted(
+        ((name, secs) for name, secs in avg_duration_by_pipeline.items()),
+        key=lambda t: t[1], reverse=True,
+    )
+    duration_chart = {
+        "labels": [name for name, _ in duration_chart_rows],
+        "data": [round(secs) for _, secs in duration_chart_rows],
+    }
+
+    token_chart_rows = sorted(
+        pipeline_rows, key=lambda r: r["input_tokens"] + r["output_tokens"], reverse=True,
+    )
+    token_chart_rows = [r for r in token_chart_rows if r["input_tokens"] or r["output_tokens"]]
+    token_chart = {
+        "labels": [r["name"] for r in token_chart_rows],
+        "input": [r["input_tokens"] for r in token_chart_rows],
+        "output": [r["output_tokens"] for r in token_chart_rows],
+    }
+
     return templates.TemplateResponse(request, "insights_pipelines.html", {
         "time_range": time_range,
         "range_label": range_label,
         "pipeline_rows": pipeline_rows,
+        "duration_chart": duration_chart,
+        "token_chart": token_chart,
         "active_page": "insights_pipelines",
     })
 
@@ -575,6 +685,7 @@ async def ui_insights_agents(request: Request, time_range: str = "7d"):
                 PipelineStep.executor, PipelineStep.agent, func.count().label("n"),
                 func.coalesce(func.sum(PipelineStep.input_tokens), 0),
                 func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+                func.avg(PipelineStep.duration_ms),
             )
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .group_by(PipelineStep.executor, PipelineStep.agent)
@@ -609,7 +720,7 @@ async def ui_insights_agents(request: Request, time_range: str = "7d"):
             models_by_agent[(executor, agent)].append(model)
 
     agent_rows = []
-    for executor, agent, step_count, input_tokens, output_tokens in step_totals:
+    for executor, agent, step_count, input_tokens, output_tokens, avg_duration_ms in step_totals:
         failed = failed_counts.get((executor, agent), 0)
         success_rate = round((step_count - failed) / step_count * 100) if step_count else None
         agent_rows.append({
@@ -618,16 +729,38 @@ async def ui_insights_agents(request: Request, time_range: str = "7d"):
             "step_count": step_count,
             "failed_count": failed,
             "success_rate": success_rate,
+            "avg_duration_secs": (avg_duration_ms / 1000) if avg_duration_ms is not None else None,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "models": sorted(models_by_agent.get((executor, agent), [])),
         })
     agent_rows.sort(key=lambda r: r["step_count"], reverse=True)
 
+    duration_chart_rows = sorted(
+        (r for r in agent_rows if r["avg_duration_secs"] is not None),
+        key=lambda r: r["avg_duration_secs"], reverse=True,
+    )
+    duration_chart = {
+        "labels": [r["agent"] for r in duration_chart_rows],
+        "data": [round(r["avg_duration_secs"]) for r in duration_chart_rows],
+    }
+
+    token_chart_rows = sorted(
+        (r for r in agent_rows if r["input_tokens"] or r["output_tokens"]),
+        key=lambda r: r["input_tokens"] + r["output_tokens"], reverse=True,
+    )
+    token_chart = {
+        "labels": [r["agent"] for r in token_chart_rows],
+        "input": [r["input_tokens"] for r in token_chart_rows],
+        "output": [r["output_tokens"] for r in token_chart_rows],
+    }
+
     return templates.TemplateResponse(request, "insights_agents.html", {
         "time_range": time_range,
         "range_label": range_label,
         "agent_rows": agent_rows,
+        "duration_chart": duration_chart,
+        "token_chart": token_chart,
         "active_page": "insights_agents",
     })
 

@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Insights — P-Ork{% endblock %}
 {% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Insights</h1>{% endblock %}
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+{% endblock %}
 {% block content %}
 
 <div class="flex items-center justify-between mb-6">
@@ -60,67 +63,113 @@
 
 </div>
 
-<!-- Runs by team + MCP tool use -->
+<!-- Charts -->
 <div class="grid grid-cols-2 gap-6">
 
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs by team</h2>
-    {% if runs_by_team %}
-    <table class="w-full">
-      <tbody class="divide-y divide-zinc-800">
-        {% for team, count in runs_by_team %}
-        <tr>
-          <td class="py-2 pr-4">
-            {% if team == "Unattributed" %}
-              <span class="text-sm text-zinc-500">{{ team }}</span>
-            {% else %}
-              <a href="/ui/runs?team={{ team }}" class="text-sm text-zinc-200 hover:text-indigo-400 font-medium">{{ team }}</a>
-            {% endif %}
-          </td>
-          <td class="py-2 w-32">
-            <div class="flex items-center gap-2">
-              <div class="flex-1 bg-zinc-700 rounded-full h-1.5">
-                <div class="h-1.5 rounded-full bg-indigo-500" style="width: {{ ((count / max_team_count) * 100)|round|int }}%"></div>
-              </div>
-              <span class="text-xs text-zinc-500 w-8 text-right">{{ count }}</span>
-            </div>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs by status</h2>
+    {% if status_chart.labels %}
+      <div class="h-56"><canvas id="chart-status"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">No runs in range</p>
     {% endif %}
   </div>
 
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs by team</h2>
+    {% if team_chart.labels %}
+      <div class="h-56"><canvas id="chart-team"></canvas></div>
+    {% else %}
+      <p class="text-sm text-zinc-500">No runs in range</p>
+    {% endif %}
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Tokens by model</h2>
+    {% if model_token_chart.labels %}
+      <div class="h-56"><canvas id="chart-model-tokens"></canvas></div>
+    {% else %}
+      <p class="text-sm text-zinc-500">No gateway steps in range</p>
+    {% endif %}
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-4">MCP tool use <span class="text-zinc-500 font-normal">(gateway steps)</span></h2>
-    {% if top_tools %}
-    <table class="w-full">
-      <tbody class="divide-y divide-zinc-800">
-        {% for name, count in top_tools %}
-        <tr>
-          <td class="py-2 pr-4">
-            <span class="text-sm text-zinc-200 font-mono">{{ name }}</span>
-          </td>
-          <td class="py-2 w-32">
-            <div class="flex items-center gap-2">
-              <div class="flex-1 bg-zinc-700 rounded-full h-1.5">
-                <div class="h-1.5 rounded-full bg-cyan-500" style="width: {{ ((count / max_tool_count) * 100)|round|int }}%"></div>
-              </div>
-              <span class="text-xs text-zinc-500 w-8 text-right">{{ count }}</span>
-            </div>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    {% if tool_chart.labels %}
+      <div class="h-56"><canvas id="chart-tools"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">No tool calls in range</p>
     {% endif %}
   </div>
 
 </div>
+
+<script>
+  const PALETTE = ['#6366f1', '#22d3ee', '#fbbf24', '#34d399', '#fb7185', '#a78bfa', '#71717a'];
+  Chart.defaults.color = '#a1a1aa';
+  Chart.defaults.borderColor = '#27272a';
+  Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
+
+  const statusData = {{ status_chart | tojson | safe }};
+  if (statusData.labels.length) {
+    new Chart(document.getElementById('chart-status'), {
+      type: 'doughnut',
+      data: {
+        labels: statusData.labels,
+        datasets: [{ data: statusData.data, backgroundColor: statusData.colors, borderWidth: 0 }],
+      },
+      options: { plugins: { legend: { position: 'right', labels: { boxWidth: 12 } } }, maintainAspectRatio: false },
+    });
+  }
+
+  const teamData = {{ team_chart | tojson | safe }};
+  if (teamData.labels.length) {
+    new Chart(document.getElementById('chart-team'), {
+      type: 'doughnut',
+      data: {
+        labels: teamData.labels,
+        datasets: [{ data: teamData.data, backgroundColor: teamData.colors, borderWidth: 0 }],
+      },
+      options: { plugins: { legend: { position: 'right', labels: { boxWidth: 12 } } }, maintainAspectRatio: false },
+    });
+  }
+
+  const modelTokenData = {{ model_token_chart | tojson | safe }};
+  if (modelTokenData.labels.length) {
+    new Chart(document.getElementById('chart-model-tokens'), {
+      type: 'bar',
+      data: {
+        labels: modelTokenData.labels,
+        datasets: [
+          { label: 'Input', data: modelTokenData.input, backgroundColor: PALETTE[0] },
+          { label: 'Output', data: modelTokenData.output, backgroundColor: PALETTE[1] },
+        ],
+      },
+      options: {
+        indexAxis: 'y',
+        maintainAspectRatio: false,
+        scales: { x: { stacked: true, grid: { color: '#27272a' } }, y: { stacked: true, grid: { display: false } } },
+        plugins: { legend: { position: 'top', labels: { boxWidth: 12 } } },
+      },
+    });
+  }
+
+  const toolData = {{ tool_chart | tojson | safe }};
+  if (toolData.labels.length) {
+    new Chart(document.getElementById('chart-tools'), {
+      type: 'bar',
+      data: {
+        labels: toolData.labels,
+        datasets: [{ label: 'Calls', data: toolData.data, backgroundColor: PALETTE[1] }],
+      },
+      options: {
+        indexAxis: 'y',
+        maintainAspectRatio: false,
+        scales: { x: { grid: { color: '#27272a' } }, y: { grid: { display: false } } },
+        plugins: { legend: { display: false } },
+      },
+    });
+  }
+</script>
 
 {% endblock %}
