@@ -51,6 +51,8 @@ class PipelineExecutor(BaseExecutor):
 
         # Build the sub-pipeline's NormalisedContext from the parent's.
         # fingerprint=None bypasses dedup; source marks the run's origin.
+        # team (like labels/metadata/severity/summary) is inherited from the
+        # parent unmodified here — overridable below via context: {team: ...}.
         sub_normalised = normalised.model_copy(update={
             "pipeline": pipeline_name,
             "source": "sub-pipeline",

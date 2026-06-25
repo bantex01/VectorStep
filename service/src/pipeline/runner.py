@@ -1370,6 +1370,7 @@ class PipelineRunner:
                 raw_payload=json.dumps(normalised.raw),
                 fingerprint=normalised.fingerprint,
                 parent_run_id=parent_run_id,
+                team=normalised.team,
             ))
             try:
                 await session.commit()

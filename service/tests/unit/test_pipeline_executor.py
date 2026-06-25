@@ -216,6 +216,35 @@ async def test_pipeline_executor_no_context_override_inherits_parent():
     assert sub_normalised.labels["service"] == "db"
 
 
+async def test_pipeline_executor_no_context_override_inherits_team():
+    normalised = _make_normalised(team="payments")
+    ctx, mock_runner = _make_ctx(normalised=normalised)
+
+    step = StepConfig(name="s", executor="pipeline", executor_config={"pipeline": "sub-pipeline"})
+    await PipelineExecutor().execute(step, ctx)
+
+    sub_normalised = mock_runner.run.call_args.kwargs["normalised"]
+    assert sub_normalised.team == "payments"
+
+
+async def test_pipeline_executor_context_override_team():
+    normalised = _make_normalised(team="payments")
+    ctx, mock_runner = _make_ctx(normalised=normalised)
+
+    step = StepConfig(
+        name="s",
+        executor="pipeline",
+        executor_config={
+            "pipeline": "sub-pipeline",
+            "context": {"team": "platform"},
+        },
+    )
+    await PipelineExecutor().execute(step, ctx)
+
+    sub_normalised = mock_runner.run.call_args.kwargs["normalised"]
+    assert sub_normalised.team == "platform"
+
+
 # ---------------------------------------------------------------------------
 # Runner context injection
 # ---------------------------------------------------------------------------

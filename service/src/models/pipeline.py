@@ -138,6 +138,7 @@ class ScheduleConfig(BaseModel):
     summary: str = ""                     # injected as context.summary
     severity: str = "info"                # injected as context.severity
     labels: dict[str, str] = Field(default_factory=dict)  # extra labels for prompt context
+    team: str | None = None               # owning team — no caller/token to derive it from, declared directly
 
 
 class LibraryStepConfig(BaseModel):

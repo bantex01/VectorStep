@@ -273,6 +273,57 @@ never duplicated, only that one run_id is left unrealized.
 
 ---
 
+### 3b. Team Attribution
+
+To show LLM token spend broken down by owning team/department, every run is
+tagged with a `team` — used for the `pork_pipeline_tokens_total` metric (§15a)
+and the `GET /runs?team=` filter (§15).
+
+**Team comes from the Bearer token that authenticated the webhook, not from a
+field in the payload.** A self-reported `team` in a JSON body is spoofable and
+easy to get wrong; tying team to the auth credential makes attribution
+authoritative, and "onboarding a team" becomes synonymous with "issuing them a
+token" — a natural gate.
+
+**Configuration** — `auth.teams` replaces the single `auth.token`:
+
+```yaml
+auth:
+  teams:
+    - name: payments
+      token: ${PORK_WEBHOOK_TOKEN_PAYMENTS}
+    - name: platform
+      token: ${PORK_WEBHOOK_TOKEN_PLATFORM}
+  # token: ${PORK_WEBHOOK_TOKEN}   # legacy single-token form, still supported
+```
+
+- If `auth.teams` is set, each entry's token is checked on `POST /webhook`;
+  a recognized token resolves the run's `team`, an unrecognized or missing
+  token still 401s exactly as before — no separate rejection path is needed
+  for "no team supplied," since an unattributed/unauthenticated call already
+  fails auth.
+- If `auth.teams` is absent and the legacy `auth.token` is set, behaviour is
+  unchanged — single shared token, every run's `team` is `None`
+  (unattributed). If both are set, `auth.teams` wins silently.
+- If neither is set, `POST /webhook` is unauthenticated, same as today.
+
+**Non-webhook runs** don't have a caller/token to resolve team from:
+
+- **Scheduled (cron) runs** declare `team:` directly on the pipeline's
+  `schedule:` block (§8) — trusted because it's git-controlled config, not
+  external input.
+- **Sub-pipeline calls** (`executor: pipeline`, §9) inherit the parent run's
+  `team` automatically, the same way they inherit `labels`/`metadata`, and it
+  can be overridden per-call via `context: {team: "..."}` like any other
+  field.
+
+Out of scope for now: converting tokens to a dollar figure (no per-model
+pricing table exists yet), and fixing the `openclaw` executor's lack of token
+reporting (see §4's token budget note) — a team running mostly `openclaw`
+steps will undercount regardless of this feature.
+
+---
+
 ### 4. Pipeline Config Schema (YAML)
 
 Model selection is handled by the named agent's own config in the executor backend. To override the model for a specific step, set `executor_config.model` — this is passed directly to the executor and takes precedence over the agent's configured model.
@@ -808,6 +859,7 @@ schedule:
   cron: "0 9 * * 1-5"
   summary: "Daily morning service health sweep"
   severity: info
+  team: platform           # owning team for token attribution — see §3b
   labels:
     service: my-service
     environment: prod
@@ -952,7 +1004,7 @@ The `prompt_template` renders to the Telegram message text. Default timeout is 3
 | `pipeline` | **Yes** | Name of the pipeline to call. Must be loaded and present in the pipeline registry at call time. |
 | `context` | No | `NormalisedContext` field overrides. Scalar fields are Jinja2-rendered strings. `labels` and `metadata` are dicts — rendered keys are **merged** with the parent values (parent keys preserved; overrides add or replace individual keys). |
 
-The sub-pipeline inherits the parent's `NormalisedContext` by default. The `pipeline` and `source` fields are updated (`source` → `"sub-pipeline"`) and `fingerprint` is cleared (bypasses dedup). Use `context:` to pass step-specific values:
+The sub-pipeline inherits the parent's `NormalisedContext` by default. The `pipeline` and `source` fields are updated (`source` → `"sub-pipeline"`) and `fingerprint` is cleared (bypasses dedup). `team` (§3b) is inherited unchanged like `labels`/`metadata`, so a shared sub-pipeline's token spend rolls up to whichever team's call triggered it — overridable via `context: {team: "..."}` like any other field. Use `context:` to pass step-specific values:
 
 ```yaml
 - name: triage
@@ -1135,6 +1187,7 @@ retry:
 | `completed_at` | datetime, nullable | |
 | `logs` | json, nullable | Structured run event log — array of `{ts, level, event, msg}` objects. Populated at run completion. Events cover step start/complete/fail/skip/escalate/abort, verifier results, parallel group outcomes, notifications sent, and (for `interrupted` runs) the startup interruption sweep. |
 | `parent_run_id` | uuid, nullable, indexed | Set for sub-pipeline runs (`executor: pipeline`). Links back to the parent run. NULL for top-level runs. |
+| `team` | str, nullable, indexed | Owning team, resolved from the Bearer token that authenticated the webhook (see §3b). NULL for unattributed/legacy-token runs. |
 
 **pipeline_steps**
 
@@ -1180,7 +1233,7 @@ kill -HUP <uvicorn-pid>
 GET /schedules
 # → {"schedules": [{"pipeline": "...", "cron": "...", "next_run": "..."}]}
 
-# List runs — newest first. Filters: ?status=escalated, ?pipeline=alert-triage-critical
+# List runs — newest first. Filters: ?status=escalated, ?pipeline=alert-triage-critical, ?team=payments
 # Pagination: ?limit=50&offset=0 (max 200)
 GET /runs
 # → {"runs": [{id, pipeline_name, source, status, triggered_at, completed_at}, ...]}
@@ -1213,6 +1266,10 @@ frequency rather than relying on pre-baked percentages.
 | `pork_pipeline_step_duration_seconds` | histogram | `executor`, `agent` | Step execution duration (buckets: 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, +Inf seconds) |
 | `pork_verifier_runs_total` | counter | `agent` | Steps where a verifier ran, by primary agent |
 | `pork_verifier_overrides_total` | counter | `agent` | Verifier runs where the verifier lowered the primary's effective confidence |
+| `pork_pipeline_tokens_total` | counter | `team`, `pipeline`, `executor`, `agent`, `model`, `direction` | Cumulative input/output tokens consumed, broken down by owning team (§3b) for cost attribution. `direction` is `input`/`output`. NULL team/model are bucketed as `""` rather than dropped, so unattributed spend stays visible. Steps from executors that don't report tokens (`openclaw`, `human`, `webhook`) are excluded rather than padded as zero. |
+
+Dollar-cost conversion is intentionally not provided — there's no per-model
+pricing table yet, so this metric is raw token counts only.
 
 Standard `python_*` / `process_*` / `python_gc_*` process-health metrics are included
 automatically via `prometheus_client`'s default collectors.
@@ -1397,9 +1454,18 @@ concurrency:
                                        # GET /health exposes active_runs / max_concurrent_runs.
 
 auth:
-  token: ${PORK_WEBHOOK_TOKEN}         # Bearer token required on POST /webhook. Omit this block
-                                       # (or leave token blank) to run unauthenticated.
-                                       # Alertmanager sends it via http_config.authorization.credentials.
+  teams:                               # per-team tokens — see §3b. Each team's token resolves
+                                       # the `team` attribution on every run it authenticates.
+    - name: payments
+      token: ${PORK_WEBHOOK_TOKEN_PAYMENTS}
+    - name: platform
+      token: ${PORK_WEBHOOK_TOKEN_PLATFORM}
+  # token: ${PORK_WEBHOOK_TOKEN}       # legacy single-token form — still supported if `teams`
+                                       # is omitted; every run's team is then unattributed (None).
+                                       # If both `teams` and `token` are set, `teams` wins.
+                                       # Omit this whole block (or leave empty) to run unauthenticated.
+                                       # Alertmanager sends its token via http_config.authorization.credentials —
+                                       # route different teams' alerts to different receivers with different tokens.
 
 observability:
   otel:

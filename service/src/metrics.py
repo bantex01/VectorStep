@@ -30,6 +30,8 @@ class MetricsData:
     step_counts: list[tuple[str, str | None, str, int]]
     step_durations: list[tuple[str, str | None, float]]
     verifier_counts: list[tuple[str | None, int, int]]
+    token_usage: list[tuple[str | None, str, str, str | None, str | None, int, int]]
+    # (team, pipeline, executor, agent, model, input_tokens_sum, output_tokens_sum)
 
 
 async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData:
@@ -70,12 +72,35 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         )
         verifier_counts = rows.all()
 
+        # Only steps that actually report tokens (gateway executor) contribute —
+        # openclaw/human/webhook steps leave input_tokens NULL and are excluded
+        # rather than padding the metric with spurious zero-token series.
+        rows = await session.execute(
+            select(
+                PipelineRun.team,
+                PipelineRun.pipeline_name,
+                PipelineStep.executor,
+                PipelineStep.agent,
+                PipelineStep.model,
+                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
+                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.input_tokens.is_not(None))
+            .group_by(
+                PipelineRun.team, PipelineRun.pipeline_name,
+                PipelineStep.executor, PipelineStep.agent, PipelineStep.model,
+            )
+        )
+        token_usage = list(rows.all())
+
     return MetricsData(
         run_counts=list(run_counts),
         runs_in_progress=runs_in_progress or 0,
         step_counts=list(step_counts),
         step_durations=step_durations,
         verifier_counts=list(verifier_counts),
+        token_usage=token_usage,
     )
 
 
@@ -129,6 +154,17 @@ class PorkCollector(Collector):
             verifier_overrides.add_metric([agent or ""], overrides or 0)
         yield verifier_runs
         yield verifier_overrides
+
+        token_totals = CounterMetricFamily(
+            "pork_pipeline_tokens_total",
+            "Cumulative LLM tokens consumed, by team, pipeline, executor, agent, model, and direction",
+            labels=["team", "pipeline", "executor", "agent", "model", "direction"],
+        )
+        for team, pipeline, executor, agent, model, input_sum, output_sum in data.token_usage:
+            base = [team or "", pipeline, executor, agent or "", model or ""]
+            token_totals.add_metric([*base, "input"], input_sum)
+            token_totals.add_metric([*base, "output"], output_sum)
+        yield token_totals
 
     @staticmethod
     def _duration_histogram(durations: list[tuple[str, str | None, float]]) -> HistogramMetricFamily:

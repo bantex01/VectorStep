@@ -25,6 +25,7 @@ class PipelineRun(Base):
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array of run events
     fingerprint: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # dedup key
     parent_run_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # set for sub-pipeline runs
+    team: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # owning team, from auth token resolution
 
     steps: Mapped[list["PipelineStep"]] = relationship(
         "PipelineStep", back_populates="run", order_by="PipelineStep.step_index"

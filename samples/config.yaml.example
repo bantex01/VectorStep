@@ -62,9 +62,20 @@ concurrency:
                   # lower to protect LLM spend on constrained hardware.
 
 auth:
-  token: ${PORK_WEBHOOK_TOKEN}   # Bearer token required on POST /webhook.
-                                  # Omit this block (or leave blank) to run unauthenticated —
+  # Per-team tokens — see README §3b. Each team's token both authenticates
+  # POST /webhook and resolves the `team` attribution recorded on every run
+  # it triggers, for the pork_pipeline_tokens_total metric and GET /runs?team=.
+  # teams:
+  #   - name: payments
+  #     token: ${PORK_WEBHOOK_TOKEN_PAYMENTS}
+  #   - name: platform
+  #     token: ${PORK_WEBHOOK_TOKEN_PLATFORM}
+  token: ${PORK_WEBHOOK_TOKEN}   # Legacy single-token form — used if `teams` above is unset.
+                                  # Every run's team is then unattributed (None). If both
+                                  # `teams` and `token` are set, `teams` wins.
+                                  # Omit this whole block (or leave blank) to run unauthenticated —
                                   # fine on a private VPN, but set this before exposing the
-                                  # port more broadly. Alertmanager sends it via
+                                  # port more broadly. Alertmanager sends its token via
                                   # http_config.authorization.credentials in the webhook
-                                  # receiver config.
+                                  # receiver config — route different teams' alerts through
+                                  # different receivers with different tokens to use `teams` above.

@@ -119,7 +119,7 @@ _artifact_store = None
 _artifact_retention_days: int = 7
 _dedup_enabled: bool = True
 _dedup_window_seconds: int = 300
-_webhook_token: str | None = None
+_webhook_tokens: dict[str, str | None] = {}  # token -> team name (None = legacy/unattributed)
 _active_runs: int = 0
 _max_concurrent_runs: int = 10
 
@@ -207,6 +207,7 @@ async def _run_scheduled_pipeline(pipeline_name: str) -> None:
         severity=schedule.severity if schedule else "info",
         labels=labels,
         summary=schedule.summary if schedule else f"Scheduled run of {pipeline_name}",
+        team=schedule.team if schedule else None,
         raw={},
         metadata={},
         received_at=datetime.now(timezone.utc),
@@ -232,7 +233,7 @@ async def _cleanup_artifacts() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task, _artifact_store, _artifact_retention_days, _dedup_enabled, _dedup_window_seconds, _webhook_token, _max_concurrent_runs
+    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task, _artifact_store, _artifact_retention_days, _dedup_enabled, _dedup_window_seconds, _webhook_tokens, _max_concurrent_runs
     _app_ref = app
 
     config = _load_config()
@@ -243,12 +244,31 @@ async def lifespan(app: FastAPI):
     _dedup_enabled = dedup_cfg.get("enabled", True)
     _dedup_window_seconds = dedup_cfg.get("window_seconds", 300)
 
-    auth_token = config.get("auth", {}).get("token", "") or ""
-    _webhook_token = auth_token if auth_token else None
+    auth_cfg = config.get("auth", {}) or {}
+    teams_cfg = auth_cfg.get("teams") or []
+    legacy_token = auth_cfg.get("token", "") or ""
+
+    _webhook_tokens = {}
+    if teams_cfg:
+        for entry in teams_cfg:
+            token = entry.get("token", "") or ""
+            name = entry.get("name", "") or ""
+            if not token or not name:
+                logger.warning("auth.teams entry missing name or token (after env resolution) — skipping")
+                continue
+            if token in _webhook_tokens:
+                logger.warning("auth.teams token reused by team '%s' — overriding previous team '%s'", name, _webhook_tokens[token])
+            _webhook_tokens[token] = name
+    elif legacy_token:
+        _webhook_tokens[legacy_token] = None
 
     _max_concurrent_runs = config.get("concurrency", {}).get("max_runs", 10)
-    if _webhook_token:
-        logger.info("Webhook auth enabled — Bearer token required on POST /webhook")
+    if _webhook_tokens:
+        team_count = sum(1 for v in _webhook_tokens.values() if v is not None)
+        if team_count:
+            logger.info("Webhook auth enabled — %d token(s) configured (%d team(s))", len(_webhook_tokens), team_count)
+        else:
+            logger.info("Webhook auth enabled — Bearer token required on POST /webhook (legacy single-token, unattributed)")
     else:
         logger.warning("Webhook auth disabled — POST /webhook is unauthenticated")
 
@@ -465,6 +485,21 @@ def _resolve_dedup_settings(pipeline: PipelineConfig) -> tuple[bool, int]:
     return enabled, window_seconds
 
 
+def _resolve_team(auth_header: str) -> str | None:
+    """Resolve the team owning this webhook call from its Bearer token.
+
+    Raises HTTPException(401) if auth is enabled and the token is missing or
+    unrecognized. Returns None if auth is disabled, or if the matching token
+    is the legacy single-token (unattributed) entry.
+    """
+    if not _webhook_tokens:
+        return None
+    presented = auth_header.removeprefix("Bearer ") if auth_header.startswith("Bearer ") else None
+    if presented is None or presented not in _webhook_tokens:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return _webhook_tokens[presented]
+
+
 @app.post("/webhook")
 async def webhook(
     request: Request,
@@ -472,10 +507,7 @@ async def webhook(
     x_pipeline_source: str | None = Header(default=None),
     strategy: AlertmanagerStrategy = Query(default="most_severe"),
 ):
-    if _webhook_token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header != f"Bearer {_webhook_token}":
-            raise HTTPException(status_code=401, detail="Unauthorized")
+    team = _resolve_team(request.headers.get("Authorization", ""))
 
     payload = await request.json()
 
@@ -499,6 +531,7 @@ async def webhook(
 
     parser = parser_class(**parser_kwargs)
     normalised = await parser.parse(payload)
+    normalised = normalised.model_copy(update={"team": team})
 
     logger.info(
         "Webhook received: source=%s pipeline=%s severity=%s",
@@ -683,6 +716,7 @@ def _format_run_summary(run: PipelineRun) -> dict:
         "pipeline_name": run.pipeline_name,
         "source": run.source,
         "status": run.status,
+        "team": run.team,
         "triggered_at": run.triggered_at.isoformat(),
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
     }
@@ -700,6 +734,7 @@ def _format_run_detail(run: PipelineRun) -> dict:
 async def list_runs(
     status: str | None = Query(default=None),
     pipeline: str | None = Query(default=None),
+    team: str | None = Query(default=None),
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
 ):
@@ -710,6 +745,8 @@ async def list_runs(
             q = q.where(PipelineRun.status == status)
         if pipeline:
             q = q.where(PipelineRun.pipeline_name == pipeline)
+        if team:
+            q = q.where(PipelineRun.team == team)
         q = q.limit(limit).offset(offset)
         result = await session.execute(q)
         runs = result.scalars().all()

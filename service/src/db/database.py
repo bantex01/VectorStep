@@ -61,11 +61,13 @@ _COLUMN_MIGRATIONS = [
     ("pipeline_runs", "parent_run_id", "TEXT"),
     ("pipeline_steps", "input_tokens", "INTEGER"),
     ("pipeline_steps", "output_tokens", "INTEGER"),
+    ("pipeline_runs", "team", "TEXT"),
 ]
 
 _INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_fingerprint ON pipeline_runs (fingerprint)",
     "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_parent_run_id ON pipeline_runs (parent_run_id)",
+    "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_team ON pipeline_runs (team)",
     # Closes the dedup TOCTOU race (README §3a "Known limitation"): the DB itself now
     # refuses a second 'running' row for the same pipeline+fingerprint, regardless of
     # how close together two webhook deliveries land. NULLs are never considered equal
