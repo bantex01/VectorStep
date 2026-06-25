@@ -65,6 +65,9 @@ auth:
   # Per-team tokens — see README §3b. Each team's token both authenticates
   # POST /webhook and resolves the `team` attribution recorded on every run
   # it triggers, for the pork_pipeline_tokens_total metric and GET /runs?team=.
+  # Generate each token with `openssl rand -hex 24` — a plain shared secret,
+  # no issuance endpoint. Resolve via ${ENV_VAR} or write directly into
+  # config.yaml (it's gitignored either way).
   # teams:
   #   - name: payments
   #     token: ${PORK_WEBHOOK_TOKEN_PAYMENTS}

@@ -297,6 +297,17 @@ auth:
   # token: ${PORK_WEBHOOK_TOKEN}   # legacy single-token form, still supported
 ```
 
+Generate each team's token with `openssl rand -hex 24` (or any other source of
+cryptographically random bytes) — a 48-character hex string. There's no token
+issuance endpoint; this is a plain shared secret, handled the same way as
+`executors.gateway.token` and the Telegram `bot_token` elsewhere in this file:
+either resolved from an environment variable via `${ENV_VAR}` as shown above,
+or written directly into `config.yaml` if you're not using env vars for
+secrets — `config.yaml` is gitignored either way. Regenerate it yourself
+locally rather than reusing a value that's appeared anywhere else (a chat
+transcript, an issue tracker, etc.), since a real secret should only ever
+exist in the one place it's actually used.
+
 - If `auth.teams` is set, each entry's token is checked on `POST /webhook`;
   a recognized token resolves the run's `team`, an unrecognized or missing
   token still 401s exactly as before — no separate rejection path is needed
