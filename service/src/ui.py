@@ -3,6 +3,7 @@ import glob
 import json
 import logging
 import os
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
 import httpx
@@ -84,6 +85,22 @@ def _source_label(source: str) -> str:
     return {"alertmanager": "Alertmanager", "scheduler": "Scheduler", "generic": "Generic"}.get(
         source, source
     )
+
+
+_TIME_RANGES = {
+    "24h": (timedelta(hours=24), "24 hours"),
+    "7d": (timedelta(days=7), "7 days"),
+    "30d": (timedelta(days=30), "30 days"),
+}
+
+
+def _time_range_cutoff(time_range: str) -> tuple[datetime | None, str]:
+    """Map 24h|7d|30d|all to (cutoff_datetime_or_None, label) for the Insights pages."""
+    delta_label = _TIME_RANGES.get(time_range)
+    if delta_label is None:
+        return None, "all time"
+    delta, label = delta_label
+    return utc_now() - delta, label
 
 
 class _LiteralBlockDumper(yaml.Dumper):
@@ -395,6 +412,223 @@ async def ui_pipelines(request: Request):
         "last_status": last_status,
         "run_counts": run_counts,
         "active_page": "pipelines",
+    })
+
+
+@router.get("/insights", response_class=HTMLResponse)
+async def ui_insights_overview(request: Request, time_range: str = "7d"):
+    cutoff, range_label = _time_range_cutoff(time_range)
+    sf = get_session_factory()
+
+    async with sf() as session:
+        q = select(PipelineRun.status, func.count().label("n")).group_by(PipelineRun.status)
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        status_counts: dict[str, int] = dict(rows.all())
+
+        q = select(PipelineRun.team, func.count().label("n")).group_by(PipelineRun.team)
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        team_counts = rows.all()
+
+        q = (
+            select(
+                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
+                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.input_tokens.is_not(None))
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        total_input_tokens, total_output_tokens = (await session.execute(q)).one()
+
+        q = (
+            select(PipelineStep.agent_trace)
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.executor == "gateway")
+            .where(PipelineStep.agent_trace.is_not(None))
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        traces = [r[0] for r in rows.all()]
+
+    tool_counter: Counter = Counter()
+    for trace_json in traces:
+        try:
+            events = json.loads(trace_json)
+        except (TypeError, ValueError):
+            continue
+        for event in events:
+            if event.get("type") == "tool_call":
+                tool_counter[event.get("name") or "unknown"] += 1
+    top_tools = tool_counter.most_common(10)
+    max_tool_count = top_tools[0][1] if top_tools else 0
+
+    total_runs = sum(status_counts.values())
+    failed_count = status_counts.get("failed", 0)
+    failure_rate = round(failed_count / total_runs * 100) if total_runs else None
+
+    runs_by_team = sorted(
+        ((team or "Unattributed", n) for team, n in team_counts),
+        key=lambda t: t[1], reverse=True,
+    )
+    max_team_count = runs_by_team[0][1] if runs_by_team else 0
+
+    return templates.TemplateResponse(request, "insights_overview.html", {
+        "time_range": time_range,
+        "range_label": range_label,
+        "total_runs": total_runs,
+        "failed_count": failed_count,
+        "failure_rate": failure_rate,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "runs_by_team": runs_by_team,
+        "max_team_count": max_team_count,
+        "team_count": len(runs_by_team),
+        "top_tools": top_tools,
+        "max_tool_count": max_tool_count,
+        "active_page": "insights_overview",
+    })
+
+
+@router.get("/insights/pipelines", response_class=HTMLResponse)
+async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
+    cutoff, range_label = _time_range_cutoff(time_range)
+    sf = get_session_factory()
+
+    async with sf() as session:
+        q = select(PipelineRun.pipeline_name, func.count().label("n")).group_by(PipelineRun.pipeline_name)
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        run_counts = dict(rows.all())
+
+        q = (
+            select(PipelineRun.pipeline_name, func.count().label("n"))
+            .where(PipelineRun.status == "failed")
+            .group_by(PipelineRun.pipeline_name)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        failed_counts = dict(rows.all())
+
+        q = (
+            select(
+                PipelineRun.pipeline_name,
+                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
+                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.input_tokens.is_not(None))
+            .group_by(PipelineRun.pipeline_name)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        token_totals = {name: (i, o) for name, i, o in rows.all()}
+
+        q = (
+            select(PipelineRun.pipeline_name, PipelineRun.team)
+            .distinct()
+            .group_by(PipelineRun.pipeline_name, PipelineRun.team)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        teams_by_pipeline: dict[str, list[str]] = defaultdict(list)
+        for name, team in rows.all():
+            teams_by_pipeline[name].append(team or "Unattributed")
+
+    pipeline_rows = [
+        {
+            "name": name,
+            "run_count": n,
+            "failed_count": failed_counts.get(name, 0),
+            "input_tokens": token_totals.get(name, (0, 0))[0],
+            "output_tokens": token_totals.get(name, (0, 0))[1],
+            "teams": sorted(teams_by_pipeline.get(name, [])),
+        }
+        for name, n in sorted(run_counts.items(), key=lambda t: t[1], reverse=True)
+    ]
+
+    return templates.TemplateResponse(request, "insights_pipelines.html", {
+        "time_range": time_range,
+        "range_label": range_label,
+        "pipeline_rows": pipeline_rows,
+        "active_page": "insights_pipelines",
+    })
+
+
+@router.get("/insights/agents", response_class=HTMLResponse)
+async def ui_insights_agents(request: Request, time_range: str = "7d"):
+    cutoff, range_label = _time_range_cutoff(time_range)
+    sf = get_session_factory()
+
+    async with sf() as session:
+        q = (
+            select(
+                PipelineStep.executor, PipelineStep.agent, func.count().label("n"),
+                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
+                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .group_by(PipelineStep.executor, PipelineStep.agent)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        step_totals = rows.all()
+
+        q = (
+            select(PipelineStep.executor, PipelineStep.agent, func.count().label("n"))
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.status == "failed")
+            .group_by(PipelineStep.executor, PipelineStep.agent)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        failed_counts = {(executor, agent): n for executor, agent, n in rows.all()}
+
+        q = (
+            select(PipelineStep.executor, PipelineStep.agent, PipelineStep.model)
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.model.is_not(None))
+            .distinct()
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        models_by_agent: dict[tuple[str, str], list[str]] = defaultdict(list)
+        for executor, agent, model in rows.all():
+            models_by_agent[(executor, agent)].append(model)
+
+    agent_rows = []
+    for executor, agent, step_count, input_tokens, output_tokens in step_totals:
+        failed = failed_counts.get((executor, agent), 0)
+        success_rate = round((step_count - failed) / step_count * 100) if step_count else None
+        agent_rows.append({
+            "executor": executor,
+            "agent": agent or "—",
+            "step_count": step_count,
+            "failed_count": failed,
+            "success_rate": success_rate,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "models": sorted(models_by_agent.get((executor, agent), [])),
+        })
+    agent_rows.sort(key=lambda r: r["step_count"], reverse=True)
+
+    return templates.TemplateResponse(request, "insights_agents.html", {
+        "time_range": time_range,
+        "range_label": range_label,
+        "agent_rows": agent_rows,
+        "active_page": "insights_agents",
     })
 
 

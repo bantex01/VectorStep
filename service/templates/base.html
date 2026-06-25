@@ -94,6 +94,13 @@
         </svg>
         Schedules
       </a>
+      <a href="/ui/insights" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
+        {% if active_page in ['insights_overview', 'insights_pipelines', 'insights_agents'] %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
+        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm6 0V9a2 2 0 00-2-2h-2a2 2 0 00-2 2v10a2 2 0 002 2h2a2 2 0 002-2zm6 0V5a2 2 0 00-2-2h-2a2 2 0 00-2 2v14a2 2 0 002 2h2a2 2 0 002-2z"/>
+        </svg>
+        Insights
+      </a>
     </nav>
 
     <div class="p-3 border-t border-zinc-800">

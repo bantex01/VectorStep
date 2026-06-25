@@ -1368,6 +1368,9 @@ The web UI is served under `/ui` and provides the following pages:
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, and copy-ref button |
 | Agents | `/ui/agents` | Unified agent library across all executor backends |
 | Schedules | `/ui/schedules` | Active cron schedules with next-run times |
+| Insights — Overview | `/ui/insights` | Run/failure/token totals, runs by team, and MCP tool-use counts, over a selectable time range (24h/7d/30d/all-time) |
+| Insights — By Pipeline | `/ui/insights/pipelines` | Per-pipeline run/failure/token totals and which teams triggered each pipeline in range |
+| Insights — By Agent | `/ui/insights/agents` | Per-agent step/success-rate/token totals and which models each agent used in range |
 
 ### Running a pipeline manually
 
