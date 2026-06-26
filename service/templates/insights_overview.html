@@ -56,76 +56,61 @@
   </div>
 </div>
 
-{# ── Macro: one panel = line timeseries (left) + donut (right) + table (below) ── #}
-{% macro ts_panel(title, ts_id, donut_id, ts, chart, empty_msg) %}
-<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-  <h2 class="text-sm font-semibold text-zinc-200 mb-3">{{ title }}</h2>
-  {% if chart.labels %}
-  <div class="flex gap-4 items-start">
-    <div class="flex-1 min-w-0" style="height:160px"><canvas id="{{ ts_id }}"></canvas></div>
-    <div class="shrink-0" style="width:110px;height:110px"><canvas id="{{ donut_id }}"></canvas></div>
+{# ── Macro: a single metric row = timeseries card (left) + donut+table card (right) ── #}
+{% macro metric_row(title, ts_id, donut_id, ts, chart, empty_msg, extra_table=false) %}
+<div class="flex gap-4 mb-4">
+
+  {# Timeseries card — wide left panel #}
+  <div class="flex-1 min-w-0 bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-3">{{ title }}</h2>
+    {% if ts.datasets %}
+      <div class="h-48"><canvas id="{{ ts_id }}"></canvas></div>
+    {% else %}
+      <p class="text-sm text-zinc-500">{{ empty_msg }}</p>
+    {% endif %}
   </div>
-  <table class="w-full mt-3 border-t border-zinc-800">
-    <tbody>
-      {% for row in chart.rows %}
-      <tr class="border-b border-zinc-800/40">
-        <td class="py-0.5 min-w-0">
-          <div class="flex items-center gap-1.5">
-            <span class="w-2 h-2 rounded-sm shrink-0" style="background:{{ row.color }}"></span>
-            <span class="text-xs text-zinc-300 truncate max-w-[160px]">{{ row.label }}</span>
-          </div>
-        </td>
-        <td class="py-0.5 text-right text-xs text-zinc-400 font-medium pl-2 tabular-nums shrink-0">{{ row.value | format_number }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="text-sm text-zinc-500">{{ empty_msg }}</p>
-  {% endif %}
+
+  {# Donut + table card — narrower right panel #}
+  <div class="w-56 shrink-0 bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-3">{{ title }}</h2>
+    {% if chart.labels %}
+      <div class="h-32"><canvas id="{{ donut_id }}"></canvas></div>
+      <table class="w-full mt-3 border-t border-zinc-800">
+        <tbody>
+          {% for row in chart.rows %}
+          <tr class="border-b border-zinc-800/40">
+            <td class="py-0.5 min-w-0">
+              <div class="flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-sm shrink-0" style="background:{{ row.color }}"></span>
+                <span class="text-xs text-zinc-300 truncate max-w-[110px]" title="{{ row.label }}">{{ row.label }}</span>
+              </div>
+            </td>
+            <td class="py-0.5 text-right text-xs text-zinc-400 font-medium pl-1 tabular-nums shrink-0">
+              {% if extra_table and row.input is defined %}
+                <span title="↑{{ row.input | format_number }} ↓{{ row.output | format_number }}">{{ row.value | format_number }}</span>
+              {% else %}
+                {{ row.value | format_number }}
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="text-sm text-zinc-500">{{ empty_msg }}</p>
+    {% endif %}
+  </div>
+
 </div>
 {% endmacro %}
 
-{% macro ts_panel_tokens(ts_id, donut_id, ts, chart) %}
-<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-  <h2 class="text-sm font-semibold text-zinc-200 mb-3">Tokens by model</h2>
-  {% if chart.labels %}
-  <div class="flex gap-4 items-start">
-    <div class="flex-1 min-w-0" style="height:160px"><canvas id="{{ ts_id }}"></canvas></div>
-    <div class="shrink-0" style="width:110px;height:110px"><canvas id="{{ donut_id }}"></canvas></div>
-  </div>
-  <table class="w-full mt-3 border-t border-zinc-800">
-    <tbody>
-      {% for row in chart.rows %}
-      <tr class="border-b border-zinc-800/40">
-        <td class="py-0.5 min-w-0">
-          <div class="flex items-center gap-1.5">
-            <span class="w-2 h-2 rounded-sm shrink-0" style="background:{{ row.color }}"></span>
-            <span class="text-xs text-zinc-300 truncate max-w-[160px]" title="{{ row.label }}">{{ row.label }}</span>
-          </div>
-        </td>
-        <td class="py-0.5 text-right text-xs text-zinc-400 font-medium pl-2 tabular-nums shrink-0" title="↑{{ row.input | format_number }} ↓{{ row.output | format_number }}">
-          {{ row.value | format_number }}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="text-sm text-zinc-500">No gateway steps in range</p>
-  {% endif %}
-</div>
-{% endmacro %}
-
-<!-- 2-column × 3-row grid of metric panels -->
-<div class="grid grid-cols-2 gap-6 mb-6">
-  {{ ts_panel("Runs by status",   "ts-status",   "dn-status",   status_ts,   status_chart,      "No runs in range") }}
-  {{ ts_panel("Runs by team",     "ts-team",     "dn-team",     team_ts,     team_chart,        "No runs in range") }}
-  {{ ts_panel("Runs by pipeline", "ts-pipeline", "dn-pipeline", pipeline_ts, pipeline_chart,    "No runs in range") }}
-  {{ ts_panel("Steps by agent",   "ts-agent",    "dn-agent",    agent_ts,    agent_step_chart,  "No steps in range") }}
-  {{ ts_panel("LLM calls by model","ts-llm",     "dn-llm",      llm_ts,      llm_calls_chart,   "No traced steps in range") }}
-  {{ ts_panel_tokens("ts-tokens", "dn-tokens",   tokens_ts,     model_token_chart) }}
-</div>
+<!-- 6 metric rows: timeseries (left) + donut summary (right) -->
+{{ metric_row("Runs by status",    "ts-status",   "dn-status",   status_ts,   status_chart,     "No runs in range") }}
+{{ metric_row("Runs by team",      "ts-team",     "dn-team",     team_ts,     team_chart,       "No runs in range") }}
+{{ metric_row("Runs by pipeline",  "ts-pipeline", "dn-pipeline", pipeline_ts, pipeline_chart,   "No runs in range") }}
+{{ metric_row("Steps by agent",    "ts-agent",    "dn-agent",    agent_ts,    agent_step_chart, "No steps in range") }}
+{{ metric_row("LLM calls by model","ts-llm",      "dn-llm",      llm_ts,      llm_calls_chart,  "No traced steps in range") }}
+{{ metric_row("Tokens by model",   "ts-tokens",   "dn-tokens",   tokens_ts,   model_token_chart,"No gateway steps in range", extra_table=true) }}
 
 <!-- MCP tool use — full width bar, unchanged -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
