@@ -60,17 +60,7 @@
 {% macro metric_row(title, ts_id, donut_id, ts, chart, empty_msg, extra_table=false) %}
 <div class="flex gap-4 mb-4">
 
-  {# Timeseries card — wide left panel #}
-  <div class="flex-1 min-w-0 bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <h2 class="text-sm font-semibold text-zinc-200 mb-3">{{ title }}</h2>
-    {% if ts.datasets %}
-      <div class="h-48"><canvas id="{{ ts_id }}"></canvas></div>
-    {% else %}
-      <p class="text-sm text-zinc-500">{{ empty_msg }}</p>
-    {% endif %}
-  </div>
-
-  {# Donut + table card — narrower right panel #}
+  {# Donut + table card — narrower left panel #}
   <div class="w-56 shrink-0 bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-3">{{ title }}</h2>
     {% if chart.labels %}
@@ -96,6 +86,16 @@
           {% endfor %}
         </tbody>
       </table>
+    {% else %}
+      <p class="text-sm text-zinc-500">{{ empty_msg }}</p>
+    {% endif %}
+  </div>
+
+  {# Timeseries card — wide right panel #}
+  <div class="flex-1 min-w-0 bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-3">{{ title }}</h2>
+    {% if ts.datasets %}
+      <div class="h-48"><canvas id="{{ ts_id }}"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">{{ empty_msg }}</p>
     {% endif %}
