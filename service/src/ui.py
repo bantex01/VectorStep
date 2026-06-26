@@ -130,6 +130,85 @@ def _time_range_cutoff(time_range: str) -> tuple[datetime | None, str]:
     return utc_now() - delta, label
 
 
+def _ts_resolution(time_range: str) -> str:
+    return "hour" if time_range == "24h" else "week" if time_range == "all" else "day"
+
+
+def _ts_bucket(dt: datetime, resolution: str) -> str:
+    d = dt.replace(tzinfo=None)
+    if resolution == "hour":
+        return d.strftime("%d %H:00")
+    if resolution == "week":
+        monday = d - timedelta(days=d.weekday())
+        return monday.strftime("%b %d")
+    return d.strftime("%b %d")
+
+
+def _ts_all_buckets(start: datetime, end: datetime, resolution: str) -> list[str]:
+    """All bucket keys from start to end, so empty buckets render as zero."""
+    buckets: list[str] = []
+    seen: set[str] = set()
+    cur = start.replace(tzinfo=None, second=0, microsecond=0)
+    if resolution == "hour":
+        cur = cur.replace(minute=0)
+        step = timedelta(hours=1)
+    elif resolution == "week":
+        cur = (cur - timedelta(days=cur.weekday())).replace(hour=0, minute=0)
+        step = timedelta(weeks=1)
+    else:
+        cur = cur.replace(hour=0, minute=0)
+        step = timedelta(days=1)
+    end_clean = end.replace(tzinfo=None)
+    while cur <= end_clean + step:
+        key = _ts_bucket(cur, resolution)
+        if key not in seen:
+            seen.add(key)
+            buckets.append(key)
+        cur += step
+    return buckets
+
+
+def _build_ts(
+    rows: list,
+    now: datetime,
+    cutoff: datetime | None,
+    time_range: str,
+    dim_fn,
+    val_fn=None,
+    top_n: int = 7,
+) -> dict:
+    """Build a Chart.js multi-series line-chart dict from raw (timestamp, ...) rows.
+
+    dim_fn(row) -> series name (string)
+    val_fn(row) -> numeric value (default: 1 per row, i.e. counts)
+    """
+    if val_fn is None:
+        val_fn = lambda _r: 1
+
+    resolution = _ts_resolution(time_range)
+    start = (cutoff or (min((r[0] for r in rows), default=now) if rows else now - timedelta(days=7)))
+    bucket_labels = _ts_all_buckets(start, now, resolution)
+
+    accumulator: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for row in rows:
+        key = _ts_bucket(row[0], resolution)
+        dim = str(dim_fn(row)) if dim_fn(row) is not None else "—"
+        accumulator[dim][key] += val_fn(row)
+
+    # Keep only the top_n most active series
+    dims = sorted(accumulator, key=lambda d: sum(accumulator[d].values()), reverse=True)[:top_n]
+
+    datasets = [
+        {
+            "label": dim,
+            "data": [accumulator[dim].get(b, 0) for b in bucket_labels],
+            "color": _CHART_PALETTE[i % len(_CHART_PALETTE)],
+        }
+        for i, dim in enumerate(dims)
+    ]
+    return {"labels": bucket_labels, "datasets": datasets}
+
+
 class _LiteralBlockDumper(yaml.Dumper):
     pass
 
@@ -522,6 +601,29 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         tokens_by_model = rows.all()
 
+        # Raw rows for timeseries bucketing — one consolidated fetch per level.
+        q = select(PipelineRun.triggered_at, PipelineRun.status, PipelineRun.team, PipelineRun.pipeline_name)
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        run_ts_rows = rows.all()
+
+        q = (
+            select(
+                PipelineRun.triggered_at,
+                PipelineStep.agent,
+                PipelineStep.model,
+                PipelineStep.input_tokens,
+                PipelineStep.output_tokens,
+                PipelineStep.agent_trace,
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        step_ts_rows = rows.all()
+
     tool_counter: Counter = Counter()
     llm_call_counter: Counter = Counter()
     for model, trace_json in model_traces:
@@ -611,6 +713,25 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         "data": [count for _, count in top_tools],
     }
 
+    now = utc_now()
+    ts_kw = {"now": now, "cutoff": cutoff, "time_range": time_range}
+    status_ts  = _build_ts(run_ts_rows,  dim_fn=lambda r: r[1],  **ts_kw)   # status
+    team_ts    = _build_ts(run_ts_rows,  dim_fn=lambda r: r[2] or "Unattributed", **ts_kw)   # team
+    pipeline_ts = _build_ts(run_ts_rows, dim_fn=lambda r: r[3],  **ts_kw)   # pipeline
+    agent_ts   = _build_ts(step_ts_rows, dim_fn=lambda r: r[1] or "—", **ts_kw)   # agent
+    llm_ts     = _build_ts(
+        step_ts_rows,
+        dim_fn=lambda r: r[2] or "Unknown model",
+        val_fn=lambda r: sum(1 for e in (json.loads(r[5]) if r[5] else []) if e.get("type") == "llm_call"),
+        **ts_kw,
+    )
+    tokens_ts  = _build_ts(
+        [r for r in step_ts_rows if r[3] is not None],
+        dim_fn=lambda r: r[2] or "Unknown model",
+        val_fn=lambda r: (r[3] or 0) + (r[4] or 0),
+        **ts_kw,
+    )
+
     return templates.TemplateResponse(request, "insights_overview.html", {
         "time_range": time_range,
         "range_label": range_label,
@@ -620,13 +741,13 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
         "team_count": team_count,
-        "status_chart": status_chart,
-        "team_chart": team_chart,
-        "model_token_chart": model_token_chart,
+        "status_chart": status_chart, "status_ts": status_ts,
+        "team_chart": team_chart, "team_ts": team_ts,
+        "pipeline_chart": pipeline_chart, "pipeline_ts": pipeline_ts,
+        "agent_step_chart": agent_step_chart, "agent_ts": agent_ts,
+        "llm_calls_chart": llm_calls_chart, "llm_ts": llm_ts,
+        "model_token_chart": model_token_chart, "tokens_ts": tokens_ts,
         "tool_chart": tool_chart,
-        "pipeline_chart": pipeline_chart,
-        "agent_step_chart": agent_step_chart,
-        "llm_calls_chart": llm_calls_chart,
         "active_page": "insights_overview",
     })
 

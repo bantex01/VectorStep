@@ -15,7 +15,7 @@
   <form method="get" action="/ui/insights">
     <select name="time_range" onchange="this.form.submit()" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
       <option value="24h" {% if time_range == "24h" %}selected{% endif %}>Last 24 hours</option>
-      <option value="7d" {% if time_range == "7d" %}selected{% endif %}>Last 7 days</option>
+      <option value="7d"  {% if time_range == "7d"  %}selected{% endif %}>Last 7 days</option>
       <option value="30d" {% if time_range == "30d" %}selected{% endif %}>Last 30 days</option>
       <option value="all" {% if time_range == "all" %}selected{% endif %}>All time</option>
     </select>
@@ -56,72 +56,78 @@
   </div>
 </div>
 
-{% macro donut_card(title, chart_id, chart, empty_msg) %}
+{# ── Macro: one panel = line timeseries (left) + donut (right) + table (below) ── #}
+{% macro ts_panel(title, ts_id, donut_id, ts, chart, empty_msg) %}
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
   <h2 class="text-sm font-semibold text-zinc-200 mb-3">{{ title }}</h2>
   {% if chart.labels %}
-    <div class="h-40"><canvas id="{{ chart_id }}"></canvas></div>
-    <table class="w-full mt-4 border-t border-zinc-800 pt-1">
-      <tbody>
-        {% for row in chart.rows %}
-        <tr class="border-b border-zinc-800/50">
-          <td class="py-1">
-            <div class="flex items-center gap-2 min-w-0">
-              <span class="w-2.5 h-2.5 rounded-sm shrink-0" style="background:{{ row.color }}"></span>
-              <span class="text-xs text-zinc-300 truncate">{{ row.label }}</span>
-            </div>
-          </td>
-          <td class="py-1 text-right text-xs text-zinc-400 font-medium pl-3 shrink-0">{{ row.value | format_number }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  <div class="flex gap-4 items-start">
+    <div class="flex-1 min-w-0" style="height:160px"><canvas id="{{ ts_id }}"></canvas></div>
+    <div class="shrink-0" style="width:110px;height:110px"><canvas id="{{ donut_id }}"></canvas></div>
+  </div>
+  <table class="w-full mt-3 border-t border-zinc-800">
+    <tbody>
+      {% for row in chart.rows %}
+      <tr class="border-b border-zinc-800/40">
+        <td class="py-0.5 min-w-0">
+          <div class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-sm shrink-0" style="background:{{ row.color }}"></span>
+            <span class="text-xs text-zinc-300 truncate max-w-[160px]">{{ row.label }}</span>
+          </div>
+        </td>
+        <td class="py-0.5 text-right text-xs text-zinc-400 font-medium pl-2 tabular-nums shrink-0">{{ row.value | format_number }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   {% else %}
-    <p class="text-sm text-zinc-500">{{ empty_msg }}</p>
+  <p class="text-sm text-zinc-500">{{ empty_msg }}</p>
   {% endif %}
 </div>
 {% endmacro %}
 
-<!-- Row 1: Run activity -->
-<div class="grid grid-cols-3 gap-6 mb-6">
-  {{ donut_card("Runs by status", "chart-status", status_chart, "No runs in range") }}
-  {{ donut_card("Runs by team", "chart-team", team_chart, "No runs in range") }}
-  {{ donut_card("Runs by pipeline", "chart-pipeline", pipeline_chart, "No runs in range") }}
-</div>
-
-<!-- Row 2: Model & agent usage -->
-<div class="grid grid-cols-3 gap-6 mb-6">
-  {{ donut_card("Steps by agent", "chart-agent-steps", agent_step_chart, "No steps in range") }}
-  {{ donut_card("LLM calls by model", "chart-llm-calls", llm_calls_chart, "No traced steps in range") }}
-
-  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <h2 class="text-sm font-semibold text-zinc-200 mb-3">Tokens by model</h2>
-    {% if model_token_chart.labels %}
-      <div class="h-40"><canvas id="chart-model-tokens"></canvas></div>
-      <table class="w-full mt-4 border-t border-zinc-800 pt-1">
-        <tbody>
-          {% for row in model_token_chart.rows %}
-          <tr class="border-b border-zinc-800/50">
-            <td class="py-1">
-              <div class="flex items-center gap-2 min-w-0">
-                <span class="w-2.5 h-2.5 rounded-sm shrink-0" style="background:{{ row.color }}"></span>
-                <span class="text-xs text-zinc-300 truncate">{{ row.label }}</span>
-              </div>
-            </td>
-            <td class="py-1 text-right text-xs text-zinc-400 font-medium pl-3 shrink-0" title="↑{{ row.input | format_number }} ↓{{ row.output | format_number }}">
-              {{ row.value | format_number }}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    {% else %}
-      <p class="text-sm text-zinc-500">No gateway steps in range</p>
-    {% endif %}
+{% macro ts_panel_tokens(ts_id, donut_id, ts, chart) %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+  <h2 class="text-sm font-semibold text-zinc-200 mb-3">Tokens by model</h2>
+  {% if chart.labels %}
+  <div class="flex gap-4 items-start">
+    <div class="flex-1 min-w-0" style="height:160px"><canvas id="{{ ts_id }}"></canvas></div>
+    <div class="shrink-0" style="width:110px;height:110px"><canvas id="{{ donut_id }}"></canvas></div>
   </div>
+  <table class="w-full mt-3 border-t border-zinc-800">
+    <tbody>
+      {% for row in chart.rows %}
+      <tr class="border-b border-zinc-800/40">
+        <td class="py-0.5 min-w-0">
+          <div class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-sm shrink-0" style="background:{{ row.color }}"></span>
+            <span class="text-xs text-zinc-300 truncate max-w-[160px]" title="{{ row.label }}">{{ row.label }}</span>
+          </div>
+        </td>
+        <td class="py-0.5 text-right text-xs text-zinc-400 font-medium pl-2 tabular-nums shrink-0" title="↑{{ row.input | format_number }} ↓{{ row.output | format_number }}">
+          {{ row.value | format_number }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="text-sm text-zinc-500">No gateway steps in range</p>
+  {% endif %}
+</div>
+{% endmacro %}
+
+<!-- 2-column × 3-row grid of metric panels -->
+<div class="grid grid-cols-2 gap-6 mb-6">
+  {{ ts_panel("Runs by status",   "ts-status",   "dn-status",   status_ts,   status_chart,      "No runs in range") }}
+  {{ ts_panel("Runs by team",     "ts-team",     "dn-team",     team_ts,     team_chart,        "No runs in range") }}
+  {{ ts_panel("Runs by pipeline", "ts-pipeline", "dn-pipeline", pipeline_ts, pipeline_chart,    "No runs in range") }}
+  {{ ts_panel("Steps by agent",   "ts-agent",    "dn-agent",    agent_ts,    agent_step_chart,  "No steps in range") }}
+  {{ ts_panel("LLM calls by model","ts-llm",     "dn-llm",      llm_ts,      llm_calls_chart,   "No traced steps in range") }}
+  {{ ts_panel_tokens("ts-tokens", "dn-tokens",   tokens_ts,     model_token_chart) }}
 </div>
 
-<!-- Row 3: MCP tool use — full width, vertical bar with label truncation -->
+<!-- MCP tool use — full width bar, unchanged -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
   <h2 class="text-sm font-semibold text-zinc-200 mb-4">MCP tool use <span class="text-zinc-500 font-normal">(gateway steps)</span></h2>
   {% if tool_chart.labels %}
@@ -137,7 +143,35 @@
   Chart.defaults.borderColor = '#27272a';
   Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
 
-  const donutOpts = { plugins: { legend: { display: false } }, maintainAspectRatio: false };
+  function mkLine(id, ts) {
+    const el = document.getElementById(id);
+    if (!el || !ts.datasets.length) return;
+    new Chart(el, {
+      type: 'line',
+      data: {
+        labels: ts.labels,
+        datasets: ts.datasets.map(d => ({
+          label: d.label,
+          data: d.data,
+          borderColor: d.color,
+          backgroundColor: d.color + '22',
+          fill: false,
+          tension: 0.35,
+          pointRadius: ts.labels.length < 10 ? 4 : 2,
+          borderWidth: 2,
+        })),
+      },
+      options: {
+        maintainAspectRatio: false,
+        scales: {
+          x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+          y: { grid: { color: '#27272a' }, beginAtZero: true, ticks: { maxTicksLimit: 5 } },
+        },
+        plugins: { legend: { display: false } },
+        interaction: { mode: 'index', intersect: false },
+      },
+    });
+  }
 
   function mkDonut(id, chart) {
     const el = document.getElementById(id);
@@ -145,16 +179,23 @@
     new Chart(el, {
       type: 'doughnut',
       data: { labels: chart.labels, datasets: [{ data: chart.data, backgroundColor: chart.colors, borderWidth: 0 }] },
-      options: donutOpts,
+      options: { maintainAspectRatio: false, plugins: { legend: { display: false } } },
     });
   }
 
-  mkDonut('chart-status',       {{ status_chart       | tojson | safe }});
-  mkDonut('chart-team',         {{ team_chart         | tojson | safe }});
-  mkDonut('chart-pipeline',     {{ pipeline_chart     | tojson | safe }});
-  mkDonut('chart-agent-steps',  {{ agent_step_chart   | tojson | safe }});
-  mkDonut('chart-llm-calls',    {{ llm_calls_chart    | tojson | safe }});
-  mkDonut('chart-model-tokens', {{ model_token_chart  | tojson | safe }});
+  mkLine('ts-status',   {{ status_ts       | tojson | safe }});
+  mkLine('ts-team',     {{ team_ts         | tojson | safe }});
+  mkLine('ts-pipeline', {{ pipeline_ts     | tojson | safe }});
+  mkLine('ts-agent',    {{ agent_ts        | tojson | safe }});
+  mkLine('ts-llm',      {{ llm_ts          | tojson | safe }});
+  mkLine('ts-tokens',   {{ tokens_ts       | tojson | safe }});
+
+  mkDonut('dn-status',   {{ status_chart      | tojson | safe }});
+  mkDonut('dn-team',     {{ team_chart        | tojson | safe }});
+  mkDonut('dn-pipeline', {{ pipeline_chart    | tojson | safe }});
+  mkDonut('dn-agent',    {{ agent_step_chart  | tojson | safe }});
+  mkDonut('dn-llm',      {{ llm_calls_chart   | tojson | safe }});
+  mkDonut('dn-tokens',   {{ model_token_chart | tojson | safe }});
 
   const toolData = {{ tool_chart | tojson | safe }};
   if (toolData.labels.length) {
@@ -169,8 +210,8 @@
             ticks: {
               maxRotation: 55, minRotation: 0, autoSkip: false,
               callback: function(val, idx) {
-                const label = toolData.labels[idx];
-                return label.length > 28 ? label.slice(0, 26) + '…' : label;
+                const l = toolData.labels[idx];
+                return l.length > 28 ? l.slice(0, 26) + '…' : l;
               },
             },
           },
