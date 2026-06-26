@@ -24,26 +24,21 @@
 
 <!-- Stat cards -->
 <div class="grid grid-cols-4 gap-4 mb-8">
-
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Total runs</p>
     <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_runs | format_number }}</p>
     <p class="mt-1 text-xs text-zinc-500">{{ range_label }}</p>
   </div>
-
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Failures</p>
     {% if failure_rate is not none %}
-      <p class="mt-2 text-3xl font-semibold {% if failure_rate == 0 %}text-zinc-50{% elif failure_rate < 20 %}text-amber-400{% else %}text-red-400{% endif %}">
-        {{ failed_count | format_number }}
-      </p>
+      <p class="mt-2 text-3xl font-semibold {% if failure_rate == 0 %}text-zinc-50{% elif failure_rate < 20 %}text-amber-400{% else %}text-red-400{% endif %}">{{ failed_count | format_number }}</p>
       <p class="mt-1 text-xs text-zinc-500">{{ failure_rate }}% of runs</p>
     {% else %}
       <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
       <p class="mt-1 text-xs text-zinc-500">no runs in range</p>
     {% endif %}
   </div>
-
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Total tokens</p>
     {% if total_input_tokens or total_output_tokens %}
@@ -54,80 +49,79 @@
       <p class="mt-1 text-xs text-zinc-500">no gateway steps in range</p>
     {% endif %}
   </div>
-
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Teams</p>
     <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ team_count }}</p>
     <p class="mt-1 text-xs text-zinc-500">seen in range</p>
   </div>
-
 </div>
 
-<!-- Row 1: Run activity — status, team, pipeline -->
+{% macro donut_card(title, chart_id, chart, empty_msg) %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+  <h2 class="text-sm font-semibold text-zinc-200 mb-3">{{ title }}</h2>
+  {% if chart.labels %}
+    <div class="h-40"><canvas id="{{ chart_id }}"></canvas></div>
+    <table class="w-full mt-4 border-t border-zinc-800 pt-1">
+      <tbody>
+        {% for row in chart.rows %}
+        <tr class="border-b border-zinc-800/50">
+          <td class="py-1">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="w-2.5 h-2.5 rounded-sm shrink-0" style="background:{{ row.color }}"></span>
+              <span class="text-xs text-zinc-300 truncate">{{ row.label }}</span>
+            </div>
+          </td>
+          <td class="py-1 text-right text-xs text-zinc-400 font-medium pl-3 shrink-0">{{ row.value | format_number }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="text-sm text-zinc-500">{{ empty_msg }}</p>
+  {% endif %}
+</div>
+{% endmacro %}
+
+<!-- Row 1: Run activity -->
 <div class="grid grid-cols-3 gap-6 mb-6">
-
-  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs by status</h2>
-    {% if status_chart.labels %}
-      <div class="h-64"><canvas id="chart-status"></canvas></div>
-    {% else %}
-      <p class="text-sm text-zinc-500">No runs in range</p>
-    {% endif %}
-  </div>
-
-  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs by team</h2>
-    {% if team_chart.labels %}
-      <div class="h-64"><canvas id="chart-team"></canvas></div>
-    {% else %}
-      <p class="text-sm text-zinc-500">No runs in range</p>
-    {% endif %}
-  </div>
-
-  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs by pipeline</h2>
-    {% if pipeline_chart.labels %}
-      <div class="h-64"><canvas id="chart-pipeline"></canvas></div>
-    {% else %}
-      <p class="text-sm text-zinc-500">No runs in range</p>
-    {% endif %}
-  </div>
-
+  {{ donut_card("Runs by status", "chart-status", status_chart, "No runs in range") }}
+  {{ donut_card("Runs by team", "chart-team", team_chart, "No runs in range") }}
+  {{ donut_card("Runs by pipeline", "chart-pipeline", pipeline_chart, "No runs in range") }}
 </div>
 
-<!-- Row 2: Model/agent usage — steps by agent, LLM calls by model, tokens by model -->
+<!-- Row 2: Model & agent usage -->
 <div class="grid grid-cols-3 gap-6 mb-6">
+  {{ donut_card("Steps by agent", "chart-agent-steps", agent_step_chart, "No steps in range") }}
+  {{ donut_card("LLM calls by model", "chart-llm-calls", llm_calls_chart, "No traced steps in range") }}
 
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Steps by agent</h2>
-    {% if agent_step_chart.labels %}
-      <div class="h-64"><canvas id="chart-agent-steps"></canvas></div>
-    {% else %}
-      <p class="text-sm text-zinc-500">No steps in range</p>
-    {% endif %}
-  </div>
-
-  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <h2 class="text-sm font-semibold text-zinc-200 mb-4">LLM calls by model</h2>
-    {% if llm_calls_chart.labels %}
-      <div class="h-64"><canvas id="chart-llm-calls"></canvas></div>
-    {% else %}
-      <p class="text-sm text-zinc-500">No traced steps in range</p>
-    {% endif %}
-  </div>
-
-  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Tokens by model</h2>
+    <h2 class="text-sm font-semibold text-zinc-200 mb-3">Tokens by model</h2>
     {% if model_token_chart.labels %}
-      <div class="h-64"><canvas id="chart-model-tokens"></canvas></div>
+      <div class="h-40"><canvas id="chart-model-tokens"></canvas></div>
+      <table class="w-full mt-4 border-t border-zinc-800 pt-1">
+        <tbody>
+          {% for row in model_token_chart.rows %}
+          <tr class="border-b border-zinc-800/50">
+            <td class="py-1">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="w-2.5 h-2.5 rounded-sm shrink-0" style="background:{{ row.color }}"></span>
+                <span class="text-xs text-zinc-300 truncate">{{ row.label }}</span>
+              </div>
+            </td>
+            <td class="py-1 text-right text-xs text-zinc-400 font-medium pl-3 shrink-0" title="↑{{ row.input | format_number }} ↓{{ row.output | format_number }}">
+              {{ row.value | format_number }}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     {% else %}
       <p class="text-sm text-zinc-500">No gateway steps in range</p>
     {% endif %}
   </div>
-
 </div>
 
-<!-- Row 3: MCP tool use — full width, tool names can be long -->
+<!-- Row 3: MCP tool use — full width, vertical bar with label truncation -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
   <h2 class="text-sm font-semibold text-zinc-200 mb-4">MCP tool use <span class="text-zinc-500 font-normal">(gateway steps)</span></h2>
   {% if tool_chart.labels %}
@@ -143,80 +137,24 @@
   Chart.defaults.borderColor = '#27272a';
   Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
 
-  // Shared axis options for vertical bar charts: labels sit under the bars at 45°,
-  // bars fill the full panel width, grid lines only on the value (y) axis.
-  const verticalBarX = { grid: { display: false }, ticks: { maxRotation: 55, minRotation: 0, autoSkip: false } };
-  const verticalBarY = { grid: { color: '#27272a' } };
+  const donutOpts = { plugins: { legend: { display: false } }, maintainAspectRatio: false };
 
-  // --- Row 1 ---
-
-  const statusData = {{ status_chart | tojson | safe }};
-  if (statusData.labels.length) {
-    new Chart(document.getElementById('chart-status'), {
+  function mkDonut(id, chart) {
+    const el = document.getElementById(id);
+    if (!el || !chart.labels.length) return;
+    new Chart(el, {
       type: 'doughnut',
-      data: { labels: statusData.labels, datasets: [{ data: statusData.data, backgroundColor: statusData.colors, borderWidth: 0 }] },
-      options: { plugins: { legend: { position: 'right', labels: { boxWidth: 12 } } }, maintainAspectRatio: false },
+      data: { labels: chart.labels, datasets: [{ data: chart.data, backgroundColor: chart.colors, borderWidth: 0 }] },
+      options: donutOpts,
     });
   }
 
-  const teamData = {{ team_chart | tojson | safe }};
-  if (teamData.labels.length) {
-    new Chart(document.getElementById('chart-team'), {
-      type: 'doughnut',
-      data: { labels: teamData.labels, datasets: [{ data: teamData.data, backgroundColor: teamData.colors, borderWidth: 0 }] },
-      options: { plugins: { legend: { position: 'right', labels: { boxWidth: 12 } } }, maintainAspectRatio: false },
-    });
-  }
-
-  const pipelineData = {{ pipeline_chart | tojson | safe }};
-  if (pipelineData.labels.length) {
-    new Chart(document.getElementById('chart-pipeline'), {
-      type: 'bar',
-      data: { labels: pipelineData.labels, datasets: [{ label: 'Runs', data: pipelineData.data, backgroundColor: pipelineData.colors }] },
-      options: { maintainAspectRatio: false, scales: { x: verticalBarX, y: verticalBarY }, plugins: { legend: { display: false } } },
-    });
-  }
-
-  // --- Row 2 ---
-
-  const agentStepData = {{ agent_step_chart | tojson | safe }};
-  if (agentStepData.labels.length) {
-    new Chart(document.getElementById('chart-agent-steps'), {
-      type: 'bar',
-      data: { labels: agentStepData.labels, datasets: [{ label: 'Steps', data: agentStepData.data, backgroundColor: PALETTE[0] }] },
-      options: { maintainAspectRatio: false, scales: { x: verticalBarX, y: verticalBarY }, plugins: { legend: { display: false } } },
-    });
-  }
-
-  const llmCallsData = {{ llm_calls_chart | tojson | safe }};
-  if (llmCallsData.labels.length) {
-    new Chart(document.getElementById('chart-llm-calls'), {
-      type: 'bar',
-      data: { labels: llmCallsData.labels, datasets: [{ label: 'LLM calls', data: llmCallsData.data, backgroundColor: llmCallsData.colors }] },
-      options: { maintainAspectRatio: false, scales: { x: verticalBarX, y: verticalBarY }, plugins: { legend: { display: false } } },
-    });
-  }
-
-  const modelTokenData = {{ model_token_chart | tojson | safe }};
-  if (modelTokenData.labels.length) {
-    new Chart(document.getElementById('chart-model-tokens'), {
-      type: 'bar',
-      data: {
-        labels: modelTokenData.labels,
-        datasets: [
-          { label: 'Input', data: modelTokenData.input, backgroundColor: PALETTE[0] },
-          { label: 'Output', data: modelTokenData.output, backgroundColor: PALETTE[1] },
-        ],
-      },
-      options: {
-        maintainAspectRatio: false,
-        scales: { x: verticalBarX, y: { ...verticalBarY, stacked: true } },
-        plugins: { legend: { position: 'top', labels: { boxWidth: 12 } } },
-      },
-    });
-  }
-
-  // --- Row 3: MCP tools — truncate very long names, full name visible in tooltip ---
+  mkDonut('chart-status',       {{ status_chart       | tojson | safe }});
+  mkDonut('chart-team',         {{ team_chart         | tojson | safe }});
+  mkDonut('chart-pipeline',     {{ pipeline_chart     | tojson | safe }});
+  mkDonut('chart-agent-steps',  {{ agent_step_chart   | tojson | safe }});
+  mkDonut('chart-llm-calls',    {{ llm_calls_chart    | tojson | safe }});
+  mkDonut('chart-model-tokens', {{ model_token_chart  | tojson | safe }});
 
   const toolData = {{ tool_chart | tojson | safe }};
   if (toolData.labels.length) {
@@ -236,7 +174,7 @@
               },
             },
           },
-          y: verticalBarY,
+          y: { grid: { color: '#27272a' } },
         },
         plugins: {
           legend: { display: false },

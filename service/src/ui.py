@@ -554,38 +554,61 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         key=lambda t: t[1] + t[2], reverse=True,
     )
 
-    status_chart = {
-        "labels": list(status_counts.keys()),
-        "data": list(status_counts.values()),
-        "colors": [_STATUS_HEX.get(s, "#71717a") for s in status_counts.keys()],
-    }
-    team_chart = {
-        "labels": [t for t, _ in runs_by_team],
-        "data": [n for _, n in runs_by_team],
-        "colors": [_CHART_PALETTE[i % len(_CHART_PALETTE)] for i in range(len(runs_by_team))],
-    }
-    model_token_chart = {
-        "labels": [m for m, _, _ in tokens_by_model_sorted],
-        "input": [i for _, i, _ in tokens_by_model_sorted],
-        "output": [o for _, _, o in tokens_by_model_sorted],
-    }
+    def _chart(labels, data, colors, extra_rows=None):
+        """Build a chart dict with pre-zipped rows for Jinja2 table rendering."""
+        rows = [{"label": l, "value": v, "color": c} for l, v, c in zip(labels, data, colors)]
+        if extra_rows:
+            for row, extra in zip(rows, extra_rows):
+                row.update(extra)
+        return {"labels": labels, "data": data, "colors": colors, "rows": rows}
+
+    status_labels = list(status_counts.keys())
+    status_data = list(status_counts.values())
+    status_chart = _chart(
+        status_labels, status_data,
+        [_STATUS_HEX.get(s, "#71717a") for s in status_labels],
+    )
+
+    team_labels = [t for t, _ in runs_by_team]
+    team_data = [n for _, n in runs_by_team]
+    team_chart = _chart(
+        team_labels, team_data,
+        [_CHART_PALETTE[i % len(_CHART_PALETTE)] for i in range(len(team_labels))],
+    )
+
+    pipeline_labels = [name for name, _ in pipeline_run_counts]
+    pipeline_data = [n for _, n in pipeline_run_counts]
+    pipeline_chart = _chart(
+        pipeline_labels, pipeline_data,
+        [_CHART_PALETTE[i % len(_CHART_PALETTE)] for i in range(len(pipeline_labels))],
+    )
+
+    agent_labels = [agent or "—" for agent, _ in agent_step_counts]
+    agent_data = [n for _, n in agent_step_counts]
+    agent_step_chart = _chart(
+        agent_labels, agent_data,
+        [_CHART_PALETTE[i % len(_CHART_PALETTE)] for i in range(len(agent_labels))],
+    )
+
+    llm_labels = [model for model, _ in llm_calls_sorted]
+    llm_data = [count for _, count in llm_calls_sorted]
+    llm_calls_chart = _chart(
+        llm_labels, llm_data,
+        [_CHART_PALETTE[i % len(_CHART_PALETTE)] for i in range(len(llm_labels))],
+    )
+
+    # Tokens by model: donut slices are totals; table rows carry input/output detail.
+    model_labels = [m for m, _, _ in tokens_by_model_sorted]
+    model_totals = [i + o for _, i, o in tokens_by_model_sorted]
+    model_colors = [_CHART_PALETTE[i % len(_CHART_PALETTE)] for i in range(len(model_labels))]
+    model_token_chart = _chart(
+        model_labels, model_totals, model_colors,
+        extra_rows=[{"input": i, "output": o} for _, i, o in tokens_by_model_sorted],
+    )
+
     tool_chart = {
         "labels": [name for name, _ in top_tools],
         "data": [count for _, count in top_tools],
-    }
-    pipeline_chart = {
-        "labels": [name for name, _ in pipeline_run_counts],
-        "data": [n for _, n in pipeline_run_counts],
-        "colors": [_CHART_PALETTE[i % len(_CHART_PALETTE)] for i in range(len(pipeline_run_counts))],
-    }
-    agent_step_chart = {
-        "labels": [agent or "—" for agent, _ in agent_step_counts],
-        "data": [n for _, n in agent_step_counts],
-    }
-    llm_calls_chart = {
-        "labels": [model for model, _ in llm_calls_sorted],
-        "data": [count for _, count in llm_calls_sorted],
-        "colors": [_CHART_PALETTE[i % len(_CHART_PALETTE)] for i in range(len(llm_calls_sorted))],
     }
 
     return templates.TemplateResponse(request, "insights_overview.html", {
