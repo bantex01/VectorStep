@@ -69,7 +69,7 @@
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs by status</h2>
     {% if status_chart.labels %}
-      <div class="h-52"><canvas id="chart-status"></canvas></div>
+      <div class="h-64"><canvas id="chart-status"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">No runs in range</p>
     {% endif %}
@@ -78,7 +78,7 @@
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs by team</h2>
     {% if team_chart.labels %}
-      <div class="h-52"><canvas id="chart-team"></canvas></div>
+      <div class="h-64"><canvas id="chart-team"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">No runs in range</p>
     {% endif %}
@@ -87,7 +87,7 @@
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs by pipeline</h2>
     {% if pipeline_chart.labels %}
-      <div class="h-52"><canvas id="chart-pipeline"></canvas></div>
+      <div class="h-64"><canvas id="chart-pipeline"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">No runs in range</p>
     {% endif %}
@@ -101,7 +101,7 @@
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-4">Steps by agent</h2>
     {% if agent_step_chart.labels %}
-      <div class="h-52"><canvas id="chart-agent-steps"></canvas></div>
+      <div class="h-64"><canvas id="chart-agent-steps"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">No steps in range</p>
     {% endif %}
@@ -110,7 +110,7 @@
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-4">LLM calls by model</h2>
     {% if llm_calls_chart.labels %}
-      <div class="h-52"><canvas id="chart-llm-calls"></canvas></div>
+      <div class="h-64"><canvas id="chart-llm-calls"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">No traced steps in range</p>
     {% endif %}
@@ -119,7 +119,7 @@
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-4">Tokens by model</h2>
     {% if model_token_chart.labels %}
-      <div class="h-52"><canvas id="chart-model-tokens"></canvas></div>
+      <div class="h-64"><canvas id="chart-model-tokens"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">No gateway steps in range</p>
     {% endif %}
@@ -131,7 +131,7 @@
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
   <h2 class="text-sm font-semibold text-zinc-200 mb-4">MCP tool use <span class="text-zinc-500 font-normal">(gateway steps)</span></h2>
   {% if tool_chart.labels %}
-    <div class="h-52"><canvas id="chart-tools"></canvas></div>
+    <div class="h-64"><canvas id="chart-tools"></canvas></div>
   {% else %}
     <p class="text-sm text-zinc-500">No tool calls in range</p>
   {% endif %}
@@ -142,6 +142,11 @@
   Chart.defaults.color = '#a1a1aa';
   Chart.defaults.borderColor = '#27272a';
   Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
+
+  // Shared axis options for vertical bar charts: labels sit under the bars at 45°,
+  // bars fill the full panel width, grid lines only on the value (y) axis.
+  const verticalBarX = { grid: { display: false }, ticks: { maxRotation: 55, minRotation: 0, autoSkip: false } };
+  const verticalBarY = { grid: { color: '#27272a' } };
 
   // --- Row 1 ---
 
@@ -168,11 +173,7 @@
     new Chart(document.getElementById('chart-pipeline'), {
       type: 'bar',
       data: { labels: pipelineData.labels, datasets: [{ label: 'Runs', data: pipelineData.data, backgroundColor: pipelineData.colors }] },
-      options: {
-        indexAxis: 'y', maintainAspectRatio: false,
-        scales: { x: { grid: { color: '#27272a' } }, y: { grid: { display: false } } },
-        plugins: { legend: { display: false } },
-      },
+      options: { maintainAspectRatio: false, scales: { x: verticalBarX, y: verticalBarY }, plugins: { legend: { display: false } } },
     });
   }
 
@@ -183,11 +184,7 @@
     new Chart(document.getElementById('chart-agent-steps'), {
       type: 'bar',
       data: { labels: agentStepData.labels, datasets: [{ label: 'Steps', data: agentStepData.data, backgroundColor: PALETTE[0] }] },
-      options: {
-        indexAxis: 'y', maintainAspectRatio: false,
-        scales: { x: { grid: { color: '#27272a' } }, y: { grid: { display: false } } },
-        plugins: { legend: { display: false } },
-      },
+      options: { maintainAspectRatio: false, scales: { x: verticalBarX, y: verticalBarY }, plugins: { legend: { display: false } } },
     });
   }
 
@@ -196,11 +193,7 @@
     new Chart(document.getElementById('chart-llm-calls'), {
       type: 'bar',
       data: { labels: llmCallsData.labels, datasets: [{ label: 'LLM calls', data: llmCallsData.data, backgroundColor: llmCallsData.colors }] },
-      options: {
-        indexAxis: 'y', maintainAspectRatio: false,
-        scales: { x: { grid: { color: '#27272a' } }, y: { grid: { display: false } } },
-        plugins: { legend: { display: false } },
-      },
+      options: { maintainAspectRatio: false, scales: { x: verticalBarX, y: verticalBarY }, plugins: { legend: { display: false } } },
     });
   }
 
@@ -216,14 +209,14 @@
         ],
       },
       options: {
-        indexAxis: 'y', maintainAspectRatio: false,
-        scales: { x: { stacked: true, grid: { color: '#27272a' } }, y: { stacked: true, grid: { display: false } } },
+        maintainAspectRatio: false,
+        scales: { x: verticalBarX, y: { ...verticalBarY, stacked: true } },
         plugins: { legend: { position: 'top', labels: { boxWidth: 12 } } },
       },
     });
   }
 
-  // --- Row 3 ---
+  // --- Row 3: MCP tools — truncate very long names, full name visible in tooltip ---
 
   const toolData = {{ tool_chart | tojson | safe }};
   if (toolData.labels.length) {
@@ -231,9 +224,24 @@
       type: 'bar',
       data: { labels: toolData.labels, datasets: [{ label: 'Calls', data: toolData.data, backgroundColor: PALETTE[1] }] },
       options: {
-        indexAxis: 'y', maintainAspectRatio: false,
-        scales: { x: { grid: { color: '#27272a' } }, y: { grid: { display: false } } },
-        plugins: { legend: { display: false } },
+        maintainAspectRatio: false,
+        scales: {
+          x: {
+            grid: { display: false },
+            ticks: {
+              maxRotation: 55, minRotation: 0, autoSkip: false,
+              callback: function(val, idx) {
+                const label = toolData.labels[idx];
+                return label.length > 28 ? label.slice(0, 26) + '…' : label;
+              },
+            },
+          },
+          y: verticalBarY,
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { title: items => toolData.labels[items[0].dataIndex] } },
+        },
       },
     });
   }

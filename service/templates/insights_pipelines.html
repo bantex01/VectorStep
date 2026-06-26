@@ -28,7 +28,7 @@
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-4">Avg run duration by pipeline</h2>
     {% if duration_chart.labels %}
-      <div class="h-56"><canvas id="chart-duration"></canvas></div>
+      <div class="h-64"><canvas id="chart-duration"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">No completed runs in range</p>
     {% endif %}
@@ -37,7 +37,7 @@
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-4">Tokens by pipeline</h2>
     {% if token_chart.labels %}
-      <div class="h-56"><canvas id="chart-tokens"></canvas></div>
+      <div class="h-64"><canvas id="chart-tokens"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">No gateway steps in range</p>
     {% endif %}
@@ -102,20 +102,15 @@
   Chart.defaults.borderColor = '#27272a';
   Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
 
+  const vertX = { grid: { display: false }, ticks: { maxRotation: 55, minRotation: 0, autoSkip: false } };
+  const vertY = { grid: { color: '#27272a' } };
+
   const durationData = {{ duration_chart | tojson | safe }};
   if (durationData.labels.length) {
     new Chart(document.getElementById('chart-duration'), {
       type: 'bar',
-      data: {
-        labels: durationData.labels,
-        datasets: [{ label: 'Avg seconds', data: durationData.data, backgroundColor: PALETTE[0] }],
-      },
-      options: {
-        indexAxis: 'y',
-        maintainAspectRatio: false,
-        scales: { x: { grid: { color: '#27272a' } }, y: { grid: { display: false } } },
-        plugins: { legend: { display: false } },
-      },
+      data: { labels: durationData.labels, datasets: [{ label: 'Avg seconds', data: durationData.data, backgroundColor: PALETTE[0] }] },
+      options: { maintainAspectRatio: false, scales: { x: vertX, y: vertY }, plugins: { legend: { display: false } } },
     });
   }
 
@@ -131,9 +126,8 @@
         ],
       },
       options: {
-        indexAxis: 'y',
         maintainAspectRatio: false,
-        scales: { x: { stacked: true, grid: { color: '#27272a' } }, y: { stacked: true, grid: { display: false } } },
+        scales: { x: vertX, y: { ...vertY, stacked: true } },
         plugins: { legend: { position: 'top', labels: { boxWidth: 12 } } },
       },
     });
