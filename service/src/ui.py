@@ -473,8 +473,10 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
             q = q.where(PipelineRun.triggered_at >= cutoff)
         total_input_tokens, total_output_tokens = (await session.execute(q)).one()
 
+        # Fetch model + trace together so we can count both tool calls and LLM
+        # call iterations per model in a single pass over the blobs.
         q = (
-            select(PipelineStep.agent_trace)
+            select(PipelineStep.model, PipelineStep.agent_trace)
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineStep.executor == "gateway")
             .where(PipelineStep.agent_trace.is_not(None))
@@ -482,7 +484,28 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         if cutoff:
             q = q.where(PipelineRun.triggered_at >= cutoff)
         rows = await session.execute(q)
-        traces = [r[0] for r in rows.all()]
+        model_traces = rows.all()
+
+        q = (
+            select(PipelineRun.pipeline_name, func.count().label("n"))
+            .group_by(PipelineRun.pipeline_name)
+            .order_by(func.count().desc())
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        pipeline_run_counts = rows.all()
+
+        q = (
+            select(PipelineStep.agent, func.count().label("n"))
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .group_by(PipelineStep.agent)
+            .order_by(func.count().desc())
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        agent_step_counts = rows.all()
 
         q = (
             select(
@@ -500,16 +523,21 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         tokens_by_model = rows.all()
 
     tool_counter: Counter = Counter()
-    for trace_json in traces:
+    llm_call_counter: Counter = Counter()
+    for model, trace_json in model_traces:
         try:
             events = json.loads(trace_json)
         except (TypeError, ValueError):
             continue
         for event in events:
-            if event.get("type") == "tool_call":
+            t = event.get("type")
+            if t == "tool_call":
                 tool_counter[event.get("name") or "unknown"] += 1
+            elif t == "llm_call":
+                llm_call_counter[model or "Unknown model"] += 1
     top_tools = tool_counter.most_common(10)
-    max_tool_count = top_tools[0][1] if top_tools else 0
+
+    llm_calls_sorted = llm_call_counter.most_common()
 
     total_runs = sum(status_counts.values())
     failed_count = status_counts.get("failed", 0)
@@ -545,6 +573,20 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         "labels": [name for name, _ in top_tools],
         "data": [count for _, count in top_tools],
     }
+    pipeline_chart = {
+        "labels": [name for name, _ in pipeline_run_counts],
+        "data": [n for _, n in pipeline_run_counts],
+        "colors": [_CHART_PALETTE[i % len(_CHART_PALETTE)] for i in range(len(pipeline_run_counts))],
+    }
+    agent_step_chart = {
+        "labels": [agent or "—" for agent, _ in agent_step_counts],
+        "data": [n for _, n in agent_step_counts],
+    }
+    llm_calls_chart = {
+        "labels": [model for model, _ in llm_calls_sorted],
+        "data": [count for _, count in llm_calls_sorted],
+        "colors": [_CHART_PALETTE[i % len(_CHART_PALETTE)] for i in range(len(llm_calls_sorted))],
+    }
 
     return templates.TemplateResponse(request, "insights_overview.html", {
         "time_range": time_range,
@@ -559,6 +601,9 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         "team_chart": team_chart,
         "model_token_chart": model_token_chart,
         "tool_chart": tool_chart,
+        "pipeline_chart": pipeline_chart,
+        "agent_step_chart": agent_step_chart,
+        "llm_calls_chart": llm_calls_chart,
         "active_page": "insights_overview",
     })
 
