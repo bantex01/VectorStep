@@ -104,32 +104,51 @@
 </div>
 {% endmacro %}
 
-{% macro pills(chart, max=4) %}
-<div class="flex items-center gap-2 mb-3 mt-1">
-  {% for row in chart.rows[:max] %}
-  <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-zinc-800 ring-1 ring-inset ring-zinc-700">
-    <span class="w-2 h-2 rounded-full shrink-0" style="background:{{ row.color }}"></span>
-    <span class="text-zinc-300 font-medium truncate max-w-[120px]" title="{{ row.label }}">{{ row.label }}</span>
-    <span class="text-zinc-500 tabular-nums">{{ row.value | format_number }}</span>
-  </span>
-  {% endfor %}
-  <div class="h-px flex-1 bg-zinc-800"></div>
+{% macro section(label, chart, max=4) %}
+<div x-data="{ open: false }" class="mb-4">
+  <button @click="open = !open"
+          class="w-full flex items-center gap-2 py-1.5 group cursor-pointer">
+    <span class="text-xs font-semibold text-zinc-400 uppercase tracking-widest w-24 shrink-0 text-left">{{ label }}</span>
+    {% for row in chart.rows[:max] %}
+    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-zinc-800 ring-1 ring-inset ring-zinc-700">
+      <span class="w-2 h-2 rounded-full shrink-0" style="background:{{ row.color }}"></span>
+      <span class="text-zinc-300 font-medium truncate max-w-[100px]" title="{{ row.label }}">{{ row.label }}</span>
+      <span class="text-zinc-500 tabular-nums">{{ row.value | format_number }}</span>
+    </span>
+    {% endfor %}
+    <div class="h-px flex-1 bg-zinc-800"></div>
+    <span x-show="!open" class="text-xs text-zinc-600 italic shrink-0 pr-1">click to expand</span>
+    <svg class="w-3.5 h-3.5 text-zinc-600 group-hover:text-zinc-400 transition-transform duration-200 shrink-0"
+         :class="open ? 'rotate-180' : ''"
+         fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+    </svg>
+  </button>
+  <div x-show="open" x-cloak x-transition class="pt-1">
+    {{ caller() }}
+  </div>
 </div>
 {% endmacro %}
 
-<!-- 6 metric rows, each preceded by a pill summary bar -->
-{{ pills(status_chart) }}
-{{ metric_row("Runs by status",    "ts-status",   "dn-status",   status_ts,   status_chart,     "No runs in range") }}
-{{ pills(team_chart) }}
-{{ metric_row("Runs by team",      "ts-team",     "dn-team",     team_ts,     team_chart,       "No runs in range") }}
-{{ pills(pipeline_chart) }}
-{{ metric_row("Runs by pipeline",  "ts-pipeline", "dn-pipeline", pipeline_ts, pipeline_chart,   "No runs in range") }}
-{{ pills(agent_step_chart) }}
-{{ metric_row("Steps by agent",    "ts-agent",    "dn-agent",    agent_ts,    agent_step_chart, "No steps in range") }}
-{{ pills(llm_calls_chart) }}
-{{ metric_row("LLM calls by model","ts-llm",      "dn-llm",      llm_ts,      llm_calls_chart,  "No traced steps in range") }}
-{{ pills(model_token_chart) }}
-{{ metric_row("Tokens by model",   "ts-tokens",   "dn-tokens",   tokens_ts,   model_token_chart,"No gateway steps in range", extra_table=true) }}
+<!-- 6 collapsible sections — collapsed by default, pill bar always visible -->
+{% call section("Status", status_chart) %}
+  {{ metric_row("Runs by status",    "ts-status",   "dn-status",   status_ts,   status_chart,     "No runs in range") }}
+{% endcall %}
+{% call section("Team", team_chart) %}
+  {{ metric_row("Runs by team",      "ts-team",     "dn-team",     team_ts,     team_chart,       "No runs in range") }}
+{% endcall %}
+{% call section("Pipeline", pipeline_chart) %}
+  {{ metric_row("Runs by pipeline",  "ts-pipeline", "dn-pipeline", pipeline_ts, pipeline_chart,   "No runs in range") }}
+{% endcall %}
+{% call section("Agent", agent_step_chart) %}
+  {{ metric_row("Steps by agent",    "ts-agent",    "dn-agent",    agent_ts,    agent_step_chart, "No steps in range") }}
+{% endcall %}
+{% call section("Model — calls", llm_calls_chart) %}
+  {{ metric_row("LLM calls by model","ts-llm",      "dn-llm",      llm_ts,      llm_calls_chart,  "No traced steps in range") }}
+{% endcall %}
+{% call section("Model — tokens", model_token_chart) %}
+  {{ metric_row("Tokens by model",   "ts-tokens",   "dn-tokens",   tokens_ts,   model_token_chart,"No gateway steps in range", extra_table=true) }}
+{% endcall %}
 
 <!-- MCP tool use — full width bar, unchanged -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
