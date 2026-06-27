@@ -171,12 +171,18 @@ class PipelineRunner:
         run_id = run_id or str(uuid.uuid4())
         run_log: _LiveRunLog = _LiveRunLog(run_id)
 
+        _span_name = (
+            f"pipeline.run: {normalised.team}/{pipeline.name}"
+            if normalised.team
+            else f"pipeline.run: {pipeline.name}"
+        )
         with start_root_span(
-            "pipeline.run",
+            _span_name,
             attributes={
                 "pork.pipeline.name": pipeline.name,
                 "pork.run.id": run_id,
                 "pork.source": normalised.source,
+                **({"pork.team": normalised.team} if normalised.team else {}),
                 **({"pork.parent_run_id": parent_run_id} if parent_run_id else {}),
             },
         ) as run_span:

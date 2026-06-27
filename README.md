@@ -1314,7 +1314,7 @@ Grafana Alloy/Tempo).
 **Span hierarchy** — each pipeline run is its own trace root:
 
 ```
-pipeline.run                          (pork.pipeline.name, pork.run.id, pork.source, pork.run.status)
+pipeline.run: <team>/<pipeline>       (pork.pipeline.name, pork.run.id, pork.source, pork.team, pork.run.status)
 ├── <step name>                       (pork.span.kind=step, pork.executor, pork.agent, confidences, pork.model)
 │   ├── gen_ai.<executor>             (pork.span.kind=gen_ai — the LLM call itself)
 │   └── <step>:verifier|:challenger   (pork.span.kind=verifier, pork.verifier.mode, pork.confidence)
@@ -1329,6 +1329,8 @@ pipeline.run                          (pork.pipeline.name, pork.run.id, pork.sou
 │   └── ... (one branch per runtime list item)
 └── ...
 ```
+
+The root span name is `pipeline.run: <team>/<pipeline-name>` when a team is attributed (e.g. `pipeline.run: payments/alert-triage-critical`), or `pipeline.run: <pipeline-name>` for unattributed runs. This makes the Name column in Grafana Tempo immediately useful without needing to expand attributes. `pork.team` is also set as a span attribute when present, so traces can be filtered/grouped by team in PromQL or Tempo query expressions.
 
 Each `pipeline_runs.logs` event (`step_started`, `verifier_ran`, `branch_completed`,
 etc. — see §14) is also recorded as a **span event** on the current span, so the
