@@ -114,7 +114,7 @@
 
 <!-- Runs timeseries -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5 mb-8">
-  <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs <span class="text-zinc-500 font-normal">(7 days)</span></h2>
+  <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs <span class="text-zinc-500 font-normal">(24h)</span></h2>
   {% if runs_ts.datasets %}
     <div class="h-48"><canvas id="chart-runs-ts"></canvas></div>
   {% else %}
@@ -185,21 +185,25 @@
   const runsTs = {{ runs_ts | tojson | safe }};
   if (runsTs.datasets.length) {
     new Chart(document.getElementById('chart-runs-ts'), {
-      type: 'bar',
+      type: 'line',
       data: {
         labels: runsTs.labels,
         datasets: runsTs.datasets.map(d => ({
           label: d.label,
           data: d.data,
-          backgroundColor: d.color,
-          stack: 'runs',
+          borderColor: d.color,
+          backgroundColor: d.color + '22',
+          fill: false,
+          tension: 0.35,
+          pointRadius: 3,
+          borderWidth: 2,
         })),
       },
       options: {
         maintainAspectRatio: false,
         scales: {
-          x: { grid: { display: false }, stacked: true, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
-          y: { grid: { color: '#27272a' }, stacked: true, beginAtZero: true, ticks: { maxTicksLimit: 5 } },
+          x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+          y: { grid: { color: '#27272a' }, beginAtZero: true, ticks: { maxTicksLimit: 5 } },
         },
         plugins: {
           legend: { display: true, position: 'top', labels: { boxWidth: 10, padding: 12 } },

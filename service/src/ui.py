@@ -293,7 +293,7 @@ async def ui_dashboard(request: Request):
 
         rows = await session.execute(
             select(PipelineRun.triggered_at, PipelineRun.status)
-            .where(PipelineRun.triggered_at >= cutoff_7d)
+            .where(PipelineRun.triggered_at >= cutoff_24h)
         )
         runs_ts_raw = rows.all()
 
@@ -313,12 +313,12 @@ async def ui_dashboard(request: Request):
         "colors": [_STATUS_HEX.get(s, "#71717a") for s in counts_24h.keys()],
     }
 
-    # 7-day runs timeseries bucketed by day and status
+    # 24h runs timeseries bucketed by hour and status
     now = utc_now()
-    bucket_labels = _ts_all_buckets(cutoff_7d, now, "day")
+    bucket_labels = _ts_all_buckets(cutoff_24h, now, "hour")
     status_buckets: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for triggered_at, status in runs_ts_raw:
-        status_buckets[status][_ts_bucket(triggered_at, "day")] += 1
+        status_buckets[status][_ts_bucket(triggered_at, "hour")] += 1
     runs_ts = {
         "labels": bucket_labels,
         "datasets": [
