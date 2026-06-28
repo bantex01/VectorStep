@@ -817,9 +817,117 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
             if secs >= 0:
                 durations_by_pipeline[name].append(secs)
 
+        # Status breakdown per pipeline (for drilldown status bar)
+        q = (
+            select(PipelineRun.pipeline_name, PipelineRun.status, func.count().label("n"))
+            .group_by(PipelineRun.pipeline_name, PipelineRun.status)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        status_counts_by_pipeline: dict[str, dict[str, int]] = defaultdict(dict)
+        for name, status, n in rows.all():
+            status_counts_by_pipeline[name][status] = n
+
+        # All runs in range — used for per-pipeline timeseries and recent-runs list
+        q = (
+            select(
+                PipelineRun.id,
+                PipelineRun.pipeline_name,
+                PipelineRun.status,
+                PipelineRun.triggered_at,
+                PipelineRun.completed_at,
+            )
+            .order_by(PipelineRun.triggered_at.desc())
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        all_runs_raw = rows.all()
+
+    # ── Per-pipeline aggregates ───────────────────────────────────────────────
+
     avg_duration_by_pipeline = {
         name: sum(secs) / len(secs) for name, secs in durations_by_pipeline.items() if secs
     }
+
+    now = utc_now()
+    resolution = _ts_resolution(time_range)
+    if all_runs_raw:
+        oldest = min(r.triggered_at.replace(tzinfo=None) for r in all_runs_raw)
+    else:
+        oldest = (cutoff or (now - timedelta(days=7)))
+    ts_start = cutoff or oldest
+    bucket_labels = _ts_all_buckets(ts_start, now, resolution)
+
+    runs_by_bucket_pipeline: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    durations_by_bucket_pipeline: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    recent_by_pipeline: dict[str, list] = defaultdict(list)
+
+    for row in all_runs_raw:
+        bucket = _ts_bucket(row.triggered_at, resolution)
+        runs_by_bucket_pipeline[row.pipeline_name][bucket] += 1
+        if row.completed_at:
+            secs = (row.completed_at.replace(tzinfo=None) - row.triggered_at.replace(tzinfo=None)).total_seconds()
+            if secs >= 0:
+                durations_by_bucket_pipeline[row.pipeline_name][bucket].append(secs)
+        if len(recent_by_pipeline[row.pipeline_name]) < 5:
+            recent_by_pipeline[row.pipeline_name].append(row)
+
+    # ── Drilldown payload (serialised to JSON for JS) ─────────────────────────
+
+    drilldown_data: dict[str, dict] = {}
+    for name, n in run_counts.items():
+        sc = status_counts_by_pipeline.get(name, {})
+        failed = failed_counts.get(name, 0)
+        escalated = sc.get("escalated", 0)
+        success_rate = round((n - failed) / n * 100) if n else None
+        escalation_rate = round(escalated / n * 100) if n else None
+        avg_dur = avg_duration_by_pipeline.get(name)
+        inp, out = token_totals.get(name, (0, 0))
+
+        runs_ts_data = [runs_by_bucket_pipeline[name].get(b, 0) for b in bucket_labels]
+        duration_ts_data = [
+            round(sum(durations_by_bucket_pipeline[name][b]) / len(durations_by_bucket_pipeline[name][b]))
+            if durations_by_bucket_pipeline[name].get(b) else None
+            for b in bucket_labels
+        ]
+
+        recent = []
+        for r in recent_by_pipeline.get(name, []):
+            dur_str = None
+            if r.completed_at:
+                secs = (r.completed_at.replace(tzinfo=None) - r.triggered_at.replace(tzinfo=None)).total_seconds()
+                dur_str = _format_seconds(secs)
+            recent.append({
+                "id": str(r.id),
+                "status": r.status,
+                "ago": _format_ago(r.triggered_at),
+                "duration": dur_str,
+            })
+
+        drilldown_data[name] = {
+            "run_count": n,
+            "failed_count": failed,
+            "success_rate": success_rate,
+            "escalation_rate": escalation_rate,
+            "avg_duration": _format_seconds(avg_dur),
+            "input_tokens": inp,
+            "output_tokens": out,
+            "status_breakdown": sc,
+            "runs_ts": {"labels": bucket_labels, "data": runs_ts_data},
+            "duration_ts": {"labels": bucket_labels, "data": duration_ts_data},
+            "recent_runs": recent,
+        }
+
+    # ── Headline stats ────────────────────────────────────────────────────────
+
+    all_durations_flat = [s for sl in durations_by_pipeline.values() for s in sl]
+    min_duration_secs = min(all_durations_flat) if all_durations_flat else None
+    overall_avg_duration_secs = (sum(all_durations_flat) / len(all_durations_flat)) if all_durations_flat else None
+    max_duration_secs = max(all_durations_flat) if all_durations_flat else None
+
+    # ── Chart data ────────────────────────────────────────────────────────────
 
     pipeline_rows = [
         {
@@ -859,6 +967,11 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         "pipeline_rows": pipeline_rows,
         "duration_chart": duration_chart,
         "token_chart": token_chart,
+        "total_pipeline_count": len(run_counts),
+        "min_duration_secs": min_duration_secs,
+        "overall_avg_duration_secs": overall_avg_duration_secs,
+        "max_duration_secs": max_duration_secs,
+        "drilldown_data": drilldown_data,
         "active_page": "insights_pipelines",
     })
 

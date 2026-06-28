@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Insights — By Pipeline — P-Ork{% endblock %}
+{% block title %}Insights — Pipelines — P-Ork{% endblock %}
 {% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Insights</h1>{% endblock %}
 {% block extra_head %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
@@ -9,7 +9,7 @@
 <div class="flex items-center justify-between mb-6">
   <div class="flex gap-1 border-b border-zinc-800">
     <a href="/ui/insights?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_overview' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Overview</a>
-    <a href="/ui/insights/pipelines?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_pipelines' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">By Pipeline</a>
+    <a href="/ui/insights/pipelines?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_pipelines' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Pipelines</a>
     <a href="/ui/insights/agents?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_agents' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">By Agent</a>
   </div>
   <form method="get" action="/ui/insights/pipelines">
@@ -22,7 +22,46 @@
   </form>
 </div>
 
-<!-- Charts -->
+<!-- Headline cards -->
+<div class="grid grid-cols-4 gap-4 mb-6">
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Pipelines</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_pipeline_count }}</p>
+    <p class="mt-1 text-xs text-zinc-500">with runs in range</p>
+  </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Min runtime</p>
+    {% if min_duration_secs is not none %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ format_seconds(min_duration_secs) }}</p>
+      <p class="mt-1 text-xs text-zinc-500">fastest completed run</p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+      <p class="mt-1 text-xs text-zinc-500">no completed runs</p>
+    {% endif %}
+  </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Avg runtime</p>
+    {% if overall_avg_duration_secs is not none %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ format_seconds(overall_avg_duration_secs) }}</p>
+      <p class="mt-1 text-xs text-zinc-500">across all pipelines</p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+      <p class="mt-1 text-xs text-zinc-500">no completed runs</p>
+    {% endif %}
+  </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Max runtime</p>
+    {% if max_duration_secs is not none %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ format_seconds(max_duration_secs) }}</p>
+      <p class="mt-1 text-xs text-zinc-500">slowest completed run</p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+      <p class="mt-1 text-xs text-zinc-500">no completed runs</p>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Bar charts -->
 <div class="grid grid-cols-2 gap-6 mb-6">
 
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
@@ -45,7 +84,17 @@
 
 </div>
 
-<div class="bg-zinc-900 rounded-lg border border-zinc-800">
+<!-- Top 5 pipelines table -->
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6">
+  <div class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+    <h2 class="text-sm font-semibold text-zinc-200">Top 5 pipelines</h2>
+    <select id="top5-sort" class="text-sm border border-zinc-700 rounded-md px-3 py-1 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="runs">By runs</option>
+      <option value="failures">By failures</option>
+      <option value="duration">By avg duration</option>
+      <option value="tokens">By tokens</option>
+    </select>
+  </div>
   {% if pipeline_rows %}
   <table class="w-full">
     <thead>
@@ -58,46 +107,84 @@
         <th class="text-left px-5 py-3 font-medium">Teams</th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-zinc-800">
-      {% for row in pipeline_rows %}
-      <tr class="hover:bg-zinc-800 transition-colors">
-        <td class="px-5 py-3">
-          <a href="/ui/pipelines/{{ row.name }}" class="text-sm font-medium text-zinc-100 hover:text-indigo-400">{{ row.name }}</a>
-        </td>
-        <td class="px-5 py-3 text-sm text-zinc-200">{{ row.run_count | format_number }}</td>
-        <td class="px-5 py-3 text-sm {% if row.failed_count > 0 %}text-red-400{% else %}text-zinc-500{% endif %}">{{ row.failed_count | format_number }}</td>
-        <td class="px-5 py-3 text-sm text-zinc-200">{{ format_seconds(row.avg_duration_secs) }}</td>
-        <td class="px-5 py-3">
-          {% if row.input_tokens or row.output_tokens %}
-            <span class="text-sm text-zinc-200" title="↑{{ row.input_tokens | format_number }} ↓{{ row.output_tokens | format_number }}">
-              {{ (row.input_tokens + row.output_tokens) | format_number }}
-            </span>
-          {% else %}
-            <span class="text-sm text-zinc-600">—</span>
-          {% endif %}
-        </td>
-        <td class="px-5 py-3">
-          <div class="flex gap-1 flex-wrap">
-            {% for team in row.teams %}
-              {% if team == "Unattributed" %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-500 ring-1 ring-inset ring-zinc-700">{{ team }}</span>
-              {% else %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">{{ team }}</span>
-              {% endif %}
-            {% endfor %}
-          </div>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
+    <tbody id="top5-tbody" class="divide-y divide-zinc-800"></tbody>
   </table>
   {% else %}
-  <div class="px-5 py-16 text-center text-sm text-zinc-500">No runs in range.</div>
+  <div class="px-5 py-10 text-center text-sm text-zinc-500">No runs in range.</div>
   {% endif %}
 </div>
 
+<!-- Pipeline drilldown -->
+{% if pipeline_rows %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800">
+  <div class="flex items-center gap-4 px-5 py-3 border-b border-zinc-800">
+    <h2 class="text-sm font-semibold text-zinc-200 shrink-0">Pipeline detail</h2>
+    <select id="pipeline-select" class="text-sm border border-zinc-700 rounded-md px-3 py-1 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      {% for row in pipeline_rows %}
+      <option value="{{ row.name }}">{{ row.name }}</option>
+      {% endfor %}
+    </select>
+    <a id="dd-runs-link" href="#" class="ml-auto text-xs text-indigo-400 hover:text-indigo-300 shrink-0">View all runs →</a>
+  </div>
+
+  <div class="p-5">
+    <!-- Mini cards -->
+    <div class="grid grid-cols-4 gap-4 mb-5">
+      <div class="bg-zinc-800/60 rounded-lg p-4">
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Runs</p>
+        <p id="dd-runs" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
+      </div>
+      <div class="bg-zinc-800/60 rounded-lg p-4">
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Success rate</p>
+        <p id="dd-success" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
+      </div>
+      <div class="bg-zinc-800/60 rounded-lg p-4">
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Avg duration</p>
+        <p id="dd-duration" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
+      </div>
+      <div class="bg-zinc-800/60 rounded-lg p-4">
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Escalation rate</p>
+        <p id="dd-escalation" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
+      </div>
+    </div>
+
+    <!-- Status breakdown bar -->
+    <div class="mb-5">
+      <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-2">Status breakdown</p>
+      <div id="dd-status-bar" class="flex rounded overflow-hidden h-3 bg-zinc-800 gap-px"></div>
+      <div id="dd-status-legend" class="flex flex-wrap gap-x-4 gap-y-1 mt-2"></div>
+    </div>
+
+    <!-- Timeseries charts -->
+    <div class="grid grid-cols-2 gap-6 mb-5">
+      <div>
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-3">Runs over time</p>
+        <div class="h-40"><canvas id="dd-chart-runs"></canvas></div>
+      </div>
+      <div>
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-3">Avg duration over time</p>
+        <div class="h-40"><canvas id="dd-chart-duration"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Recent runs -->
+    <div>
+      <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-2">Recent runs</p>
+      <table class="w-full">
+        <tbody id="dd-recent-runs" class="divide-y divide-zinc-800 text-sm"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <script>
   const PALETTE = ['#6366f1', '#22d3ee', '#fbbf24', '#34d399', '#fb7185', '#a78bfa', '#71717a'];
+  const STATUS_HEX = {
+    completed: '#4ade80', running: '#60a5fa', escalated: '#fbbf24',
+    aborted: '#fb923c', failed: '#f87171', stopped: '#c084fc', interrupted: '#a1a1aa',
+  };
+
   Chart.defaults.color = '#a1a1aa';
   Chart.defaults.borderColor = '#27272a';
   Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
@@ -105,14 +192,35 @@
   const vertX = { grid: { display: false }, ticks: { maxRotation: 55, minRotation: 0, autoSkip: false } };
   const vertY = { grid: { color: '#27272a' } };
 
+  function fmtSecs(secs) {
+    if (secs == null) return '—';
+    secs = Math.floor(secs);
+    if (secs < 60) return secs + 's';
+    const m = Math.floor(secs / 60), s = secs % 60;
+    if (m < 60) return m + 'm ' + s + 's';
+    const h = Math.floor(m / 60), rm = m % 60;
+    return h + 'h ' + rm + 'm';
+  }
+
+  // ── Duration bar chart ──────────────────────────────────────────────────────
+
   const durationData = {{ duration_chart | tojson | safe }};
   if (durationData.labels.length) {
     new Chart(document.getElementById('chart-duration'), {
       type: 'bar',
       data: { labels: durationData.labels, datasets: [{ label: 'Avg seconds', data: durationData.data, backgroundColor: PALETTE[0] }] },
-      options: { maintainAspectRatio: false, scales: { x: vertX, y: vertY }, plugins: { legend: { display: false } } },
+      options: {
+        maintainAspectRatio: false,
+        scales: { x: vertX, y: vertY },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: ctx => ' ' + fmtSecs(ctx.parsed.y) } },
+        },
+      },
     });
   }
+
+  // ── Tokens stacked bar chart ────────────────────────────────────────────────
 
   const tokenData = {{ token_chart | tojson | safe }};
   if (tokenData.labels.length) {
@@ -121,16 +229,161 @@
       data: {
         labels: tokenData.labels,
         datasets: [
-          { label: 'Input', data: tokenData.input, backgroundColor: PALETTE[0] },
-          { label: 'Output', data: tokenData.output, backgroundColor: PALETTE[1] },
+          { label: 'Input',  data: tokenData.input,  backgroundColor: PALETTE[0], stack: 'tokens' },
+          { label: 'Output', data: tokenData.output, backgroundColor: PALETTE[1], stack: 'tokens' },
         ],
       },
       options: {
         maintainAspectRatio: false,
-        scales: { x: vertX, y: { ...vertY, stacked: true } },
+        scales: {
+          x: { ...vertX, stacked: true },
+          y: { ...vertY, stacked: true },
+        },
         plugins: { legend: { position: 'top', labels: { boxWidth: 12 } } },
       },
     });
+  }
+
+  // ── Top 5 table ─────────────────────────────────────────────────────────────
+
+  const pipelineRows = {{ pipeline_rows | tojson | safe }};
+
+  function renderTop5(sortBy) {
+    let sorted = [...pipelineRows];
+    if (sortBy === 'runs')     sorted.sort((a, b) => b.run_count - a.run_count);
+    if (sortBy === 'failures') sorted.sort((a, b) => b.failed_count - a.failed_count);
+    if (sortBy === 'duration') sorted.sort((a, b) => (b.avg_duration_secs || 0) - (a.avg_duration_secs || 0));
+    if (sortBy === 'tokens')   sorted.sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens));
+
+    const top5 = sorted.slice(0, 5);
+    const tbody = document.getElementById('top5-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = top5.map(r => {
+      const total = r.input_tokens + r.output_tokens;
+      const tokStr = total > 0 ? total.toLocaleString() : '—';
+      const tokTitle = total > 0 ? `↑${r.input_tokens.toLocaleString()} ↓${r.output_tokens.toLocaleString()}` : '';
+      const durStr = r.avg_duration_secs != null ? fmtSecs(r.avg_duration_secs) : '—';
+      const failCls = r.failed_count > 0 ? 'text-red-400' : 'text-zinc-500';
+      const teams = r.teams.map(t => `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">${t}</span>`).join(' ');
+      return `<tr class="hover:bg-zinc-800 transition-colors">
+        <td class="px-5 py-3"><a href="/ui/pipelines/${r.name}" class="text-sm font-medium text-zinc-100 hover:text-indigo-400">${r.name}</a></td>
+        <td class="px-5 py-3 text-sm text-zinc-200">${r.run_count.toLocaleString()}</td>
+        <td class="px-5 py-3 text-sm ${failCls}">${r.failed_count.toLocaleString()}</td>
+        <td class="px-5 py-3 text-sm text-zinc-200">${durStr}</td>
+        <td class="px-5 py-3 text-sm text-zinc-200" title="${tokTitle}">${tokStr}</td>
+        <td class="px-5 py-3"><div class="flex gap-1 flex-wrap">${teams}</div></td>
+      </tr>`;
+    }).join('');
+  }
+
+  const top5Sort = document.getElementById('top5-sort');
+  if (top5Sort) {
+    top5Sort.addEventListener('change', e => renderTop5(e.target.value));
+    renderTop5('runs');
+  }
+
+  // ── Pipeline drilldown ───────────────────────────────────────────────────────
+
+  const drilldownData = {{ drilldown_data | tojson | safe }};
+  let ddRunsChart = null, ddDurationChart = null;
+
+  const tsLineOpts = (yLabel, yFmt) => ({
+    maintainAspectRatio: false,
+    scales: {
+      x: { grid: { display: false }, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 8 } },
+      y: { grid: { color: '#27272a' }, ticks: { callback: v => yFmt(v) } },
+    },
+    plugins: {
+      legend: { display: false },
+      tooltip: { callbacks: { label: ctx => ' ' + yFmt(ctx.parsed.y) } },
+    },
+    spanGaps: true,
+  });
+
+  function updateDrilldown(name) {
+    const d = drilldownData[name];
+    if (!d) return;
+
+    // "View all runs" link
+    const link = document.getElementById('dd-runs-link');
+    if (link) link.href = `/ui/runs?pipeline=${encodeURIComponent(name)}`;
+
+    // Mini cards
+    document.getElementById('dd-runs').textContent = d.run_count.toLocaleString();
+    document.getElementById('dd-success').textContent = d.success_rate != null ? d.success_rate + '%' : '—';
+    document.getElementById('dd-duration').textContent = d.avg_duration || '—';
+    const escEl = document.getElementById('dd-escalation');
+    escEl.textContent = d.escalation_rate != null ? d.escalation_rate + '%' : '—';
+    escEl.className = 'mt-1 text-2xl font-semibold ' + (d.escalation_rate > 0 ? 'text-amber-400' : 'text-zinc-50');
+
+    // Status breakdown bar + legend
+    const breakdown = d.status_breakdown;
+    const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+    const barEl = document.getElementById('dd-status-bar');
+    const legendEl = document.getElementById('dd-status-legend');
+    const ORDER = ['completed', 'stopped', 'escalated', 'aborted', 'failed', 'running', 'interrupted'];
+    barEl.innerHTML = ORDER
+      .filter(s => breakdown[s])
+      .map(s => {
+        const pct = (breakdown[s] / total * 100).toFixed(1);
+        return `<div style="width:${pct}%;background:${STATUS_HEX[s] || '#71717a'}" title="${s}: ${breakdown[s]}"></div>`;
+      }).join('');
+    legendEl.innerHTML = ORDER
+      .filter(s => breakdown[s])
+      .map(s => `<span class="flex items-center gap-1.5 text-xs text-zinc-400">
+        <span class="w-2 h-2 rounded-sm shrink-0" style="background:${STATUS_HEX[s] || '#71717a'}"></span>
+        ${s} (${breakdown[s]})
+      </span>`).join('');
+
+    // Timeseries — runs
+    if (ddRunsChart) ddRunsChart.destroy();
+    ddRunsChart = new Chart(document.getElementById('dd-chart-runs'), {
+      type: 'line',
+      data: {
+        labels: d.runs_ts.labels,
+        datasets: [{ data: d.runs_ts.data, borderColor: PALETTE[0], backgroundColor: PALETTE[0] + '22',
+          fill: true, tension: 0.3, pointRadius: 3 }],
+      },
+      options: tsLineOpts('Runs', v => v),
+    });
+
+    // Timeseries — duration
+    if (ddDurationChart) ddDurationChart.destroy();
+    ddDurationChart = new Chart(document.getElementById('dd-chart-duration'), {
+      type: 'line',
+      data: {
+        labels: d.duration_ts.labels,
+        datasets: [{ data: d.duration_ts.data, borderColor: PALETTE[2], backgroundColor: PALETTE[2] + '22',
+          fill: true, tension: 0.3, pointRadius: 3 }],
+      },
+      options: tsLineOpts('Duration', fmtSecs),
+    });
+
+    // Recent runs
+    document.getElementById('dd-recent-runs').innerHTML = d.recent_runs.length
+      ? d.recent_runs.map(r => {
+          const statusHex = STATUS_HEX[r.status] || '#71717a';
+          return `<tr class="hover:bg-zinc-800/50 transition-colors">
+            <td class="py-2 pr-4">
+              <span class="inline-flex items-center gap-1.5 text-xs">
+                <span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:${statusHex}"></span>
+                <span style="color:${statusHex}">${r.status}</span>
+              </span>
+            </td>
+            <td class="py-2 pr-4 text-zinc-400 text-xs">${r.ago}</td>
+            <td class="py-2 pr-4 text-zinc-400 text-xs">${r.duration || '—'}</td>
+            <td class="py-2 text-right">
+              <a href="/ui/runs/${r.id}" class="text-xs text-indigo-400 hover:text-indigo-300">View →</a>
+            </td>
+          </tr>`;
+        }).join('')
+      : '<tr><td class="py-4 text-xs text-zinc-500">No runs in range</td></tr>';
+  }
+
+  const pipelineSel = document.getElementById('pipeline-select');
+  if (pipelineSel) {
+    pipelineSel.addEventListener('change', e => updateDrilldown(e.target.value));
+    if (pipelineSel.value) updateDrilldown(pipelineSel.value);
   }
 </script>
 

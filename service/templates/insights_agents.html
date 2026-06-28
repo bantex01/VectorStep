@@ -9,7 +9,7 @@
 <div class="flex items-center justify-between mb-6">
   <div class="flex gap-1 border-b border-zinc-800">
     <a href="/ui/insights?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_overview' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Overview</a>
-    <a href="/ui/insights/pipelines?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_pipelines' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">By Pipeline</a>
+    <a href="/ui/insights/pipelines?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_pipelines' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Pipelines</a>
     <a href="/ui/insights/agents?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_agents' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">By Agent</a>
   </div>
   <form method="get" action="/ui/insights/agents">
