@@ -290,7 +290,7 @@
                   class="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200 transition-colors">
             Cancel
           </button>
-          <button @click="submitRerun({{ run.id | tojson | safe }}, {{ item.name | tojson | safe }}); rerun_open = false"
+          <button @click='submitRerun({{ run.id | tojson | safe }}, {{ item.name | tojson | safe }}); rerun_open = false'
                   class="px-4 py-2 text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors">
             Start re-run
           </button>
