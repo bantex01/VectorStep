@@ -455,9 +455,62 @@ async def ui_run_detail(request: Request, run_id: str):
     total_input_tokens = sum(s.input_tokens or 0 for s in run.steps)
     total_output_tokens = sum(s.output_tokens or 0 for s in run.steps)
 
+    # Re-run support: load prior steps from the original run so the UI can show
+    # the full picture (replayed steps + new steps together).
+    original_run = None
+    rerun_prior_items: list[dict] = []
+    rerun_from_step: str | None = None
+
+    if normalised.get("source") == "rerun":
+        rerun_meta = normalised.get("metadata", {})
+        original_run_id = rerun_meta.get("original_run_id")
+        rerun_from_step = rerun_meta.get("from_step")
+        if original_run_id:
+            async with sf() as session:
+                orig_result = await session.execute(
+                    select(PipelineRun)
+                    .where(PipelineRun.id == original_run_id)
+                    .options(selectinload(PipelineRun.steps))
+                )
+                original_run = orig_result.scalar_one_or_none()
+
+        if original_run and rerun_from_step:
+            orig_sorted = sorted(original_run.steps, key=lambda s: s.step_index)
+            prior_seen_groups: set[str] = set()
+            for step in orig_sorted:
+                if step.step_name == rerun_from_step:
+                    break
+                parsed = json.loads(step.parsed_output) if step.parsed_output else {}
+                pretty = json.dumps(parsed, indent=2) if parsed else ""
+                verifier_parsed = json.loads(step.verifier_output) if step.verifier_output else {}
+                verifier_pretty = json.dumps(verifier_parsed, indent=2) if verifier_parsed else ""
+                verifier_label = "Challenger" if step.verifier_mode == "challenger" else "Verifier"
+                trace = json.loads(step.agent_trace) if step.agent_trace else []
+                if "/" in step.step_name:
+                    group_name, branch_name = step.step_name.split("/", 1)
+                    if group_name not in prior_seen_groups:
+                        prior_seen_groups.add(group_name)
+                        rerun_prior_items.append({"type": "group_header", "name": group_name})
+                    rerun_prior_items.append({
+                        "type": "branch", "group": group_name, "name": branch_name,
+                        "step": step, "parsed": parsed, "pretty": pretty,
+                        "verifier_pretty": verifier_pretty, "verifier_label": verifier_label,
+                        "trace": trace,
+                    })
+                else:
+                    rerun_prior_items.append({
+                        "type": "step", "name": step.step_name,
+                        "step": step, "parsed": parsed, "pretty": pretty,
+                        "verifier_pretty": verifier_pretty, "verifier_label": verifier_label,
+                        "trace": trace,
+                    })
+
     return templates.TemplateResponse(request, "run_detail.html", {
         "run": run,
         "display_items": display_items,
+        "rerun_prior_items": rerun_prior_items,
+        "rerun_from_step": rerun_from_step,
+        "original_run": original_run,
         "normalised": normalised,
         "run_log": run_log,
         "total_input_tokens": total_input_tokens,

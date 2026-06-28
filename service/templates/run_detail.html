@@ -137,8 +137,106 @@
 </div>
 {% endif %}
 
+{% if original_run %}
+<!-- Re-run banner -->
+<div class="flex items-center gap-3 bg-indigo-950/60 border border-indigo-800/60 rounded-lg px-4 py-3 mb-6 text-sm">
+  <svg class="w-4 h-4 text-indigo-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+  </svg>
+  <span class="text-indigo-200">Re-run from step <span class="font-mono text-indigo-100">{{ rerun_from_step }}</span></span>
+  <a href="/ui/runs/{{ original_run.id }}" class="ml-auto text-xs text-indigo-400 hover:text-indigo-300 font-mono shrink-0">
+    original {{ original_run.id[:8] }} →
+  </a>
+</div>
+{% endif %}
+
 <!-- Steps -->
 <h2 class="text-sm font-semibold text-zinc-300 mb-3">Steps</h2>
+
+{% if rerun_prior_items %}
+<!-- Prior steps replayed from original run -->
+<div class="space-y-2 opacity-50 mb-2">
+{% for item in rerun_prior_items %}
+
+  {% if item.type == 'group_header' %}
+  <div class="flex items-center gap-3 px-4 py-2 mt-4 mb-1">
+    <div class="flex items-center gap-1.5 text-xs font-semibold text-zinc-500 uppercase tracking-wide">
+      <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/>
+      </svg>
+      Parallel — {{ item.name }}
+    </div>
+    <div class="flex-1 h-px bg-zinc-800"></div>
+  </div>
+
+  {% elif item.type == 'branch' %}
+  <div x-data="{ open: false }" class="ml-6 bg-zinc-900 rounded-lg border border-zinc-800">
+    <div class="flex items-center gap-3 px-4 py-3">
+      <div class="w-1 h-1 rounded-full bg-zinc-600 shrink-0"></div>
+      <span class="text-sm font-mono text-zinc-400 w-40 shrink-0 truncate" title="{{ item.name }}">{{ item.name }}</span>
+      <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(item.step.status) }}">{{ item.step.status }}</span>
+      <span class="text-xs text-zinc-600 italic ml-auto">replayed</span>
+      {% if item.pretty or item.trace %}
+        <button @click="open = !open" class="text-xs text-zinc-500 hover:text-zinc-300 shrink-0 ml-1">
+          <svg class="w-4 h-4 transition-transform" :class="open ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+      {% endif %}
+    </div>
+    {% if item.pretty or item.trace %}
+    <div x-show="open" x-cloak class="border-t border-zinc-800 divide-y divide-zinc-800">
+      {% if item.pretty %}<div class="px-4 py-3"><pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.pretty }}</pre></div>{% endif %}
+      {% if item.trace %}{{ _render_trace(item.trace) }}{% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  {% elif item.type == 'step' %}
+  <div x-data="{ open: false }" class="bg-zinc-900 rounded-lg border border-zinc-800">
+    <div class="flex items-center gap-3 px-4 py-3.5">
+      <span class="text-sm font-medium text-zinc-100 w-44 shrink-0 truncate" title="{{ item.name }}">{{ item.name }}</span>
+      <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(item.step.status) }}">{{ item.step.status }}</span>
+      {% if item.step.agent %}<span class="text-xs text-zinc-500 font-mono">{{ item.step.agent }}</span>{% endif %}
+      <span class="text-xs text-zinc-600 italic ml-auto mr-2">replayed</span>
+      {% if item.pretty or item.verifier_pretty or item.trace %}
+        <button @click="open = !open" class="text-xs text-zinc-500 hover:text-zinc-300 shrink-0">
+          <svg class="w-4 h-4 transition-transform" :class="open ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+      {% else %}<div class="w-6 shrink-0"></div>{% endif %}
+    </div>
+    {% if item.pretty or item.verifier_pretty or item.trace %}
+    <div x-show="open" x-cloak class="border-t border-zinc-800 divide-y divide-zinc-800">
+      {% if item.pretty %}<div class="px-4 py-3"><pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.pretty }}</pre></div>{% endif %}
+      {% if item.verifier_pretty %}
+      <div class="px-4 py-3">
+        <p class="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">{{ item.verifier_label }}</p>
+        <pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.verifier_pretty }}</pre>
+      </div>
+      {% endif %}
+      {% if item.trace %}{{ _render_trace(item.trace) }}{% endif %}
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+{% endfor %}
+</div>
+
+<!-- Re-run divider -->
+<div class="flex items-center gap-3 my-4">
+  <div class="flex-1 h-px bg-zinc-800"></div>
+  <div class="flex items-center gap-1.5 text-xs text-indigo-400 font-medium shrink-0">
+    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+    </svg>
+    Re-run from {{ rerun_from_step }}
+  </div>
+  <div class="flex-1 h-px bg-zinc-800"></div>
+</div>
+{% endif %}
 
 <div class="space-y-2">
 {% for item in display_items %}

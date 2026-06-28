@@ -878,7 +878,11 @@ async def rerun_from_step(run_id: str, request: Request):
         summary=nc_raw.get("summary"),
         fingerprint=None,
         raw=nc_raw.get("raw", {}),
-        metadata=nc_raw.get("metadata", {}),
+        metadata={
+            **nc_raw.get("metadata", {}),
+            "original_run_id": run_id,
+            "from_step": from_step,
+        },
     )
 
     global _active_runs
