@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Dashboard — P-Ork{% endblock %}
 {% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Dashboard</h1>{% endblock %}
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+{% endblock %}
 {% block content %}
 
 <!-- Stat cards -->
@@ -52,22 +55,29 @@
 </div>
 
 <!-- Status breakdown + Pipeline activity -->
-<div class="grid grid-cols-3 gap-6 mb-8">
+<div class="grid grid-cols-3 gap-6 mb-6">
 
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <h2 class="text-sm font-semibold text-zinc-200 mb-4">Status breakdown <span class="text-zinc-500 font-normal">(24h)</span></h2>
-    {% set statuses = ['completed', 'escalated', 'aborted', 'failed', 'stopped', 'running', 'interrupted'] %}
-    {% for s in statuses %}
-      {% set n = counts_24h.get(s, 0) %}
-      {% if n > 0 or s in ['completed', 'escalated'] %}
-      <div class="flex items-center justify-between py-1.5">
-        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(s) }}">{{ s }}</span>
-        <span class="text-sm font-medium text-zinc-200">{{ n }}</span>
+    {% if counts_24h %}
+      <div class="h-36"><canvas id="chart-status"></canvas></div>
+      <div class="mt-3 space-y-1">
+        {% set statuses = ['completed', 'escalated', 'aborted', 'failed', 'stopped', 'running', 'interrupted'] %}
+        {% for s in statuses %}
+          {% set n = counts_24h.get(s, 0) %}
+          {% if n > 0 %}
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-sm shrink-0 {{ status_classes(s) }}" style="background:{{ {'completed':'#4ade80','running':'#60a5fa','escalated':'#fbbf24','aborted':'#fb923c','failed':'#f87171','stopped':'#c084fc','interrupted':'#a1a1aa'}.get(s, '#71717a') }}"></span>
+              <span class="text-xs text-zinc-400">{{ s }}</span>
+            </div>
+            <span class="text-xs font-medium text-zinc-200 tabular-nums">{{ n }}</span>
+          </div>
+          {% endif %}
+        {% endfor %}
       </div>
-      {% endif %}
-    {% endfor %}
-    {% if not counts_24h %}
-      <p class="text-sm text-zinc-500 py-2">No runs in last 24 hours</p>
+    {% else %}
+      <p class="text-sm text-zinc-500">No runs in last 24 hours</p>
     {% endif %}
   </div>
 
@@ -100,6 +110,16 @@
     {% endif %}
   </div>
 
+</div>
+
+<!-- Runs timeseries -->
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5 mb-8">
+  <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs <span class="text-zinc-500 font-normal">(7 days)</span></h2>
+  {% if runs_ts.datasets %}
+    <div class="h-48"><canvas id="chart-runs-ts"></canvas></div>
+  {% else %}
+    <p class="text-sm text-zinc-500">No runs in the last 7 days</p>
+  {% endif %}
 </div>
 
 <!-- Recent runs -->
@@ -141,5 +161,53 @@
   <div class="px-5 py-10 text-center text-sm text-zinc-500">No runs yet. Trigger a webhook to get started.</div>
   {% endif %}
 </div>
+
+<script>
+  Chart.defaults.color = '#a1a1aa';
+  Chart.defaults.borderColor = '#27272a';
+  Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
+
+  const statusDonut = {{ status_donut | tojson | safe }};
+  if (statusDonut.labels.length) {
+    new Chart(document.getElementById('chart-status'), {
+      type: 'doughnut',
+      data: { labels: statusDonut.labels, datasets: [{ data: statusDonut.data, backgroundColor: statusDonut.colors, borderWidth: 0 }] },
+      options: {
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: ctx => ' ' + ctx.label + ': ' + ctx.parsed } },
+        },
+      },
+    });
+  }
+
+  const runsTs = {{ runs_ts | tojson | safe }};
+  if (runsTs.datasets.length) {
+    new Chart(document.getElementById('chart-runs-ts'), {
+      type: 'bar',
+      data: {
+        labels: runsTs.labels,
+        datasets: runsTs.datasets.map(d => ({
+          label: d.label,
+          data: d.data,
+          backgroundColor: d.color,
+          stack: 'runs',
+        })),
+      },
+      options: {
+        maintainAspectRatio: false,
+        scales: {
+          x: { grid: { display: false }, stacked: true, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+          y: { grid: { color: '#27272a' }, stacked: true, beginAtZero: true, ticks: { maxTicksLimit: 5 } },
+        },
+        plugins: {
+          legend: { display: true, position: 'top', labels: { boxWidth: 10, padding: 12 } },
+        },
+        interaction: { mode: 'index', intersect: false },
+      },
+    });
+  }
+</script>
 
 {% endblock %}

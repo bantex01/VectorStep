@@ -291,6 +291,12 @@ async def ui_dashboard(request: Request):
         )
         recent_runs = rows.scalars().all()
 
+        rows = await session.execute(
+            select(PipelineRun.triggered_at, PipelineRun.status)
+            .where(PipelineRun.triggered_at >= cutoff_7d)
+        )
+        runs_ts_raw = rows.all()
+
     total_24h = sum(counts_24h.values())
     non_terminal_24h = counts_24h.get("running", 0) + counts_24h.get("interrupted", 0)
     terminal_24h = total_24h - non_terminal_24h
@@ -299,6 +305,31 @@ async def ui_dashboard(request: Request):
         if terminal_24h > 0 else None
     )
     pipelines = getattr(request.app.state, "pipelines", [])
+
+    # Status donut (24h)
+    status_donut = {
+        "labels": list(counts_24h.keys()),
+        "data": list(counts_24h.values()),
+        "colors": [_STATUS_HEX.get(s, "#71717a") for s in counts_24h.keys()],
+    }
+
+    # 7-day runs timeseries bucketed by day and status
+    now = utc_now()
+    bucket_labels = _ts_all_buckets(cutoff_7d, now, "day")
+    status_buckets: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for triggered_at, status in runs_ts_raw:
+        status_buckets[status][_ts_bucket(triggered_at, "day")] += 1
+    runs_ts = {
+        "labels": bucket_labels,
+        "datasets": [
+            {
+                "label": status,
+                "data": [status_buckets[status].get(b, 0) for b in bucket_labels],
+                "color": _STATUS_HEX.get(status, "#71717a"),
+            }
+            for status in sorted(status_buckets, key=lambda s: sum(status_buckets[s].values()), reverse=True)
+        ],
+    }
 
     return templates.TemplateResponse(request, "dashboard.html", {
         "counts_24h": counts_24h,
@@ -310,6 +341,8 @@ async def ui_dashboard(request: Request):
         "recent_runs": recent_runs,
         "pipeline_count": len(pipelines),
         "scheduled_count": sum(1 for p in pipelines if p.schedule),
+        "status_donut": status_donut,
+        "runs_ts": runs_ts,
         "active_page": "dashboard",
     })
 
