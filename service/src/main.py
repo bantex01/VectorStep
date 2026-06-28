@@ -28,6 +28,7 @@ from .models.context import NormalisedContext
 from .models.pipeline import PipelineConfig
 from .normaliser import PARSERS
 from .normaliser.alertmanager import AlertmanagerStrategy
+from .notifications.log import LogNotifier
 from .notifications.telegram import TelegramNotifier
 from .pipeline import PipelineRunner, load_pipelines, load_step_library, resolve_pipeline
 from .tracing import setup_tracing, shutdown_tracing
@@ -290,9 +291,12 @@ async def lifespan(app: FastAPI):
     _pipeline_dir = config.get("pipeline_config_dir", "./pipelines")
     _pipelines = load_pipelines(_pipeline_dir, step_library=_step_library)
 
-    # Notifiers
+    # Notifiers — log is always available; telegram and webhook require config
     from .notifications.webhook import WebhookNotifier
-    notifiers = {"webhook": WebhookNotifier()}
+    notifiers = {
+        "webhook": WebhookNotifier(),
+        "log": LogNotifier(),
+    }
 
     telegram_cfg = config.get("notifications", {}).get("telegram", {})
     bot_token = telegram_cfg.get("bot_token", "")

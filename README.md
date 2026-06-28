@@ -419,6 +419,11 @@ steps:
 
 notifications:
   escalate:
+    - channel: log                   # always available — zero config required
+      template: |
+        ESCALATED: {{pipeline_name}} — {{step_summary}}
+      config:
+        level: error                 # debug | info | warning | error | critical
     - channel: telegram
       template: |
         Escalated: {{pipeline_name}}
@@ -432,11 +437,15 @@ notifications:
           Authorization: ${SLACK_TOKEN}
 
   notify:
-    channel: telegram
-    template: |
-      Aborted: {{pipeline_name}}
-      Service: {{labels.service}}
-      Step: {{current_step}}
+    - channel: log
+      template: "ABORTED: {{pipeline_name}} — {{step_summary}}"
+      config:
+        level: warning
+    - channel: telegram
+      template: |
+        Aborted: {{pipeline_name}}
+        Service: {{labels.service}}
+        Step: {{current_step}}
 
 schedule:                        # optional — omit for webhook-only pipelines
   cron: "*/5 * * * *"
@@ -896,7 +905,7 @@ class BaseExecutor(ABC):
         pass
 ```
 
-Executors are registered by name in `src/executors/__init__.py` and referenced by name in pipeline YAML step `executor:` fields. Steps within the same pipeline can freely mix executors. Registered executors: `openclaw`, `gateway`, `human`, `webhook`, `pipeline`.
+Executors are registered by name in `src/executors/__init__.py` and referenced by name in pipeline YAML step `executor:` fields. Steps within the same pipeline can freely mix executors. Registered executors: `openclaw`, `gateway`, `human`, `webhook`, `notify`, `pipeline`.
 
 ---
 
@@ -1073,6 +1082,74 @@ See `samples/pipelines/sub-pipeline-example.yaml` for a complete worked example 
 
 ---
 
+### 9a. Pipeline Notification Channels
+
+The `notifications:` block in a pipeline YAML wires pipeline state transitions (escalate, abort, stop, notify) to outbound channels. Three channels are available:
+
+| Channel | Config required | Description |
+|---|---|---|
+| `log` | None | Writes to the application logger — always available, zero dependencies |
+| `telegram` | `notifications.telegram` in `config.yaml` | Sends a Telegram message via bot API |
+| `webhook` | `url` in per-notification `config:` | POSTs the rendered template as an HTTP request body |
+
+A single action can fan out to multiple channels by providing a list:
+
+```yaml
+notifications:
+  escalate:
+    - channel: log
+      template: "ESCALATED: {{pipeline_name}} — {{step_summary}}"
+      config:
+        level: error
+    - channel: telegram
+      template: "🚨 {{pipeline_name}}: {{step_summary}}"
+    - channel: webhook
+      template: '{"text": "{{pipeline_name}} escalated: {{step_summary}}"}'
+      config:
+        url: https://hooks.slack.com/services/...
+```
+
+#### `log` channel
+
+Always registered — no `config.yaml` entry needed to enable it. The rendered template is emitted via Python's standard `logging` module, landing in whatever log aggregation stack (stdout, rotating file, Loki, CloudWatch) the service ships to.
+
+Per-notification `config:` keys:
+
+| Key | Default | Description |
+|---|---|---|
+| `level` | `warning` | Log level: `debug` / `info` / `warning` / `error` / `critical`. Also accepts `warn` as an alias. |
+| `logger` | `pork.notifications` | Logger name. Override to route to a specific logger hierarchy. |
+
+```yaml
+notifications:
+  escalate:
+    - channel: log
+      template: |
+        ESCALATED: {{pipeline_name}} — {{step_summary}}
+        Alert: {{context.summary}}  Confidence: {{confidence}}
+      config:
+        level: error
+
+  notify:
+    - channel: log
+      template: "PIPELINE ABORTED: {{pipeline_name}} — {{step_summary}}"
+      config:
+        level: warning
+        logger: pork.ops            # route to a separate logger for ops tooling
+```
+
+The `log` channel is the recommended zero-setup choice for development and for production environments that already aggregate application logs centrally. Add `telegram` or `webhook` alongside it for real-time alerting.
+
+#### `telegram` channel
+
+Requires `notifications.telegram.bot_token` and `notifications.telegram.chat_id` in `config.yaml`. Messages use Telegram's HTML parse mode — `<b>`, `<code>`, and `<a href>` tags work in templates. Messages longer than 4096 characters are truncated with a `[truncated]` suffix.
+
+#### `webhook` channel
+
+POSTs the rendered `template` string as the raw request body. Per-notification `config:` keys match those of `executor: webhook` (url, method, content_type, headers, timeout_seconds). For structured JSON payloads it is cleaner to use an `executor: notify` step (see §10c) which renders a `payload:` dict rather than requiring inline JSON in a template string.
+
+---
+
 ### 10. Flow Control
 
 The `runner` controls all step execution and flow decisions. Agents never decide what happens next — they only report findings and score confidence. For each step:
@@ -1085,7 +1162,11 @@ The `runner` controls all step execution and flow decisions. Agents never decide
 5. If confidence passes, check `proceed`:
    - `proceed: false` → pipeline stops with status `stopped`
    - `proceed: true` → continue to next step
-6. Record step result to SQLite before proceeding
+6. If the executor raised an error (step status = `failed`), check `on_failure`:
+   - `on_failure: abort` (default) → abort the pipeline
+   - `on_failure: continue` → log and continue to next step
+   - If `on_failure.webhook` is set, fire that callback regardless of policy
+7. Record step result to SQLite before proceeding
 
 ### Step and Run Status Reference
 
@@ -1146,6 +1227,118 @@ steps:
 **`when:` vs `proceed: false`:**
 - `when:` — pipeline author decides in advance which steps are relevant given prior step outputs
 - `proceed: false` — the agent signals the pipeline is complete and no further steps are warranted
+
+---
+
+### 10b. Per-Step Failure Policy (`on_failure`)
+
+By default a failed step (executor exception, timeout) aborts the pipeline. For non-critical steps — enrichment lookups, external API calls, notifications — you can allow failures to pass through:
+
+```yaml
+- name: enrich-from-cmdb
+  executor: webhook
+  on_failure: continue       # pipeline keeps running if this step fails
+  executor_config:
+    url: "https://cmdb.internal/api/enrich"
+```
+
+The step is still recorded in run history with `status: failed` and the error message is available in `step_outputs[name].summary` for downstream `when:` conditions or prompt templates.
+
+`on_failure` only applies to executor errors. Low-confidence results that trigger `on_low_confidence: abort` are LLM-quality decisions and are always pipeline-stopping regardless of this setting.
+
+#### Step-level failure webhook callback
+
+Attach a webhook to any step that fires when that step fails, without adding a separate notify step to the pipeline. The callback fires before the pipeline decides whether to abort or continue, so it always goes out regardless of the policy.
+
+```yaml
+- name: triage
+  executor: gateway
+  executor_config:
+    agent: sre-triage
+  on_failure:
+    policy: continue        # pipeline continues even if this step fails
+    webhook:
+      url: "${PAGERDUTY_URL}"
+      headers:
+        Authorization: "Token ${PAGERDUTY_TOKEN}"
+      payload:
+        summary: "Triage step failed: {{step_failure.summary}}"
+        severity: critical
+```
+
+`on_failure` as a block:
+
+| Field | Default | Description |
+|---|---|---|
+| `policy` | `abort` | `abort` or `continue` — what the pipeline does after the failure |
+| `webhook.url` | required | Outbound URL (`${ENV_VAR}` expansion supported) |
+| `webhook.method` | `POST` | HTTP method |
+| `webhook.headers` | `{}` | Header dict; values support `${ENV_VAR}` expansion |
+| `webhook.payload` | `{}` | JSON body dict; string values are Jinja2 templates |
+| `webhook.timeout_seconds` | `30` | Request timeout |
+
+String shorthand (`on_failure: continue` or `on_failure: abort`) is equivalent to setting `policy` only with no webhook.
+
+The Jinja2 context for the webhook payload includes all standard step context variables plus `step_failure.step`, `step_failure.summary`, and `step_failure.status`. Webhook delivery failures are logged as a `step_failure_webhook_failed` run-log event and never abort the pipeline.
+
+---
+
+### 10c. Outbound Notification Steps (`executor: notify`)
+
+`executor: notify` is a first-class pipeline step that sends an outbound HTTP webhook with a structured payload. Unlike `executor: webhook` (which uses `prompt_template` as the raw request body), `notify` takes a `payload:` dict in `executor_config` and recursively renders every string value as a Jinja2 template before JSON-encoding the body.
+
+This makes it ergonomic for services that expect structured JSON payloads — Slack blocks, PagerDuty events, Teams Adaptive Cards, Jira tickets, etc. — without the author having to inline raw JSON inside a YAML string.
+
+```yaml
+steps:
+  - name: alert-pagerduty
+    executor: notify
+    when: "context.severity == 'critical'"
+    on_failure: continue           # notification failure should not abort the run
+    executor_config:
+      url: "${PAGERDUTY_EVENTS_URL}"
+      headers:
+        Authorization: "Token token=${PAGERDUTY_TOKEN}"
+      payload:
+        routing_key: "${PAGERDUTY_ROUTING_KEY}"
+        event_action: trigger
+        payload:
+          summary: "{{context.summary}}"
+          severity: "{{context.severity}}"
+          source: pork
+          custom_details:
+            triage_summary: "{{steps.triage.output.summary}}"
+            confidence: "{{steps.triage.output.confidence}}"
+
+  - name: notify-slack
+    executor: notify
+    on_failure: continue
+    executor_config:
+      url: "${SLACK_WEBHOOK_URL}"
+      payload:
+        blocks:
+          - type: section
+            text:
+              type: mrkdwn
+              text: "*Alert:* {{context.summary}}\n*Triage:* {{steps.triage.output.summary}}"
+```
+
+`executor_config` keys:
+
+| Key | Default | Description |
+|---|---|---|
+| `url` | required | Target URL (`${ENV_VAR}` expansion supported) |
+| `method` | `POST` | HTTP method |
+| `headers` | `{}` | Header dict; values support `${ENV_VAR}` expansion |
+| `payload` | `{}` | Body dict; all string values are recursively rendered as Jinja2 templates |
+| `content_type` | `application/json` | `Content-Type` header shorthand |
+| `timeout_seconds` | `30` | Request timeout |
+
+The step returns `confidence: 1.0` on success so it never triggers low-confidence escalation. HTTP errors (non-2xx) propagate as executor exceptions; combine with `on_failure: continue` so notification failures never abort a pipeline run.
+
+**When to use `executor: notify` vs `executor: webhook`:**
+- Use `notify` when the target expects a structured JSON payload that you want to compose in YAML (Slack, PagerDuty, Teams, Jira, etc.)
+- Use `webhook` when you need full control over the raw body and prefer rendering it as a `prompt_template` string
 
 ---
 

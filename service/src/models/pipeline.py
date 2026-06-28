@@ -53,6 +53,27 @@ class LoopConfig(BaseModel):
     max_iterations: int = 3
 
 
+class StepFailureWebhookConfig(BaseModel):
+    url: str
+    method: str = "POST"
+    headers: dict[str, str] = Field(default_factory=dict)
+    payload: dict = Field(default_factory=dict)
+    timeout_seconds: int = 30
+
+
+class StepFailureConfig(BaseModel):
+    """Controls what happens when a step's executor raises an error or times out.
+
+    policy:
+        "abort"    — (default) stop the pipeline and mark it failed
+        "continue" — log the failure and move on to the next step
+
+    webhook: optional outbound call fired on failure regardless of policy
+    """
+    policy: Literal["abort", "continue"] = "abort"
+    webhook: StepFailureWebhookConfig | None = None
+
+
 class StepConfig(BaseModel):
     name: str
     executor: str
@@ -63,9 +84,17 @@ class StepConfig(BaseModel):
     prompt_template: str = ""
     timeout_seconds: int | None = None
     when: str | None = None
+    on_failure: StepFailureConfig = Field(default_factory=StepFailureConfig)
     verifier: VerifierConfig | None = None
     retry: RetryConfig | None = None
     loop_until: LoopConfig | None = None
+
+    @field_validator("on_failure", mode="before")
+    @classmethod
+    def _coerce_on_failure(cls, v: object) -> object:
+        if isinstance(v, str):
+            return {"policy": v}
+        return v
 
 
 class ParallelGroupInner(BaseModel):
@@ -158,9 +187,17 @@ class LibraryStepConfig(BaseModel):
     on_abort: str = "notify"
     prompt_template: str = ""
     timeout_seconds: int | None = None
+    on_failure: StepFailureConfig = Field(default_factory=StepFailureConfig)
     verifier: VerifierConfig | None = None
     retry: RetryConfig | None = None
     loop_until: LoopConfig | None = None
+
+    @field_validator("on_failure", mode="before")
+    @classmethod
+    def _coerce_on_failure(cls, v: object) -> object:
+        if isinstance(v, str):
+            return {"policy": v}
+        return v
 
 
 class PipelineConfig(BaseModel):

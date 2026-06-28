@@ -1,11 +1,14 @@
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Literal
 
+import httpx
+from jinja2 import Environment, Undefined
 from opentelemetry.trace import Status, StatusCode
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -341,6 +344,20 @@ class PipelineRunner:
                 break
 
             if step_result.status in ("aborted", "escalated", "failed"):
+                # on_failure hook applies only to sequential StepConfig executor errors
+                if isinstance(step, StepConfig) and step_result.status == "failed":
+                    if step.on_failure.webhook:
+                        await self._fire_step_failure_webhook(
+                            step, step_result, pipeline, normalised, run_id, step_outputs, run_log
+                        )
+                    if step.on_failure.policy == "continue":
+                        _log_event(run_log, "warn", "step_failed_continuing",
+                                   f"Step failed (continuing): {step_name} — "
+                                   f"{step_result.output.summary if step_result.output else ''}",
+                                   step=step_name)
+                        accumulated_tokens += step_result.total_tokens
+                        continue
+
                 result.status = step_result.status
                 result.abort_reason = (
                     step_result.output.summary if step_result.output else "unknown"
@@ -1525,6 +1542,65 @@ class PipelineRunner:
             "contradicts": reasoning.get("contradicts", ""),
             "step_summary": output.summary if output else "",
         }
+
+    async def _fire_step_failure_webhook(
+        self,
+        step: StepConfig,
+        result: "StepResult",
+        pipeline: PipelineConfig,
+        normalised: NormalisedContext,
+        run_id: str,
+        step_outputs: "dict[str, LLMOutput]",
+        run_log: list,
+    ) -> None:
+        """Fire the step-level on_failure.webhook callback. Never raises — failures are logged."""
+        webhook = step.on_failure.webhook
+        assert webhook is not None
+        try:
+            ctx = await build_context(pipeline, normalised, run_id, step.name, step_outputs)
+            ctx["step_failure"] = {
+                "step": step.name,
+                "summary": result.output.summary if result.output else "",
+                "status": result.status,
+            }
+
+            env = Environment(undefined=Undefined)
+
+            def _render(obj: object) -> object:
+                if isinstance(obj, str):
+                    return env.from_string(obj).render(**ctx)
+                if isinstance(obj, dict):
+                    return {k: _render(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_render(item) for item in obj]
+                return obj
+
+            rendered_payload = _render(webhook.payload)
+            headers = {k: self._resolve_env(v) for k, v in webhook.headers.items()}
+            headers.setdefault("Content-Type", "application/json")
+            url = self._resolve_env(webhook.url)
+
+            async with httpx.AsyncClient(timeout=webhook.timeout_seconds) as client:
+                resp = await client.request(
+                    webhook.method.upper(),
+                    url,
+                    content=json.dumps(rendered_payload).encode(),
+                    headers=headers,
+                )
+            _log_event(run_log, "info", "step_failure_webhook_sent",
+                       f"Step failure webhook: {step.name} → HTTP {resp.status_code}",
+                       step=step.name)
+        except Exception as exc:
+            logger.warning("Step failure webhook for '%s' failed: %s — ignored", step.name, exc)
+            _log_event(run_log, "warn", "step_failure_webhook_failed",
+                       f"Step failure webhook failed: {step.name} — {exc}",
+                       step=step.name)
+
+    @staticmethod
+    def _resolve_env(value: str) -> str:
+        if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+            return os.environ.get(value[2:-1], "")
+        return value
 
     async def _dispatch_notification(
         self,
