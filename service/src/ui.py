@@ -1363,6 +1363,29 @@ async def ui_agents(request: Request):
             if desc:
                 agent["description"] = desc
 
+    # Batch-fetch soul descriptions for gateway agents.
+    if gw_agents:
+        gw_ids = [a.get("id") or a.get("name") for a in gw_agents]
+
+        async def _fetch_gw_soul(agent_id: str) -> str | None:
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    resp = await client.get(f"{_pork_gateway_base}/agents/{agent_id}/soul")
+                    if resp.status_code == 200:
+                        return resp.json().get("content") or resp.text
+            except Exception:
+                pass
+            return None
+
+        gw_soul_results = await asyncio.gather(*[_fetch_gw_soul(aid) for aid in gw_ids], return_exceptions=True)
+        gw_agent_entries = all_agents[len(oc_agents):]
+        for agent, soul_content in zip(gw_agent_entries, gw_soul_results):
+            if isinstance(soul_content, Exception) or not soul_content:
+                continue
+            desc = _first_description_line(soul_content)
+            if desc:
+                agent["description"] = desc
+
     # Collect non-None error messages
     gateway_errors = [e for e in [oc_error, gw_error] if e]
 
