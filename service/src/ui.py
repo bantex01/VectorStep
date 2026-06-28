@@ -1227,21 +1227,36 @@ async def ui_steps(request: Request):
 # Defaults allow the service to start without config and fall back gracefully.
 _pork_gateway_base: str = os.environ.get("PORK_GATEWAY_URL", "http://localhost:18780")
 _openclaw_ws_url: str = "ws://127.0.0.1:18789/rpc"
+_openclaw_enabled: bool = True  # set False when executors.openclaw is absent from config
 
 
 def configure(openclaw_ws_url: str = "", pork_gateway_base: str = "") -> None:
     """Set agent source URLs from config.yaml values. Call from main.py lifespan."""
-    global _openclaw_ws_url, _pork_gateway_base
+    global _openclaw_ws_url, _pork_gateway_base, _openclaw_enabled
+    _openclaw_enabled = bool(openclaw_ws_url)
     if openclaw_ws_url:
         _openclaw_ws_url = openclaw_ws_url
     if pork_gateway_base:
         _pork_gateway_base = pork_gateway_base
 
 
+def _first_description_line(content: str | None, max_chars: int = 150) -> str | None:
+    """Return the first meaningful non-heading line from soul/description content."""
+    if not content:
+        return None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return stripped[:max_chars]
+    return None
+
+
 # ── Per-executor agent discovery ──────────────────────────────────────────────
 
 async def _fetch_openclaw_agents() -> tuple[list[dict], str | None]:
     """Fetch agents list from the OpenClaw Gateway WS API (agents.list RPC)."""
+    if not _openclaw_enabled:
+        return [], None
     result = await gateway_call_safe("agents.list", {}, gateway_url=_openclaw_ws_url)
     if result is None:
         return [], f"Could not reach OpenClaw Gateway at {_openclaw_ws_url} — is it running?"
@@ -1332,6 +1347,21 @@ async def ui_agents(request: Request):
         all_agents.append({**a, "executor": "openclaw"})
     for a in gw_agents:
         all_agents.append({**a, "executor": "gateway"})
+
+    # Batch-fetch the first SOUL.md line for openclaw agents as a list-page preview.
+    if oc_agents and _openclaw_enabled:
+        oc_ids = [a.get("id") or a.get("name") for a in oc_agents]
+        soul_results = await asyncio.gather(*[
+            gateway_call_safe("agents.files.get", {"agentId": aid, "name": "SOUL.md"}, gateway_url=_openclaw_ws_url)
+            for aid in oc_ids
+        ], return_exceptions=True)
+        for agent, soul_result in zip(all_agents[:len(oc_agents)], soul_results):
+            if isinstance(soul_result, Exception) or soul_result is None:
+                continue
+            content = ((soul_result or {}).get("file") or {}).get("content")
+            desc = _first_description_line(content)
+            if desc:
+                agent["description"] = desc
 
     # Collect non-None error messages
     gateway_errors = [e for e in [oc_error, gw_error] if e]
