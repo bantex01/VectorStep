@@ -1240,15 +1240,22 @@ def configure(openclaw_ws_url: str = "", pork_gateway_base: str = "") -> None:
         _pork_gateway_base = pork_gateway_base
 
 
-def _first_description_line(content: str | None, max_chars: int = 150) -> str | None:
-    """Return the first meaningful non-heading line from soul/description content."""
+def _first_description_line(content: str | None) -> str | None:
+    """Return the first non-heading paragraph from soul/description content."""
     if not content:
         return None
+    paragraph: list[str] = []
     for line in content.splitlines():
         stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            return stripped[:max_chars]
-    return None
+        if stripped.startswith("#"):
+            if paragraph:
+                break
+            continue
+        if stripped:
+            paragraph.append(stripped)
+        elif paragraph:
+            break
+    return " ".join(paragraph) or None
 
 
 # ── Per-executor agent discovery ──────────────────────────────────────────────
