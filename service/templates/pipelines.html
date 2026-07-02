@@ -107,6 +107,14 @@ async function reloadPipelines() {
       {% if p.notifications %}
         <span>{{ p.notifications | length }} notification{% if p.notifications | length != 1 %}s{% endif %}</span>
       {% endif %}
+      {% set fb = feedback_by_pipeline.get(p.name) %}
+      {% if fb and fb.total > 0 %}
+        {% set acc_pct = (fb.correct / fb.total * 100)|round|int %}
+        <span class="flex items-center gap-1 ml-auto {% if acc_pct >= 80 %}text-green-400{% elif acc_pct >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">
+          <span class="w-1.5 h-1.5 rounded-full bg-current inline-block"></span>
+          {{ acc_pct }}% correct ({{ fb.total }} marked)
+        </span>
+      {% endif %}
     </div>
   </a>
   {% endfor %}

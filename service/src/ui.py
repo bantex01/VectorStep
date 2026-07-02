@@ -621,6 +621,17 @@ async def ui_pipelines(request: Request):
         )
         all_runs = rows.scalars().all()
 
+        fb_rows = await session.execute(
+            select(RunFeedback.pipeline_name, RunFeedback.outcome, func.count().label("n"))
+            .group_by(RunFeedback.pipeline_name, RunFeedback.outcome)
+        )
+        feedback_by_pipeline: dict[str, dict[str, int]] = {}
+        for name, outcome, n in fb_rows.all():
+            if name not in feedback_by_pipeline:
+                feedback_by_pipeline[name] = {"correct": 0, "partial": 0, "incorrect": 0, "total": 0}
+            feedback_by_pipeline[name][outcome] = n
+            feedback_by_pipeline[name]["total"] += n
+
     last_run: dict[str, datetime] = {}
     last_status: dict[str, str] = {}
     run_counts: dict[str, int] = {}
@@ -635,6 +646,7 @@ async def ui_pipelines(request: Request):
         "last_run": last_run,
         "last_status": last_status,
         "run_counts": run_counts,
+        "feedback_by_pipeline": feedback_by_pipeline,
         "active_page": "pipelines",
     })
 
@@ -974,6 +986,21 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         all_runs_raw = rows.all()
 
+        # Feedback per pipeline scoped to the same time range (via run date)
+        fb_q = (
+            select(RunFeedback.pipeline_name, RunFeedback.outcome, func.count().label("n"))
+            .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
+            .group_by(RunFeedback.pipeline_name, RunFeedback.outcome)
+        )
+        if cutoff:
+            fb_q = fb_q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(fb_q)
+        feedback_raw: dict[str, dict[str, int]] = {}
+        for name, outcome, n in rows.all():
+            if name not in feedback_raw:
+                feedback_raw[name] = {"correct": 0, "partial": 0, "incorrect": 0}
+            feedback_raw[name][outcome] = n
+
     # ── Per-pipeline aggregates ───────────────────────────────────────────────
 
     avg_duration_by_pipeline = {
@@ -1035,6 +1062,12 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
                 "duration": dur_str,
             })
 
+        fb = feedback_raw.get(name, {})
+        fb_correct = fb.get("correct", 0)
+        fb_partial = fb.get("partial", 0)
+        fb_incorrect = fb.get("incorrect", 0)
+        fb_total = fb_correct + fb_partial + fb_incorrect
+
         drilldown_data[name] = {
             "run_count": n,
             "failed_count": failed,
@@ -1047,7 +1080,18 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
             "runs_ts": {"labels": bucket_labels, "data": runs_ts_data},
             "duration_ts": {"labels": bucket_labels, "data": duration_ts_data},
             "recent_runs": recent,
+            "feedback_total": fb_total,
+            "feedback_correct": fb_correct,
+            "feedback_partial": fb_partial,
+            "feedback_incorrect": fb_incorrect,
+            "accuracy_pct": round(fb_correct / fb_total * 100) if fb_total else None,
         }
+
+    # ── Headline accuracy across all pipelines ────────────────────────────────
+
+    insights_feedback_total = sum(sum(fb.values()) for fb in feedback_raw.values())
+    insights_feedback_correct = sum(fb.get("correct", 0) for fb in feedback_raw.values())
+    insights_accuracy_pct = round(insights_feedback_correct / insights_feedback_total * 100) if insights_feedback_total else None
 
     # ── Headline stats ────────────────────────────────────────────────────────
 
@@ -1058,8 +1102,12 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
 
     # ── Chart data ────────────────────────────────────────────────────────────
 
-    pipeline_rows = [
-        {
+    pipeline_rows = []
+    for name, n in sorted(run_counts.items(), key=lambda t: t[1], reverse=True):
+        fb = feedback_raw.get(name, {})
+        fb_total = sum(fb.values())
+        fb_correct = fb.get("correct", 0)
+        pipeline_rows.append({
             "name": name,
             "run_count": n,
             "failed_count": failed_counts.get(name, 0),
@@ -1067,9 +1115,9 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
             "input_tokens": token_totals.get(name, (0, 0))[0],
             "output_tokens": token_totals.get(name, (0, 0))[1],
             "teams": sorted(teams_by_pipeline.get(name, [])),
-        }
-        for name, n in sorted(run_counts.items(), key=lambda t: t[1], reverse=True)
-    ]
+            "feedback_total": fb_total,
+            "accuracy_pct": round(fb_correct / fb_total * 100) if fb_total else None,
+        })
 
     duration_chart_rows = sorted(
         ((name, secs) for name, secs in avg_duration_by_pipeline.items()),
@@ -1101,6 +1149,8 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         "overall_avg_duration_secs": overall_avg_duration_secs,
         "max_duration_secs": max_duration_secs,
         "drilldown_data": drilldown_data,
+        "insights_feedback_total": insights_feedback_total,
+        "insights_accuracy_pct": insights_accuracy_pct,
         "active_page": "insights_pipelines",
     })
 

@@ -1418,6 +1418,17 @@ retry:
 | `input_tokens` | int, nullable | Input tokens consumed by this step's primary executor call. Populated for `gateway` steps; NULL for others. For parallel/fan-out branches, each branch row has its own token count. |
 | `output_tokens` | int, nullable | Output tokens produced by this step's primary executor call. |
 
+**run_feedback**
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | uuid, pk | |
+| `run_id` | str, unique, indexed | The run this feedback is for. One row per run — submitting again upserts. |
+| `pipeline_name` | str, indexed | Denormalised from the run for efficient pipeline-level queries. |
+| `outcome` | str | `correct` / `partial` / `incorrect` — human judgement of the run's result. |
+| `notes` | text, nullable | Optional free-text context. |
+| `submitted_at` | datetime | Created or last updated. |
+
 ### 15. Management Endpoints
 
 ```bash
@@ -1444,6 +1455,20 @@ GET /runs
 
 # Full run detail — includes all steps with confidence scores and parsed output
 GET /runs/{run_id}
+
+# Submit or update human accuracy feedback for a run (outcome: correct|partial|incorrect)
+POST /runs/{run_id}/feedback
+# body: {"outcome": "correct", "notes": "..."}
+# → {"run_id": "...", "outcome": "correct", "notes": "...", "submitted_at": "..."}
+# Upserts — submitting again overwrites the previous outcome and notes.
+
+# Get current feedback for a run
+GET /runs/{run_id}/feedback
+# → {"feedback": {run_id, outcome, notes, submitted_at}} or {"feedback": null}
+
+# Re-run a pipeline from a specific step
+POST /runs/{run_id}/rerun
+# body: {"from_step": "step-name"}  — see §Re-run from a step
 
 # Server-Sent Events stream for live run tailing (see §UI / Live tail)
 GET /ui/runs/{run_id}/stream
@@ -1557,13 +1582,14 @@ The web UI is served under `/ui` and provides the following pages:
 |---|---|---|
 | Dashboard | `/ui/` | 24h run counts by status, success rate, pipeline activity, recent runs |
 | Runs | `/ui/runs` | Filterable run history with status and pipeline filters |
-| Run detail | `/ui/runs/{id}` | Full step breakdown with confidence bars, parsed output, verifier results, collapsible agent trace (gateway steps), collapsible run log, and live tail for in-progress runs |
+| Run detail | `/ui/runs/{id}` | Full step breakdown with confidence bars, parsed output, verifier results, collapsible agent trace (gateway steps), collapsible run log, live tail for in-progress runs, and **accuracy feedback widget** |
 | Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status and run counts |
-| Pipeline detail | `/ui/pipelines/{name}` | Config summary, recent runs, YAML viewer, and **Run now** button |
+| Pipeline detail | `/ui/pipelines/{name}` | Config summary, accuracy feedback summary bar, recent runs, YAML viewer, and **Run now** button |
+| Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, and copy-ref button |
 | Agents | `/ui/agents` | Unified agent library across all executor backends |
 | Schedules | `/ui/schedules` | Active cron schedules with next-run times |
-| Insights — Overview | `/ui/insights` | Run/failure/token totals, runs by team, and MCP tool-use counts, over a selectable time range (24h/7d/30d/all-time) |
+| Insights — Overview | `/ui/insights` | Run/failure/token/accuracy totals, runs by team, and MCP tool-use counts, over a selectable time range (24h/7d/30d/all-time) |
 | Insights — By Pipeline | `/ui/insights/pipelines` | Per-pipeline run/failure/token totals and which teams triggered each pipeline in range |
 | Insights — By Agent | `/ui/insights/agents` | Per-agent step/success-rate/token totals and which models each agent used in range |
 
@@ -1597,6 +1623,31 @@ The trace toggle label shows a count of LLM calls and tool calls at a glance (e.
 The same events that populate this panel also appear in the **live tail** during the step's execution — the detail panel is the persistent post-run record; the live tail is the real-time view.
 
 For `openclaw` steps, `agent_trace` is NULL — OpenClaw does not expose intermediate events to P-Ork.
+
+### Accuracy feedback
+
+After a run completes, any user can mark it with a human judgement of whether the pipeline's outcome was correct. The feedback widget appears at the bottom of every finished run's detail page (hidden for `running` and `interrupted` runs).
+
+**Outcomes:**
+
+| Outcome | When to use |
+|---|---|
+| `Correct` | The pipeline did what it was supposed to do |
+| `Partial` | The pipeline did useful work but didn't fully achieve the goal |
+| `Incorrect` | The outcome was wrong or misleading |
+
+An optional notes field lets you record why — useful context when reviewing patterns later. Submitting again overwrites the previous outcome (upsert).
+
+**Where accuracy data surfaces:**
+
+- **Run detail** — the feedback widget; shows current outcome if already marked.
+- **Pipeline detail** — a colour-coded correct/partial/incorrect bar with counts, and a "View breakdown →" link.
+- **Insights — Overview** — an "Accuracy" stat card showing the % correct of all marked runs in the selected time range.
+- **Pipeline accuracy page** (`/ui/pipelines/{name}/feedback`) — the full breakdown:
+  - Summary cards (total marked, correct, partial, incorrect with percentages)
+  - Overall accuracy distribution bar
+  - **Accuracy by configuration table** — runs are grouped by a fingerprint of the exact (step sequence × agents × models) combination. When you change a model, add a step, or swap an agent, the new runs fall into a new group automatically, so you can directly compare accuracy before and after any pipeline change without manually tagging versions.
+  - Chronological table of every marked run with its outcome, run status, config fingerprint, and notes.
 
 ### Agent Library
 
