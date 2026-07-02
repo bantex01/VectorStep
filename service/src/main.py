@@ -17,7 +17,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from .db.database import create_tables, get_session_factory, init_db, mark_interrupted_runs
-from .db.models import PipelineRun, PipelineStep
+from .db.models import PipelineRun, PipelineStep, RunFeedback
 import functools
 
 from .executors import EXECUTORS
@@ -918,3 +918,63 @@ async def rerun_from_step(run_id: str, request: Request):
             "prior_steps_loaded": len(initial_step_outputs),
         },
     )
+
+
+@app.post("/runs/{run_id}/feedback")
+async def submit_run_feedback(run_id: str, request: Request):
+    """Submit or update human accuracy feedback for a completed run."""
+    body = await request.json()
+    outcome = (body.get("outcome") or "").strip()
+    if outcome not in ("correct", "partial", "incorrect"):
+        raise HTTPException(status_code=400, detail="outcome must be 'correct', 'partial', or 'incorrect'")
+    notes = (body.get("notes") or "").strip() or None
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        run = await session.get(PipelineRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+        result = await session.execute(select(RunFeedback).where(RunFeedback.run_id == run_id))
+        feedback = result.scalar_one_or_none()
+
+        if feedback:
+            feedback.outcome = outcome
+            feedback.notes = notes
+            feedback.submitted_at = utc_now()
+        else:
+            feedback = RunFeedback(
+                run_id=run_id,
+                pipeline_name=run.pipeline_name,
+                outcome=outcome,
+                notes=notes,
+            )
+            session.add(feedback)
+        await session.commit()
+
+    return {
+        "run_id": run_id,
+        "outcome": feedback.outcome,
+        "notes": feedback.notes,
+        "submitted_at": feedback.submitted_at.isoformat(),
+    }
+
+
+@app.get("/runs/{run_id}/feedback")
+async def get_run_feedback(run_id: str):
+    """Get human accuracy feedback for a run, if any."""
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        result = await session.execute(select(RunFeedback).where(RunFeedback.run_id == run_id))
+        feedback = result.scalar_one_or_none()
+
+    if not feedback:
+        return {"feedback": None}
+    return {
+        "feedback": {
+            "run_id": feedback.run_id,
+            "outcome": feedback.outcome,
+            "notes": feedback.notes,
+            "submitted_at": feedback.submitted_at.isoformat(),
+        }
+    }

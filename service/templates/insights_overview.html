@@ -23,7 +23,7 @@
 </div>
 
 <!-- Stat cards -->
-<div class="grid grid-cols-4 gap-4 mb-8">
+<div class="grid grid-cols-5 gap-4 mb-8">
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Total runs</p>
     <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_runs | format_number }}</p>
@@ -53,6 +53,17 @@
     <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Teams</p>
     <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ team_count }}</p>
     <p class="mt-1 text-xs text-zinc-500">seen in range</p>
+  </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Accuracy</p>
+    {% if feedback_total %}
+      {% set correct_pct = (feedback_correct / feedback_total * 100)|round|int %}
+      <p class="mt-2 text-3xl font-semibold {% if correct_pct >= 80 %}text-green-400{% elif correct_pct >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">{{ correct_pct }}%</p>
+      <p class="mt-1 text-xs text-zinc-500">correct · {{ feedback_total }} marked</p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+      <p class="mt-1 text-xs text-zinc-500">no feedback in range</p>
+    {% endif %}
   </div>
 </div>
 

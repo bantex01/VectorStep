@@ -59,3 +59,14 @@ class PipelineStep(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     run: Mapped["PipelineRun"] = relationship("PipelineRun", back_populates="steps")
+
+
+class RunFeedback(Base):
+    __tablename__ = "run_feedback"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    pipeline_name: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    outcome: Mapped[str] = mapped_column(String, nullable=False)  # "correct" | "partial" | "incorrect"
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)

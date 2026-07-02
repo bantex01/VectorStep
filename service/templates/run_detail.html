@@ -581,6 +581,122 @@
 </div>
 {% endif %}
 
+<!-- Feedback widget — only for finished runs -->
+{% if run.status not in ('running', 'interrupted') %}
+<div x-data="feedbackWidget('{{ run.id }}', '{{ feedback.outcome if feedback else '' }}', {{ (feedback.notes or '') | tojson if feedback else '""' }})"
+     class="mt-6 bg-zinc-900 rounded-lg border border-zinc-800">
+  <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between">
+    <div>
+      <h2 class="text-sm font-semibold text-zinc-200">Accuracy feedback</h2>
+      <p class="text-xs text-zinc-500 mt-0.5">Was this run's outcome correct?</p>
+    </div>
+    <template x-if="saved && outcome">
+      <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset"
+            :class="{
+              'bg-green-950 text-green-400 ring-green-800': outcome === 'correct',
+              'bg-amber-950 text-amber-400 ring-amber-800': outcome === 'partial',
+              'bg-red-950 text-red-400 ring-red-800': outcome === 'incorrect'
+            }"
+            x-text="outcome.charAt(0).toUpperCase() + outcome.slice(1)"></span>
+    </template>
+  </div>
+  <div class="px-5 py-4 space-y-4">
+    <!-- Outcome buttons -->
+    <div class="flex gap-2">
+      <button @click="select('correct')"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium border transition-colors"
+              :class="outcome === 'correct'
+                ? 'bg-green-950 text-green-300 border-green-700'
+                : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-green-800 hover:text-green-400'">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+        </svg>
+        Correct
+      </button>
+      <button @click="select('partial')"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium border transition-colors"
+              :class="outcome === 'partial'
+                ? 'bg-amber-950 text-amber-300 border-amber-700'
+                : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-amber-800 hover:text-amber-400'">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M20 12H4"/>
+        </svg>
+        Partial
+      </button>
+      <button @click="select('incorrect')"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium border transition-colors"
+              :class="outcome === 'incorrect'
+                ? 'bg-red-950 text-red-300 border-red-700'
+                : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-red-800 hover:text-red-400'">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+        Incorrect
+      </button>
+    </div>
+
+    <!-- Notes -->
+    <div x-show="outcome" x-cloak>
+      <textarea x-model="notes" rows="2" placeholder="Optional notes…"
+                class="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 resize-none"></textarea>
+    </div>
+
+    <div class="flex items-center gap-3" x-show="outcome" x-cloak>
+      <button @click="submit()" :disabled="submitting || !outcome"
+              class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors">
+        <svg x-show="submitting" class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+        </svg>
+        <span x-text="submitting ? 'Saving…' : (saved ? 'Update' : 'Save feedback')"></span>
+      </button>
+      <span x-show="saved && !submitting" x-transition class="text-xs text-green-400">Saved</span>
+      <span x-show="error" x-text="error" class="text-xs text-red-400"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+function feedbackWidget(runId, initialOutcome, initialNotes) {
+  return {
+    outcome: initialOutcome || '',
+    notes: initialNotes || '',
+    submitting: false,
+    saved: !!initialOutcome,
+    error: '',
+
+    select(val) {
+      this.outcome = val;
+      this.saved = false;
+    },
+
+    async submit() {
+      if (!this.outcome) return;
+      this.submitting = true;
+      this.error = '';
+      try {
+        const resp = await fetch(`/runs/${runId}/feedback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ outcome: this.outcome, notes: this.notes }),
+        });
+        if (resp.ok) {
+          this.saved = true;
+        } else {
+          const data = await resp.json().catch(() => ({}));
+          this.error = data.detail || `Error ${resp.status}`;
+        }
+      } catch (e) {
+        this.error = 'Request failed: ' + e.message;
+      } finally {
+        this.submitting = false;
+      }
+    },
+  };
+}
+</script>
+{% endif %}
+
 <script>
 async function submitRerun(runId, fromStep) {
   try {

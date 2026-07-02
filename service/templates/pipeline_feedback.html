@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}Accuracy — {{ pipeline.name }} — P-Ork{% endblock %}
+{% block page_heading %}
+<nav class="flex items-center gap-2 text-sm text-zinc-500">
+  <a href="/ui/pipelines" class="hover:text-zinc-300">Pipelines</a>
+  <span>/</span>
+  <a href="/ui/pipelines/{{ pipeline.name }}" class="hover:text-zinc-300">{{ pipeline.name }}</a>
+  <span>/</span>
+  <span class="text-zinc-300">Accuracy</span>
+</nav>
+{% endblock %}
+{% block content %}
+
+<!-- Summary cards -->
+<div class="grid grid-cols-4 gap-4 mb-6">
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Marked runs</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_marked }}</p>
+    <p class="mt-1 text-xs text-zinc-500">total feedback submitted</p>
+  </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Correct</p>
+    <p class="mt-2 text-3xl font-semibold text-green-400">{{ total_correct }}</p>
+    {% if total_marked %}
+    <p class="mt-1 text-xs text-zinc-500">{{ (total_correct / total_marked * 100)|round|int }}% of marked</p>
+    {% else %}
+    <p class="mt-1 text-xs text-zinc-500">—</p>
+    {% endif %}
+  </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Partial</p>
+    <p class="mt-2 text-3xl font-semibold text-amber-400">{{ total_partial }}</p>
+    {% if total_marked %}
+    <p class="mt-1 text-xs text-zinc-500">{{ (total_partial / total_marked * 100)|round|int }}% of marked</p>
+    {% else %}
+    <p class="mt-1 text-xs text-zinc-500">—</p>
+    {% endif %}
+  </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Incorrect</p>
+    <p class="mt-2 text-3xl font-semibold text-red-400">{{ total_incorrect }}</p>
+    {% if total_marked %}
+    <p class="mt-1 text-xs text-zinc-500">{{ (total_incorrect / total_marked * 100)|round|int }}% of marked</p>
+    {% else %}
+    <p class="mt-1 text-xs text-zinc-500">—</p>
+    {% endif %}
+  </div>
+</div>
+
+{% if total_marked == 0 %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 px-6 py-12 text-center">
+  <p class="text-zinc-400 text-sm">No feedback submitted yet for this pipeline.</p>
+  <p class="text-zinc-500 text-xs mt-1">Open any completed run and use the Accuracy feedback widget to mark it.</p>
+</div>
+{% else %}
+
+<!-- Overall accuracy bar -->
+{% set correct_pct = (total_correct / total_marked * 100)|round|int %}
+{% set partial_pct = (total_partial / total_marked * 100)|round|int %}
+{% set incorrect_pct = (total_incorrect / total_marked * 100)|round|int %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 px-5 py-4 mb-6">
+  <p class="text-xs text-zinc-500 uppercase tracking-wide mb-2">Overall accuracy distribution</p>
+  <div class="flex h-3 rounded-full overflow-hidden bg-zinc-800 mb-2">
+    {% if correct_pct %}<div class="bg-green-500 transition-all" style="width:{{ correct_pct }}%" title="{{ total_correct }} correct ({{ correct_pct }}%)"></div>{% endif %}
+    {% if partial_pct %}<div class="bg-amber-400 transition-all" style="width:{{ partial_pct }}%" title="{{ total_partial }} partial ({{ partial_pct }}%)"></div>{% endif %}
+    {% if incorrect_pct %}<div class="bg-red-500 transition-all" style="width:{{ incorrect_pct }}%" title="{{ total_incorrect }} incorrect ({{ incorrect_pct }}%)"></div>{% endif %}
+  </div>
+  <div class="flex gap-5 text-xs">
+    <span class="flex items-center gap-1.5 text-green-400"><span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>{{ total_correct }} correct ({{ correct_pct }}%)</span>
+    <span class="flex items-center gap-1.5 text-amber-400"><span class="w-2 h-2 rounded-full bg-amber-400 inline-block"></span>{{ total_partial }} partial ({{ partial_pct }}%)</span>
+    <span class="flex items-center gap-1.5 text-red-400"><span class="w-2 h-2 rounded-full bg-red-500 inline-block"></span>{{ total_incorrect }} incorrect ({{ incorrect_pct }}%)</span>
+  </div>
+</div>
+
+<!-- Config fingerprint groups -->
+{% if config_groups | length > 1 %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6">
+  <div class="px-5 py-4 border-b border-zinc-800">
+    <h2 class="text-sm font-semibold text-zinc-200">Accuracy by pipeline configuration</h2>
+    <p class="text-xs text-zinc-500 mt-0.5">Runs are grouped by the combination of steps, agents, and models used. Changes to any of these create a new group — making it easy to see how accuracy shifted when the pipeline evolved.</p>
+  </div>
+  <table class="w-full">
+    <thead>
+      <tr class="border-b border-zinc-800">
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">Config</th>
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">Steps</th>
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">Models</th>
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">Runs</th>
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide w-48">Accuracy</th>
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">Active</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-zinc-800">
+      {% for g in config_groups %}
+      <tr class="hover:bg-zinc-800/50 transition-colors">
+        <td class="px-5 py-3">
+          <span class="font-mono text-xs text-zinc-400 bg-zinc-800 px-1.5 py-0.5 rounded">{{ g.fingerprint }}</span>
+        </td>
+        <td class="px-5 py-3">
+          <p class="text-xs text-zinc-300 font-mono">
+            {% if g.config.steps %}
+              {{ g.config.steps | join(' → ') | truncate(60, True, '…') }}
+            {% else %}
+              <span class="text-zinc-600">—</span>
+            {% endif %}
+          </p>
+        </td>
+        <td class="px-5 py-3">
+          <div class="flex flex-wrap gap-1">
+            {% for m in g.config.models %}
+            <span class="text-xs text-zinc-400 bg-zinc-800 px-1.5 py-0.5 rounded font-mono">{{ m | truncate(30, True, '…') }}</span>
+            {% else %}
+            <span class="text-xs text-zinc-600">—</span>
+            {% endfor %}
+          </div>
+        </td>
+        <td class="px-5 py-3 text-sm text-zinc-300">{{ g.total }}</td>
+        <td class="px-5 py-3">
+          <div class="flex items-center gap-2">
+            <div class="flex-1 flex h-1.5 rounded-full overflow-hidden bg-zinc-800 min-w-16">
+              {% set g_correct_pct = (g.correct / g.total * 100)|round|int if g.total else 0 %}
+              {% set g_partial_pct = (g.partial / g.total * 100)|round|int if g.total else 0 %}
+              {% set g_incorrect_pct = (g.incorrect / g.total * 100)|round|int if g.total else 0 %}
+              {% if g_correct_pct %}<div class="bg-green-500" style="width:{{ g_correct_pct }}%"></div>{% endif %}
+              {% if g_partial_pct %}<div class="bg-amber-400" style="width:{{ g_partial_pct }}%"></div>{% endif %}
+              {% if g_incorrect_pct %}<div class="bg-red-500" style="width:{{ g_incorrect_pct }}%"></div>{% endif %}
+            </div>
+            <span class="text-xs {% if g.correct_pct >= 80 %}text-green-400{% elif g.correct_pct >= 60 %}text-amber-400{% else %}text-red-400{% endif %} shrink-0">{{ g.correct_pct }}%</span>
+          </div>
+        </td>
+        <td class="px-5 py-3 text-xs text-zinc-500">
+          {% if g.first_seen and g.last_seen %}
+            {% if g.first_seen.date() == g.last_seen.date() %}
+              {{ g.first_seen.strftime('%d %b %Y') }}
+            {% else %}
+              {{ g.first_seen.strftime('%d %b') }} – {{ g.last_seen.strftime('%d %b %Y') }}
+            {% endif %}
+          {% else %}
+            —
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<!-- Chronological marked-runs table -->
+<div class="bg-zinc-900 rounded-lg border border-zinc-800">
+  <div class="px-5 py-4 border-b border-zinc-800">
+    <h2 class="text-sm font-semibold text-zinc-200">All marked runs</h2>
+  </div>
+  <table class="w-full">
+    <thead>
+      <tr class="border-b border-zinc-800">
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">Run</th>
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">Outcome</th>
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">Run status</th>
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">Config</th>
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">Notes</th>
+        <th class="px-5 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">Triggered</th>
+        <th class="px-5 py-3"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-zinc-800">
+      {% for r in marked_runs %}
+      <tr class="hover:bg-zinc-800/50 transition-colors">
+        <td class="px-5 py-3">
+          <span class="font-mono text-xs text-zinc-400">{{ r.run_id[:8] }}</span>
+        </td>
+        <td class="px-5 py-3">
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ outcome_classes(r.outcome) }}">
+            {{ r.outcome }}
+          </span>
+        </td>
+        <td class="px-5 py-3">
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(r.run_status) }}">
+            {{ r.run_status }}
+          </span>
+        </td>
+        <td class="px-5 py-3">
+          <span class="font-mono text-xs text-zinc-500 bg-zinc-800 px-1.5 py-0.5 rounded">{{ r.fingerprint }}</span>
+        </td>
+        <td class="px-5 py-3 text-xs text-zinc-400 max-w-xs">
+          {% if r.notes %}{{ r.notes | truncate(80, True, '…') }}{% else %}<span class="text-zinc-600">—</span>{% endif %}
+        </td>
+        <td class="px-5 py-3 text-xs text-zinc-500" title="{{ r.triggered_at.isoformat() if r.triggered_at else '' }}">
+          {{ format_ago(r.triggered_at) if r.triggered_at else '—' }}
+        </td>
+        <td class="px-5 py-3 text-right">
+          <a href="/ui/runs/{{ r.run_id }}" class="text-xs text-indigo-400 hover:text-indigo-300 font-medium">View →</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endif %}
+{% endblock %}

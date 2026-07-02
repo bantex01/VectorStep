@@ -1,5 +1,6 @@
 import asyncio
 import glob
+import hashlib
 import json
 import logging
 import os
@@ -15,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from .db.database import get_session_factory
-from .db.models import PipelineRun, PipelineStep
+from .db.models import PipelineRun, PipelineStep, RunFeedback
 from .gateway import gateway_call_safe
 from .utils import utc_now
 from . import run_events
@@ -233,6 +234,29 @@ def _to_json(obj, indent=None) -> str:
     return json.dumps(obj, indent=indent, ensure_ascii=False)
 
 
+def _config_fingerprint(steps: list) -> str:
+    """12-char SHA-256 of the ordered (step_name, agent, model) sequence for a run."""
+    key = tuple(
+        (s.step_name, s.agent or "", s.model or "")
+        for s in sorted(steps, key=lambda x: x.step_index)
+    )
+    return hashlib.sha256(str(key).encode()).hexdigest()[:12]
+
+
+def _config_description(steps: list) -> dict:
+    """Human-readable summary of the config for display in the feedback breakdown."""
+    sorted_steps = sorted(steps, key=lambda s: s.step_index)
+    step_names = [s.step_name for s in sorted_steps if "/" not in s.step_name]
+    models = sorted({s.model for s in sorted_steps if s.model})
+    return {"steps": step_names, "models": models}
+
+
+_OUTCOME_CLASSES = {
+    "correct":   "bg-green-950 text-green-400 ring-green-800",
+    "partial":   "bg-amber-950 text-amber-400 ring-amber-800",
+    "incorrect": "bg-red-950 text-red-400 ring-red-800",
+}
+
 templates.env.filters["to_yaml"] = _to_yaml
 templates.env.filters["tojson"] = _to_json
 templates.env.filters["format_number"] = lambda n: f"{int(n):,}"
@@ -243,6 +267,7 @@ templates.env.globals.update({
     "format_seconds": _format_seconds,
     "format_ago": _format_ago,
     "source_label": _source_label,
+    "outcome_classes": lambda o: _OUTCOME_CLASSES.get(o or "", "bg-zinc-800 text-zinc-400 ring-zinc-600"),
 })
 
 
@@ -505,6 +530,11 @@ async def ui_run_detail(request: Request, run_id: str):
                         "trace": trace,
                     })
 
+    feedback = None
+    async with sf() as session:
+        result = await session.execute(select(RunFeedback).where(RunFeedback.run_id == run_id))
+        feedback = result.scalar_one_or_none()
+
     return templates.TemplateResponse(request, "run_detail.html", {
         "run": run,
         "display_items": display_items,
@@ -515,6 +545,7 @@ async def ui_run_detail(request: Request, run_id: str):
         "run_log": run_log,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
+        "feedback": feedback,
         "active_page": "runs",
     })
 
@@ -687,6 +718,12 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         tokens_by_model = rows.all()
 
+        q = select(RunFeedback.outcome, func.count().label("n")).group_by(RunFeedback.outcome)
+        if cutoff:
+            q = q.where(RunFeedback.submitted_at >= cutoff)
+        rows = await session.execute(q)
+        feedback_by_outcome: dict[str, int] = dict(rows.all())
+
         # Raw rows for timeseries bucketing — one consolidated fetch per level.
         q = select(PipelineRun.triggered_at, PipelineRun.status, PipelineRun.team, PipelineRun.pipeline_name)
         if cutoff:
@@ -818,6 +855,9 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         **ts_kw,
     )
 
+    feedback_total = sum(feedback_by_outcome.values())
+    feedback_correct = feedback_by_outcome.get("correct", 0)
+
     return templates.TemplateResponse(request, "insights_overview.html", {
         "time_range": time_range,
         "range_label": range_label,
@@ -827,6 +867,9 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
         "team_count": team_count,
+        "feedback_total": feedback_total,
+        "feedback_correct": feedback_correct,
+        "feedback_by_outcome": feedback_by_outcome,
         "status_chart": status_chart, "status_ts": status_ts,
         "team_chart": team_chart, "team_ts": team_ts,
         "pipeline_chart": pipeline_chart, "pipeline_ts": pipeline_ts,
@@ -1180,12 +1223,117 @@ async def ui_pipeline_detail(request: Request, name: str):
         )
         status_counts = dict(rows.all())
 
+        rows = await session.execute(
+            select(RunFeedback.outcome, func.count().label("n"))
+            .where(RunFeedback.pipeline_name == name)
+            .group_by(RunFeedback.outcome)
+        )
+        feedback_counts = dict(rows.all())
+
+    feedback_total = sum(feedback_counts.values())
+
     return templates.TemplateResponse(request, "pipeline_detail.html", {
         "pipeline": pipeline,
         "raw_yaml": raw_yaml,
         "recent_runs": recent_runs,
         "status_counts": status_counts,
         "total_runs": sum(status_counts.values()),
+        "feedback_counts": feedback_counts,
+        "feedback_total": feedback_total,
+        "active_page": "pipelines",
+    })
+
+
+@router.get("/pipelines/{name}/feedback", response_class=HTMLResponse)
+async def ui_pipeline_feedback(request: Request, name: str):
+    pipelines = getattr(request.app.state, "pipelines", [])
+    pipeline = next((p for p in pipelines if p.name == name), None)
+    if not pipeline:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    sf = get_session_factory()
+    async with sf() as session:
+        rows = await session.execute(
+            select(RunFeedback, PipelineRun.triggered_at, PipelineRun.status)
+            .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
+            .where(RunFeedback.pipeline_name == name)
+            .order_by(RunFeedback.submitted_at.desc())
+        )
+        feedback_rows = rows.all()
+
+        run_ids = [fb.run_id for fb, _, _ in feedback_rows]
+        steps_by_run: dict[str, list] = defaultdict(list)
+        if run_ids:
+            step_rows = await session.execute(
+                select(PipelineStep)
+                .where(PipelineStep.run_id.in_(run_ids))
+                .order_by(PipelineStep.step_index)
+            )
+            for step in step_rows.scalars().all():
+                steps_by_run[step.run_id].append(step)
+
+    # Build per-run records annotated with config fingerprint
+    marked_runs = []
+    for fb, triggered_at, run_status in feedback_rows:
+        steps = steps_by_run.get(fb.run_id, [])
+        fp = _config_fingerprint(steps) if steps else "unknown"
+        desc = _config_description(steps) if steps else {"steps": [], "models": []}
+        marked_runs.append({
+            "run_id": fb.run_id,
+            "outcome": fb.outcome,
+            "notes": fb.notes,
+            "submitted_at": fb.submitted_at,
+            "triggered_at": triggered_at,
+            "run_status": run_status,
+            "fingerprint": fp,
+            "config": desc,
+        })
+
+    # Group by config fingerprint
+    config_groups: dict[str, dict] = {}
+    for r in marked_runs:
+        fp = r["fingerprint"]
+        if fp not in config_groups:
+            config_groups[fp] = {
+                "fingerprint": fp,
+                "config": r["config"],
+                "runs": [],
+                "correct": 0, "partial": 0, "incorrect": 0,
+                "first_seen": r["triggered_at"],
+                "last_seen": r["triggered_at"],
+            }
+        g = config_groups[fp]
+        g["runs"].append(r)
+        g[r["outcome"]] = g.get(r["outcome"], 0) + 1
+        if r["triggered_at"] and (g["first_seen"] is None or r["triggered_at"] < g["first_seen"]):
+            g["first_seen"] = r["triggered_at"]
+        if r["triggered_at"] and (g["last_seen"] is None or r["triggered_at"] > g["last_seen"]):
+            g["last_seen"] = r["triggered_at"]
+
+    # Sort groups: most recently active first
+    sorted_groups = sorted(
+        config_groups.values(),
+        key=lambda g: g["last_seen"] or datetime.min,
+        reverse=True,
+    )
+    for g in sorted_groups:
+        total = g["correct"] + g["partial"] + g["incorrect"]
+        g["total"] = total
+        g["correct_pct"] = round(g["correct"] / total * 100) if total else 0
+
+    total_marked = len(marked_runs)
+    total_correct = sum(1 for r in marked_runs if r["outcome"] == "correct")
+    total_partial = sum(1 for r in marked_runs if r["outcome"] == "partial")
+    total_incorrect = sum(1 for r in marked_runs if r["outcome"] == "incorrect")
+
+    return templates.TemplateResponse(request, "pipeline_feedback.html", {
+        "pipeline": pipeline,
+        "marked_runs": marked_runs,
+        "config_groups": sorted_groups,
+        "total_marked": total_marked,
+        "total_correct": total_correct,
+        "total_partial": total_partial,
+        "total_incorrect": total_incorrect,
         "active_page": "pipelines",
     })
 

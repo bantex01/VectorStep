@@ -106,6 +106,52 @@
   {% endif %}
 </div>
 
+<!-- Accuracy feedback summary -->
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6 px-5 py-4">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-sm font-semibold text-zinc-200">Accuracy feedback</h2>
+    <a href="/ui/pipelines/{{ pipeline.name }}/feedback" class="text-xs text-indigo-400 hover:text-indigo-300">View breakdown →</a>
+  </div>
+  {% if feedback_total %}
+    {% set correct_n = feedback_counts.get('correct', 0) %}
+    {% set partial_n = feedback_counts.get('partial', 0) %}
+    {% set incorrect_n = feedback_counts.get('incorrect', 0) %}
+    {% set correct_pct = (correct_n / feedback_total * 100)|round|int %}
+    {% set partial_pct = (partial_n / feedback_total * 100)|round|int %}
+    {% set incorrect_pct = (incorrect_n / feedback_total * 100)|round|int %}
+    <div class="flex items-center gap-4">
+      <div class="flex-1 flex h-2 rounded-full overflow-hidden bg-zinc-800">
+        {% if correct_pct %}<div class="bg-green-500" style="width:{{ correct_pct }}%"></div>{% endif %}
+        {% if partial_pct %}<div class="bg-amber-400" style="width:{{ partial_pct }}%"></div>{% endif %}
+        {% if incorrect_pct %}<div class="bg-red-500" style="width:{{ incorrect_pct }}%"></div>{% endif %}
+      </div>
+      <div class="flex items-center gap-4 text-xs shrink-0">
+        {% if correct_n %}
+        <span class="flex items-center gap-1 text-green-400">
+          <span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>
+          {{ correct_n }} correct
+        </span>
+        {% endif %}
+        {% if partial_n %}
+        <span class="flex items-center gap-1 text-amber-400">
+          <span class="w-2 h-2 rounded-full bg-amber-400 inline-block"></span>
+          {{ partial_n }} partial
+        </span>
+        {% endif %}
+        {% if incorrect_n %}
+        <span class="flex items-center gap-1 text-red-400">
+          <span class="w-2 h-2 rounded-full bg-red-500 inline-block"></span>
+          {{ incorrect_n }} incorrect
+        </span>
+        {% endif %}
+        <span class="text-zinc-500">of {{ feedback_total }} marked</span>
+      </div>
+    </div>
+  {% else %}
+    <p class="text-sm text-zinc-500">No feedback submitted yet for this pipeline.</p>
+  {% endif %}
+</div>
+
 <!-- Recent runs -->
 {% if recent_runs %}
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6">
