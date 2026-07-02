@@ -15,6 +15,20 @@
   </button>
 </div>
 <div id="reload-msg" class="hidden mt-3 px-4 py-2.5 rounded-md text-sm font-medium"></div>
+{% if all_tags %}
+<form method="get" action="/ui/pipelines" class="flex items-center gap-2 mt-3">
+  <select name="tag" onchange="this.form.submit()"
+          class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    <option value="">All tags</option>
+    {% for t in all_tags %}
+      <option value="{{ t }}" {% if selected_tag == t %}selected{% endif %}>{{ t }}</option>
+    {% endfor %}
+  </select>
+  {% if selected_tag %}
+    <a href="/ui/pipelines" class="text-sm text-zinc-500 hover:text-zinc-300">Clear</a>
+  {% endif %}
+</form>
+{% endif %}
 <script>
 async function reloadPipelines() {
   const btn = document.getElementById('reload-btn');
@@ -67,6 +81,14 @@ async function reloadPipelines() {
         </div>
         {% if p.description %}
           <p class="text-sm text-zinc-400">{{ p.description }}</p>
+        {% endif %}
+        {% if p.tags %}
+          <div class="flex items-center gap-1.5 flex-wrap mt-2">
+            {% for t in p.tags %}
+              <span onclick="event.preventDefault(); event.stopPropagation(); window.location.href='/ui/pipelines?tag=' + encodeURIComponent({{ t | tojson }})"
+                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-700 hover:text-zinc-200 transition-colors cursor-pointer">{{ t }}</span>
+            {% endfor %}
+          </div>
         {% endif %}
       </div>
 
@@ -121,7 +143,11 @@ async function reloadPipelines() {
 </div>
 {% else %}
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 px-5 py-16 text-center text-sm text-zinc-500">
-    No pipelines loaded. Add YAML files to the pipelines directory and reload.
+    {% if selected_tag %}
+      No pipelines tagged "{{ selected_tag }}". <a href="/ui/pipelines" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">Clear filter</a>
+    {% else %}
+      No pipelines loaded. Add YAML files to the pipelines directory and reload.
+    {% endif %}
   </div>
 {% endif %}
 

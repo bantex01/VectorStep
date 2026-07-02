@@ -1,0 +1,35 @@
+# Demonstrates pipeline- and step-level tags — see README §4 (pipeline schema)
+# and §4a (step library). Tags are declared directly in YAML only; there is no
+# UI edit path, to keep pipeline config fully GitOps-friendly (source of truth
+# stays in git, not the database). Once loaded, tags are viewable and
+# filterable on /ui/pipelines and /ui/steps (?tag=<value>).
+name: tagged-example
+description: Minimal pipeline showing pipeline-level tags and a tagged library step
+tags:
+  - demo
+  - monitoring
+version: 1
+
+trigger:
+  match:
+    test: tagged-example
+
+context_template:
+  include:
+    - summary
+    - labels.service
+    - labels.environment
+
+steps:
+  # Pulls in samples/steps/service-health-check.yaml, which carries its own
+  # tags (health-check, monitoring, demo) — visible on /ui/steps regardless
+  # of which pipelines reference it.
+  - use: service-health-check
+
+notifications:
+  escalate:
+    - channel: log
+      template: |
+        ESCALATED: {{pipeline_name}} — {{step_summary}}
+      config:
+        level: warning

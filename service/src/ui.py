@@ -610,8 +610,10 @@ async def ui_run_stream(request: Request, run_id: str):
 
 
 @router.get("/pipelines", response_class=HTMLResponse)
-async def ui_pipelines(request: Request):
-    pipelines = getattr(request.app.state, "pipelines", [])
+async def ui_pipelines(request: Request, tag: str | None = None):
+    all_pipelines = getattr(request.app.state, "pipelines", [])
+    all_tags = sorted({t for p in all_pipelines for t in p.tags})
+    pipelines = [p for p in all_pipelines if tag in p.tags] if tag else all_pipelines
     sf = get_session_factory()
 
     async with sf() as session:
@@ -647,6 +649,8 @@ async def ui_pipelines(request: Request):
         "last_status": last_status,
         "run_counts": run_counts,
         "feedback_by_pipeline": feedback_by_pipeline,
+        "all_tags": all_tags,
+        "selected_tag": tag or "",
         "active_page": "pipelines",
     })
 
@@ -1458,16 +1462,20 @@ def _compute_step_usage(pipeline_dir: str, library: dict) -> dict[str, list[str]
 
 
 @router.get("/steps", response_class=HTMLResponse)
-async def ui_steps(request: Request):
+async def ui_steps(request: Request, tag: str | None = None):
     step_library: dict = getattr(request.app.state, "step_library", {})
     pipeline_dir: str = getattr(request.app.state, "pipeline_dir", "./pipelines")
 
     step_usage = _compute_step_usage(pipeline_dir, step_library)
-    steps = sorted(step_library.values(), key=lambda s: s.get("name", ""))
+    all_steps = sorted(step_library.values(), key=lambda s: s.get("name", ""))
+    all_tags = sorted({t for s in all_steps for t in s.get("tags") or []})
+    steps = [s for s in all_steps if tag in (s.get("tags") or [])] if tag else all_steps
 
     return templates.TemplateResponse(request, "steps.html", {
         "steps": steps,
         "step_usage": step_usage,
+        "all_tags": all_tags,
+        "selected_tag": tag or "",
         "active_page": "steps",
     })
 

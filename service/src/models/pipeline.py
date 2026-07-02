@@ -203,6 +203,7 @@ class LibraryStepConfig(BaseModel):
 class PipelineConfig(BaseModel):
     name: str
     description: str = ""
+    tags: list[str] = Field(default_factory=list)
     version: int = 1
     trigger: TriggerConfig
     vars: dict[str, str] = Field(default_factory=dict)

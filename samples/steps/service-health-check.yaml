@@ -1,0 +1,38 @@
+name: service-health-check
+description: >
+  Quick RED-metrics health check for a single service — used as a lightweight
+  first step before deciding whether deeper investigation is warranted.
+tags:
+  - health-check
+  - monitoring
+  - demo
+
+executor: gateway
+executor_config:
+  agent: sre-triage
+  session_key: "agent:sre-triage:{{pipeline_run_id}}:{{current_step}}"
+
+confidence_threshold: 0.60
+on_low_confidence: escalate
+on_abort: notify
+timeout_seconds: 120
+
+prompt_template: |
+  Quick health check for {{labels.service}} in {{labels.environment}}.
+
+  Alert summary: {{summary}}
+
+  Check current error rate, latency, and traffic (RED metrics). Set confidence
+  based on how clear the signal is — not on whether the service looks healthy.
+
+  Return JSON only, no other text:
+  {
+    "confidence": 0.0,
+    "summary": "One sentence: current health state",
+    "next_step_context": "Focused brief for the next step, if any",
+    "reasoning": {
+      "supports": "Evidence the service is behaving normally",
+      "contradicts": "Evidence of a real problem",
+      "assumptions": "What you assumed in the absence of data"
+    }
+  }

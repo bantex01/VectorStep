@@ -41,13 +41,15 @@ samples/                      # Copy-and-adapt templates for new deployments (gi
 │   ├── sub-pipeline-example.yaml
 │   ├── generic-webhook-new-order.yaml
 │   ├── human-approval-test.yaml
-│   └── otel-triage-verified.yaml
+│   ├── otel-triage-verified.yaml
+│   └── tagged-example.yaml
 └── steps/                      # Step definition templates — copy to service/steps/
     ├── first-line-triage.yaml
     ├── sre-investigation.yaml
     ├── sre-investigation-verified.yaml
     ├── order-intake.yaml
-    └── customer-comms.yaml
+    ├── customer-comms.yaml
+    └── service-health-check.yaml
 
 service/
 ├── agents/                     # Agent SOUL.md drafts (copy into executor workspace)
@@ -346,6 +348,7 @@ The `steps` list is heterogeneous — each entry is a sequential step (has a `na
 ```yaml
 name: alert-triage-critical
 description: Full triage pipeline for critical alerts
+tags: [critical, sre, grafana]  # optional — free-form labels, searchable on /ui/pipelines
 version: 1
 
 trigger:
@@ -1583,10 +1586,10 @@ The web UI is served under `/ui` and provides the following pages:
 | Dashboard | `/ui/` | 24h run counts by status, success rate, pipeline activity, recent runs |
 | Runs | `/ui/runs` | Filterable run history with status and pipeline filters |
 | Run detail | `/ui/runs/{id}` | Full step breakdown with confidence bars, parsed output, verifier results, collapsible agent trace (gateway steps), collapsible run log, live tail for in-progress runs, and **accuracy feedback widget** |
-| Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status and run counts |
-| Pipeline detail | `/ui/pipelines/{name}` | Config summary, accuracy feedback summary bar, recent runs, YAML viewer, and **Run now** button |
+| Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status, run counts, and a **tag filter** (`?tag=`) |
+| Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, accuracy feedback summary bar, recent runs, YAML viewer, and **Run now** button |
 | Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) |
-| Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, and copy-ref button |
+| Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, and a **tag filter** (`?tag=`) |
 | Agents | `/ui/agents` | Unified agent library across all executor backends |
 | Schedules | `/ui/schedules` | Active cron schedules with next-run times |
 | Insights — Overview | `/ui/insights` | Run/failure/token/accuracy totals, runs by team, and MCP tool-use counts, over a selectable time range (24h/7d/30d/all-time) |
