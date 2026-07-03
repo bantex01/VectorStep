@@ -312,7 +312,7 @@ async def ui_dashboard(request: Request):
         rows = await session.execute(
             select(PipelineRun)
             .order_by(PipelineRun.triggered_at.desc())
-            .limit(15)
+            .limit(10)
         )
         recent_runs = rows.scalars().all()
 
@@ -321,6 +321,49 @@ async def ui_dashboard(request: Request):
             .where(PipelineRun.triggered_at >= cutoff_24h)
         )
         runs_ts_raw = rows.all()
+
+        rows = await session.execute(
+            select(RunFeedback.pipeline_name, RunFeedback.outcome, func.count().label("n"))
+            .group_by(RunFeedback.pipeline_name, RunFeedback.outcome)
+        )
+        feedback_agg: dict[str, dict[str, int]] = {}
+        for name, outcome, n in rows.all():
+            d = feedback_agg.setdefault(name, {"correct": 0, "partial": 0, "incorrect": 0, "total": 0})
+            d[outcome] = n
+            d["total"] += n
+
+        rows = await session.execute(
+            select(PipelineStep.executor, PipelineStep.agent, func.count().label("n"))
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineRun.triggered_at >= cutoff_7d, PipelineStep.agent.is_not(None))
+            .group_by(PipelineStep.executor, PipelineStep.agent)
+            .order_by(func.count().desc())
+            .limit(5)
+        )
+        top_agents = rows.all()
+
+        rows = await session.execute(
+            select(PipelineStep.agent_trace)
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineRun.triggered_at >= cutoff_7d, PipelineStep.agent_trace.is_not(None))
+        )
+        tool_call_counts: Counter = Counter()
+        for (trace_json,) in rows.all():
+            try:
+                events = json.loads(trace_json)
+            except (TypeError, ValueError):
+                continue
+            for event in events or []:
+                if isinstance(event, dict) and event.get("type") == "tool_call" and event.get("name"):
+                    tool_call_counts[event["name"]] += 1
+        top_tools = tool_call_counts.most_common(5)
+
+    accuracy_list = [
+        {"pipeline": name, "pct": round(d["correct"] / d["total"] * 100), "total": d["total"]}
+        for name, d in feedback_agg.items() if d["total"] > 0
+    ]
+    most_accurate = sorted(accuracy_list, key=lambda x: (-x["pct"], -x["total"]))[:5]
+    least_accurate = sorted(accuracy_list, key=lambda x: (x["pct"], -x["total"]))[:5]
 
     total_24h = sum(counts_24h.values())
     non_terminal_24h = counts_24h.get("running", 0) + counts_24h.get("interrupted", 0)
@@ -368,6 +411,10 @@ async def ui_dashboard(request: Request):
         "scheduled_count": sum(1 for p in pipelines if p.schedule),
         "status_donut": status_donut,
         "runs_ts": runs_ts,
+        "most_accurate": most_accurate,
+        "least_accurate": least_accurate,
+        "top_agents": top_agents,
+        "top_tools": top_tools,
         "active_page": "dashboard",
     })
 
