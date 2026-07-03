@@ -290,7 +290,6 @@ function runPanel(pipelineName) {
       this.runError = '';
 
       let body = {
-        pipeline: pipelineName,
         source: 'ui',
         summary: this.summary.trim() || 'Manual trigger from UI',
       };
@@ -298,8 +297,7 @@ function runPanel(pipelineName) {
       if (this.dataJson.trim()) {
         try {
           const parsed = JSON.parse(this.dataJson);
-          // Merge pasted payload as the top-level body; always force the correct pipeline
-          body = { ...body, ...parsed, pipeline: pipelineName };
+          body = { ...body, ...parsed };
         } catch (e) {
           this.jsonError = 'Invalid JSON: ' + e.message;
           return;
@@ -308,7 +306,9 @@ function runPanel(pipelineName) {
 
       this.running = true;
       try {
-        const resp = await fetch('/webhook?source=generic', {
+        // Internal endpoint, not the public /webhook — doesn't require the
+        // Bearer token that auth.teams enforces on external ingestion.
+        const resp = await fetch(`/pipelines/${encodeURIComponent(pipelineName)}/run`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),

@@ -1473,6 +1473,14 @@ GET /runs/{run_id}/feedback
 POST /runs/{run_id}/rerun
 # body: {"from_step": "step-name"}  — see §Re-run from a step
 
+# Manually trigger a pipeline by name — powers the UI's Run now button.
+# Not behind webhook Bearer auth (internal/management action, same trust
+# boundary as /reload — not the public ingestion path auth.teams gates).
+# Runs triggered here are unattributed (team=None).
+POST /pipelines/{name}/run
+# body: same shape as a generic webhook payload (see §2a), pipeline forced from the path
+# → {"status": "accepted", "run_id": "<uuid>", ...}
+
 # Server-Sent Events stream for live run tailing (see §UI / Live tail)
 GET /ui/runs/{run_id}/stream
 
@@ -1598,7 +1606,7 @@ The web UI is served under `/ui` and provides the following pages:
 
 ### Running a pipeline manually
 
-Every pipeline detail page has a **Run now** button. This opens a modal where you can optionally set a summary and paste a full generic webhook payload (JSON). On submit it POSTs to `POST /webhook?source=generic` with `pipeline` forced to the current pipeline name. A banner appears with a link to the new run.
+Every pipeline detail page has a **Run now** button. This opens a modal where you can optionally set a summary and paste a full generic webhook payload (JSON). On submit it POSTs to `POST /pipelines/{name}/run` — a separate internal endpoint from the public `/webhook`, so it keeps working regardless of `auth.teams` configuration (no Bearer token required, and the run is unattributed). A banner appears with a link to the new run.
 
 ### Run log
 

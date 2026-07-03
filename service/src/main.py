@@ -563,6 +563,40 @@ async def webhook(
         normalised.source, normalised.pipeline, normalised.severity,
     )
 
+    return await _trigger_run(normalised)
+
+
+@app.post("/pipelines/{name}/run")
+async def run_pipeline_now(name: str, request: Request):
+    """Manually trigger a pipeline run — powers the 'Run now' button on the
+    pipeline detail page.
+
+    Deliberately not behind webhook Bearer auth: it's an internal/management
+    action on the same trust boundary as /reload and /runs/{id}/rerun, not the
+    public ingestion path that auth.teams is meant to gate. Runs triggered
+    here are unattributed (team=None) — there's no login/session concept in
+    the UI to derive a team from, unlike the webhook's Bearer-token
+    attribution (see README §3b).
+    """
+    payload = await request.json()
+    payload = {**payload, "pipeline": name}
+
+    parser_class = PARSERS["generic"]
+    try:
+        normalised = await parser_class().parse(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    logger.info("Manual run triggered from UI: pipeline=%s", normalised.pipeline)
+
+    return await _trigger_run(normalised)
+
+
+async def _trigger_run(normalised: NormalisedContext) -> JSONResponse:
+    """Resolve a pipeline for a normalised context and either return a
+    dedup/overload response or kick off a new run. Shared by the public
+    /webhook endpoint and the internal 'Run now' UI trigger.
+    """
     pipeline = resolve_pipeline(normalised, _pipelines)
     if not pipeline:
         raise HTTPException(
@@ -577,7 +611,7 @@ async def webhook(
             duplicate = await _find_duplicate_run(pipeline.name, normalised.fingerprint, window_seconds)
             if duplicate:
                 logger.info(
-                    "Webhook deduplicated: pipeline=%s fingerprint=%s matches run=%s (status=%s)",
+                    "Run deduplicated: pipeline=%s fingerprint=%s matches run=%s (status=%s)",
                     pipeline.name, normalised.fingerprint, duplicate.id, duplicate.status,
                 )
                 return JSONResponse(
