@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as macros %}
 {% block title %}Runs — P-Ork{% endblock %}
 {% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Runs</h1>{% endblock %}
 {% block content %}
@@ -41,6 +42,7 @@
         <th class="text-left px-5 py-3 font-medium">Source</th>
         <th class="text-left px-5 py-3 font-medium">Triggered</th>
         <th class="text-left px-5 py-3 font-medium">Duration</th>
+        <th class="text-left px-5 py-3 font-medium">Accuracy</th>
         <th class="px-5 py-3"></th>
       </tr>
     </thead>
@@ -69,6 +71,7 @@
         <td class="px-5 py-3 text-sm text-zinc-400">
           {{ format_duration(run.triggered_at, run.completed_at) }}
         </td>
+        <td class="px-5 py-3">{{ macros.feedback_badge(feedback_by_run.get(run.id)) }}</td>
         <td class="px-5 py-3 text-right">
           <a href="/ui/runs/{{ run.id }}" class="text-xs text-indigo-400 hover:text-indigo-300 font-medium">View →</a>
         </td>

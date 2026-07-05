@@ -299,6 +299,20 @@ _OUTCOME_CLASSES = {
     "incorrect": "bg-red-950 text-red-400 ring-red-800",
 }
 
+
+async def _feedback_by_run_id(session, run_ids: list[str]) -> dict[str, str]:
+    """outcome for each run_id that has feedback — absent key means unmarked.
+
+    Used by every template that renders a runs table (dashboard, /runs, pipeline
+    detail) to show the feedback_badge macro without a per-row query.
+    """
+    if not run_ids:
+        return {}
+    rows = await session.execute(
+        select(RunFeedback.run_id, RunFeedback.outcome).where(RunFeedback.run_id.in_(run_ids))
+    )
+    return dict(rows.all())
+
 templates.env.filters["to_yaml"] = _to_yaml
 templates.env.filters["tojson"] = _to_json
 templates.env.filters["format_number"] = lambda n: f"{int(n):,}"
@@ -380,6 +394,7 @@ async def ui_dashboard(request: Request):
             .limit(10)
         )
         recent_runs = rows.scalars().all()
+        feedback_by_run = await _feedback_by_run_id(session, [r.id for r in recent_runs])
 
         rows = await session.execute(
             select(PipelineRun.triggered_at, PipelineRun.status)
@@ -489,6 +504,7 @@ async def ui_dashboard(request: Request):
         "pipeline_activity": pipeline_activity,
         "source_counts": source_counts,
         "recent_runs": recent_runs,
+        "feedback_by_run": feedback_by_run,
         "pipeline_count": len(pipelines),
         "scheduled_count": sum(1 for p in pipelines if p.schedule),
         "team_count": _team_count,
@@ -522,6 +538,7 @@ async def ui_runs(
             q = q.where(PipelineRun.team == team)
         rows = await session.execute(q.limit(limit).offset(offset))
         runs = rows.scalars().all()
+        feedback_by_run = await _feedback_by_run_id(session, [r.id for r in runs])
 
         rows = await session.execute(
             select(PipelineRun.pipeline_name).distinct().order_by(PipelineRun.pipeline_name)
@@ -535,6 +552,7 @@ async def ui_runs(
 
     return templates.TemplateResponse(request, "runs.html", {
         "runs": runs,
+        "feedback_by_run": feedback_by_run,
         "pipeline_names": pipeline_names,
         "team_names": team_names,
         "selected_status": status or "",
@@ -1403,6 +1421,7 @@ async def ui_pipeline_detail(request: Request, name: str):
             .limit(10)
         )
         recent_runs = rows.scalars().all()
+        feedback_by_run = await _feedback_by_run_id(session, [r.id for r in recent_runs])
 
         rows = await session.execute(
             select(PipelineRun.status, func.count().label("n"))
@@ -1424,6 +1443,7 @@ async def ui_pipeline_detail(request: Request, name: str):
         "pipeline": pipeline,
         "raw_yaml": raw_yaml,
         "recent_runs": recent_runs,
+        "feedback_by_run": feedback_by_run,
         "status_counts": status_counts,
         "total_runs": sum(status_counts.values()),
         "feedback_counts": feedback_counts,
