@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import uuid
 
 import httpx
@@ -108,6 +109,38 @@ class TelegramApprovalChannel:
             response.raise_for_status()
 
 
+_HTML_TAG_CONVERSIONS = [
+    (re.compile(r"<b>(.*?)</b>", re.IGNORECASE | re.DOTALL), r"*\1*"),
+    (re.compile(r"<strong>(.*?)</strong>", re.IGNORECASE | re.DOTALL), r"*\1*"),
+    (re.compile(r"<i>(.*?)</i>", re.IGNORECASE | re.DOTALL), r"_\1_"),
+    (re.compile(r"<em>(.*?)</em>", re.IGNORECASE | re.DOTALL), r"_\1_"),
+    (re.compile(r"<code>(.*?)</code>", re.IGNORECASE | re.DOTALL), r"`\1`"),
+    (re.compile(r'<a href="([^"]*)">(.*?)</a>', re.IGNORECASE | re.DOTALL), r"<\1|\2>"),
+]
+# Matches only genuine HTML tag shapes (<span>, </div>, <foo bar="baz">) — deliberately
+# does NOT match Slack's own <url|text> / <url> link markup, which the <a href> conversion
+# above produces, since a bare URL scheme like "https:" never continues into a valid
+# tag-name-then-attributes-then-`>` shape.
+_HTML_TAG_STRIP_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^<>]*)?>")
+
+
+def _html_to_slack_mrkdwn(text: str) -> str:
+    """Best-effort conversion of the Telegram HTML parse-mode tags used in
+    prompt_templates (<b>, <i>, <code>, <a href>) into Slack mrkdwn syntax.
+
+    Pipeline authors write one prompt_template per step, not one per channel — it's
+    written with Telegram's HTML tags in mind since that's the original/default
+    channel. Slack has no HTML parse mode, so without this the tags would show up
+    literally (e.g. "<b>Approve?</b>") instead of rendering. Any tag not in the
+    conversion table above is stripped rather than left dangling. The <a href>
+    conversion must run before the generic strip below, since it produces Slack's
+    own <url|text> markup, which must survive the strip untouched.
+    """
+    for pattern, replacement in _HTML_TAG_CONVERSIONS:
+        text = pattern.sub(replacement, text)
+    return _HTML_TAG_STRIP_RE.sub("", text)
+
+
 class SlackApprovalChannel:
     """Sends an interactive Approve/Reject message via the Slack Web API.
 
@@ -120,6 +153,7 @@ class SlackApprovalChannel:
         self._channel_id = channel_id
 
     async def send(self, text: str, token: str) -> None:
+        text = _html_to_slack_mrkdwn(text)
         payload = {
             "channel": self._channel_id,
             "text": text,

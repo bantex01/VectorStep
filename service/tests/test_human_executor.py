@@ -111,6 +111,37 @@ async def test_slack_channel_posts_expected_payload():
     assert actions[1]["value"] == "reject:tok-123"
 
 
+async def test_slack_channel_converts_telegram_html_to_mrkdwn():
+    channel = human.SlackApprovalChannel(bot_token="xoxb-test", channel_id="C123")
+    sent = {}
+
+    async def fake_post(self, url, json=None, headers=None):
+        sent["json"] = json
+        return _mock_response(json_body={"ok": True})
+
+    html = (
+        "<b>P-Ork approval request</b>\n\n"
+        "Pipeline: <code>approval-test</code>\n"
+        'See <a href="https://example.com">the run</a>.'
+    )
+    with patch.object(httpx.AsyncClient, "post", new=fake_post):
+        await channel.send(html, "tok-1")
+
+    text = sent["json"]["text"]
+    assert text == (
+        "*P-Ork approval request*\n\n"
+        "Pipeline: `approval-test`\n"
+        "See <https://example.com|the run>."
+    )
+    # blocks[0] is the section using the same converted text
+    assert sent["json"]["blocks"][0]["text"]["text"] == text
+
+
+def test_html_to_slack_mrkdwn_strips_unknown_tags():
+    result = human._html_to_slack_mrkdwn("<b>bold</b> <span>plain</span> <i>italic</i>")
+    assert result == "*bold* plain _italic_"
+
+
 async def test_slack_channel_raises_on_not_ok():
     channel = human.SlackApprovalChannel(bot_token="xoxb-test", channel_id="C123")
 
