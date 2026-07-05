@@ -419,6 +419,7 @@ async def lifespan(app: FastAPI):
     configure_ui(
         openclaw_ws_url=openclaw_url,
         pork_gateway_base=pork_gateway_rest,
+        team_count=len(teams_cfg),
     )
     logger.info(
         "UI agent sources — openclaw: %s, pork-gateway: %s",

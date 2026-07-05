@@ -347,6 +347,27 @@ async def ui_dashboard(request: Request):
         pipeline_activity = rows.all()
 
         rows = await session.execute(
+            select(PipelineRun.pipeline_name, PipelineRun.team, func.count().label("n"))
+            .where(PipelineRun.triggered_at >= cutoff_7d)
+            .group_by(PipelineRun.pipeline_name, PipelineRun.team)
+        )
+        teams_by_pipeline: dict[str, list[tuple[str, int]]] = defaultdict(list)
+        for name, team, n in rows.all():
+            teams_by_pipeline[name].append((team or "unattributed", n))
+
+        rows = await session.execute(
+            select(
+                PipelineRun.pipeline_name,
+                func.coalesce(func.sum(PipelineStep.input_tokens), 0)
+                + func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineRun.triggered_at >= cutoff_7d, PipelineStep.input_tokens.is_not(None))
+            .group_by(PipelineRun.pipeline_name)
+        )
+        tokens_by_pipeline: dict[str, int] = dict(rows.all())
+
+        rows = await session.execute(
             select(PipelineRun.source, func.count().label("n"))
             .where(PipelineRun.triggered_at >= cutoff_24h)
             .group_by(PipelineRun.source)
@@ -409,6 +430,23 @@ async def ui_dashboard(request: Request):
     most_accurate = sorted(accuracy_list, key=lambda x: (-x["pct"], -x["total"]))[:5]
     least_accurate = sorted(accuracy_list, key=lambda x: (x["pct"], -x["total"]))[:5]
 
+    # Enrich pipeline_activity (7d run counts) with per-pipeline team breakdown (7d),
+    # accuracy (all-time, same data as most/least accurate above), and tokens (7d).
+    pipeline_activity = [
+        {
+            "name": name,
+            "count": count,
+            "teams": sorted(teams_by_pipeline.get(name, []), key=lambda t: -t[1]),
+            "accuracy": (
+                {"pct": round(feedback_agg[name]["correct"] / feedback_agg[name]["total"] * 100),
+                 "total": feedback_agg[name]["total"]}
+                if feedback_agg.get(name, {}).get("total") else None
+            ),
+            "tokens": tokens_by_pipeline.get(name, 0),
+        }
+        for name, count in pipeline_activity
+    ]
+
     total_24h = sum(counts_24h.values())
     non_terminal_24h = counts_24h.get("running", 0) + counts_24h.get("interrupted", 0)
     terminal_24h = total_24h - non_terminal_24h
@@ -453,6 +491,7 @@ async def ui_dashboard(request: Request):
         "recent_runs": recent_runs,
         "pipeline_count": len(pipelines),
         "scheduled_count": sum(1 for p in pipelines if p.schedule),
+        "team_count": _team_count,
         "status_donut": status_donut,
         "runs_ts": runs_ts,
         "most_accurate": most_accurate,
@@ -1582,16 +1621,18 @@ async def ui_steps(request: Request, tag: str | None = None):
 _pork_gateway_base: str = os.environ.get("PORK_GATEWAY_URL", "http://localhost:18780")
 _openclaw_ws_url: str = "ws://127.0.0.1:18789/rpc"
 _openclaw_enabled: bool = True  # set False when executors.openclaw is absent from config
+_team_count: int = 0  # number of teams configured under auth.teams — see README §3b
 
 
-def configure(openclaw_ws_url: str = "", pork_gateway_base: str = "") -> None:
-    """Set agent source URLs from config.yaml values. Call from main.py lifespan."""
-    global _openclaw_ws_url, _pork_gateway_base, _openclaw_enabled
+def configure(openclaw_ws_url: str = "", pork_gateway_base: str = "", team_count: int = 0) -> None:
+    """Set agent source URLs and team count from config.yaml values. Call from main.py lifespan."""
+    global _openclaw_ws_url, _pork_gateway_base, _openclaw_enabled, _team_count
     _openclaw_enabled = bool(openclaw_ws_url)
     if openclaw_ws_url:
         _openclaw_ws_url = openclaw_ws_url
     if pork_gateway_base:
         _pork_gateway_base = pork_gateway_base
+    _team_count = team_count
 
 
 def _first_description_line(content: str | None) -> str | None:

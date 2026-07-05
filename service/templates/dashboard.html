@@ -7,7 +7,7 @@
 {% block content %}
 
 <!-- Stat cards -->
-<div class="grid grid-cols-4 gap-4 mb-8">
+<div class="grid grid-cols-5 gap-4 mb-8">
 
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Runs today</p>
@@ -52,9 +52,15 @@
     <p class="mt-1 text-xs text-zinc-500">{{ scheduled_count }} scheduled</p>
   </div>
 
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Teams</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ team_count }}</p>
+    <p class="mt-1 text-xs text-zinc-500">configured</p>
+  </div>
+
 </div>
 
-<!-- Status breakdown + Pipeline activity -->
+<!-- Status breakdown + Runs timeseries -->
 <div class="grid grid-cols-3 gap-6 mb-6">
 
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
@@ -82,34 +88,70 @@
   </div>
 
   <div class="col-span-2 bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Pipeline activity <span class="text-zinc-500 font-normal">(7 days)</span></h2>
-    {% if pipeline_activity %}
-    <table class="w-full">
-      <tbody class="divide-y divide-zinc-800">
-        {% for name, count in pipeline_activity %}
-        <tr>
-          <td class="py-2 pr-4">
-            <a href="/ui/pipelines/{{ name }}" class="text-sm text-indigo-400 hover:text-indigo-300 font-medium">{{ name }}</a>
-          </td>
-          <td class="py-2 w-32">
-            <div class="flex items-center gap-2">
-              <div class="flex-1 bg-zinc-700 rounded-full h-1.5">
-                {% set max_count = pipeline_activity[0][1] %}
-                <div class="h-1.5 rounded-full bg-indigo-500" style="width: {{ ((count / max_count) * 100)|round|int }}%"></div>
-              </div>
-              <span class="text-xs text-zinc-500 w-6 text-right">{{ count }}</span>
-            </div>
-          </td>
-          <td class="py-2 pl-4 text-right"></td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs <span class="text-zinc-500 font-normal">(24h)</span></h2>
+    {% if runs_ts.datasets %}
+      <div class="h-48"><canvas id="chart-runs-ts"></canvas></div>
     {% else %}
       <p class="text-sm text-zinc-500">No runs in the last 7 days</p>
     {% endif %}
   </div>
 
+</div>
+
+<!-- Pipeline activity -->
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5 mb-6">
+  <h2 class="text-sm font-semibold text-zinc-200 mb-4">Pipeline activity <span class="text-zinc-500 font-normal">(7 days)</span></h2>
+  {% if pipeline_activity %}
+  <table class="w-full">
+    <thead>
+      <tr class="text-xs text-zinc-500 uppercase tracking-wide border-b border-zinc-800">
+        <th class="text-left pb-2 pr-4 font-medium">Pipeline</th>
+        <th class="text-left pb-2 pr-4 font-medium">Runs</th>
+        <th class="text-left pb-2 pr-4 font-medium">By team</th>
+        <th class="text-left pb-2 pr-4 font-medium">Accuracy</th>
+        <th class="text-right pb-2 font-medium">Tokens</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-zinc-800">
+      {% set max_count = pipeline_activity[0].count %}
+      {% for row in pipeline_activity %}
+      <tr>
+        <td class="py-2 pr-4">
+          <a href="/ui/pipelines/{{ row.name }}" class="text-sm text-indigo-400 hover:text-indigo-300 font-medium">{{ row.name }}</a>
+        </td>
+        <td class="py-2 pr-4 w-32">
+          <div class="flex items-center gap-2">
+            <div class="flex-1 bg-zinc-700 rounded-full h-1.5">
+              <div class="h-1.5 rounded-full bg-indigo-500" style="width: {{ ((row.count / max_count) * 100)|round|int }}%"></div>
+            </div>
+            <span class="text-xs text-zinc-500 w-6 text-right">{{ row.count }}</span>
+          </div>
+        </td>
+        <td class="py-2 pr-4">
+          <div class="flex flex-wrap gap-1">
+            {% for team, n in row.teams %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">{{ team }}: {{ n }}</span>
+            {% endfor %}
+          </div>
+        </td>
+        <td class="py-2 pr-4 whitespace-nowrap">
+          {% if row.accuracy %}
+          <span class="text-sm font-semibold {% if row.accuracy.pct >= 80 %}text-green-400{% elif row.accuracy.pct >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">{{ row.accuracy.pct }}%</span>
+          <span class="text-xs text-zinc-500 ml-1">({{ row.accuracy.total }} marked)</span>
+          {% else %}
+          <span class="text-sm text-zinc-600">—</span>
+          {% endif %}
+        </td>
+        <td class="py-2 text-right text-sm text-zinc-400 tabular-nums">
+          {% if row.tokens %}{{ row.tokens | format_number }}{% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="text-sm text-zinc-500">No runs in the last 7 days</p>
+  {% endif %}
 </div>
 
 {% if most_accurate or least_accurate %}
@@ -156,16 +198,6 @@
 
 </div>
 {% endif %}
-
-<!-- Runs timeseries -->
-<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5 mb-8">
-  <h2 class="text-sm font-semibold text-zinc-200 mb-4">Runs <span class="text-zinc-500 font-normal">(24h)</span></h2>
-  {% if runs_ts.datasets %}
-    <div class="h-48"><canvas id="chart-runs-ts"></canvas></div>
-  {% else %}
-    <p class="text-sm text-zinc-500">No runs in the last 7 days</p>
-  {% endif %}
-</div>
 
 <!-- Recent runs -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800">

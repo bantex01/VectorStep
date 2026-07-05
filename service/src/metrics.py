@@ -16,7 +16,8 @@ from prometheus_client.utils import floatToGoString
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .db.models import PipelineRun, PipelineStep
+from .db.models import PipelineRun, PipelineStep, RunFeedback
+from .executors.human import list_pending as _list_pending_approvals
 
 # Bucket upper bounds in seconds — spans a quick webhook call up to the default
 # 1200s step timeout.
@@ -32,6 +33,12 @@ class MetricsData:
     verifier_counts: list[tuple[str | None, int, int]]
     token_usage: list[tuple[str | None, str, str, str | None, str | None, int, int]]
     # (team, pipeline, executor, agent, model, input_tokens_sum, output_tokens_sum)
+    human_decisions: list[tuple[str | None, str, str, int]]
+    # (team, pipeline, decision["approved"|"rejected"], count) — human steps only,
+    # derived from primary_confidence (1.0 = approved, 0.0 = rejected — see
+    # executors/human.py). Timeouts leave primary_confidence NULL and are excluded.
+    feedback_counts: list[tuple[str, str, int]]
+    # (pipeline, outcome["correct"|"partial"|"incorrect"], count) — from RunFeedback
 
 
 async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData:
@@ -94,6 +101,29 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         )
         token_usage = list(rows.all())
 
+        decision_case = case(
+            (PipelineStep.primary_confidence >= 0.5, "approved"),
+            else_="rejected",
+        )
+        rows = await session.execute(
+            select(
+                PipelineRun.team,
+                PipelineRun.pipeline_name,
+                decision_case.label("decision"),
+                func.count(),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.executor == "human", PipelineStep.primary_confidence.is_not(None))
+            .group_by(PipelineRun.team, PipelineRun.pipeline_name, decision_case)
+        )
+        human_decisions = list(rows.all())
+
+        rows = await session.execute(
+            select(RunFeedback.pipeline_name, RunFeedback.outcome, func.count())
+            .group_by(RunFeedback.pipeline_name, RunFeedback.outcome)
+        )
+        feedback_counts = list(rows.all())
+
     return MetricsData(
         run_counts=list(run_counts),
         runs_in_progress=runs_in_progress or 0,
@@ -101,6 +131,8 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         step_durations=step_durations,
         verifier_counts=list(verifier_counts),
         token_usage=token_usage,
+        human_decisions=human_decisions,
+        feedback_counts=list(feedback_counts),
     )
 
 
@@ -165,6 +197,47 @@ class PorkCollector(Collector):
             token_totals.add_metric([*base, "input"], input_sum)
             token_totals.add_metric([*base, "output"], output_sum)
         yield token_totals
+
+        decisions_total = CounterMetricFamily(
+            "pork_human_approval_decisions_total",
+            "Total human-in-the-loop approve/reject decisions, by team, pipeline, and decision",
+            labels=["team", "pipeline", "decision"],
+        )
+        for team, pipeline, decision, count in data.human_decisions:
+            decisions_total.add_metric([team or "", pipeline, decision], count)
+        yield decisions_total
+
+        feedback_total = CounterMetricFamily(
+            "pork_pipeline_feedback_total",
+            "Total human accuracy feedback submissions, by pipeline and outcome",
+            labels=["pipeline", "outcome"],
+        )
+        for pipeline, outcome, count in data.feedback_counts:
+            feedback_total.add_metric([pipeline, outcome], count)
+        yield feedback_total
+
+        yield self._pending_approvals_gauge()
+
+    @staticmethod
+    def _pending_approvals_gauge() -> GaugeMetricFamily:
+        """Pending human approvals aren't persisted (in-memory only — see
+        executors/human.py), so unlike everything else in this collector this reads
+        live process state directly rather than the pre-fetched MetricsData."""
+        pending_by_team: dict[str, int] = defaultdict(int)
+        for item in _list_pending_approvals():
+            pending_by_team[item.get("team") or ""] += 1
+
+        gauge = GaugeMetricFamily(
+            "pork_human_approvals_pending",
+            "Currently pending human-in-the-loop approvals, by team",
+            labels=["team"],
+        )
+        if pending_by_team:
+            for team, count in pending_by_team.items():
+                gauge.add_metric([team], count)
+        else:
+            gauge.add_metric([""], 0)
+        return gauge
 
     @staticmethod
     def _duration_histogram(durations: list[tuple[str, str | None, float]]) -> HistogramMetricFamily:
