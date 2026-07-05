@@ -66,6 +66,28 @@ def get_pending_meta(token: str) -> dict | None:
     return _pending_meta.get(token)
 
 
+def list_pending() -> list[dict]:
+    """All currently pending approvals, newest first — backs the /ui/approvals list page."""
+    return sorted(
+        ({"token": token, **meta} for token, meta in _pending_meta.items()),
+        key=lambda entry: entry["created_at"],
+        reverse=True,
+    )
+
+
+def get_pending_for_run(run_id: str) -> list[dict]:
+    """Pending approvals belonging to a specific run — backs the run detail page banner.
+
+    Normally at most one (human steps run sequentially), but a parallel group could in
+    principle contain more than one `human` step at once, so this returns a list.
+    """
+    return [
+        {"token": token, **meta}
+        for token, meta in _pending_meta.items()
+        if meta.get("run_id") == run_id
+    ]
+
+
 def resolve_approval(token: str, approved: bool) -> bool:
     """Resolve a pending approval by token. Returns False if the token is unknown/expired
     or already decided — used by every channel's callback listener/route."""
@@ -304,8 +326,9 @@ class HumanExecutor(BaseExecutor):
             "message": message_text,
             "step": step.name,
             "pipeline": context.get("pipeline_name"),
+            "run_id": context.get("pipeline_run_id"),
             "team": team,
-            "created_at": utc_now().isoformat(),
+            "created_at": utc_now(),
         }
 
         try:

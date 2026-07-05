@@ -1,4 +1,4 @@
-"""Tests for the Teams-oriented /ui/approvals/{token} web approval page."""
+"""Tests for the /ui/approvals list page and the Teams-oriented /ui/approvals/{token} page."""
 import asyncio
 
 import pytest
@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.executors import human
 from src.ui import router as ui_router
+from src.utils import utc_now
 
 app = FastAPI()
 app.include_router(ui_router)
@@ -30,8 +31,9 @@ def _make_pending(token: str, **meta_overrides):
         "message": "Approve the deploy?",
         "step": "approve-deploy",
         "pipeline": "release-pipeline",
+        "run_id": "run-1",
         "team": "team-b",
-        "created_at": "2026-01-01T00:00:00",
+        "created_at": utc_now(),
         **meta_overrides,
     }
     return future, loop
@@ -96,5 +98,28 @@ def test_post_approve_twice_second_time_not_found():
 
         second = client.post("/ui/approvals/tok-5/approve")
         assert "no longer valid" in second.text
+    finally:
+        loop.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /ui/approvals — list page
+# ---------------------------------------------------------------------------
+
+def test_approvals_list_empty_state():
+    resp = client.get("/ui/approvals")
+    assert resp.status_code == 200
+    assert "Nothing pending" in resp.text
+
+
+def test_approvals_list_shows_pending_entries():
+    future, loop = _make_pending("tok-6", pipeline="release-pipeline", step="approve-deploy", team="team-b")
+    try:
+        resp = client.get("/ui/approvals")
+        assert resp.status_code == 200
+        assert "release-pipeline" in resp.text
+        assert "approve-deploy" in resp.text
+        assert "team-b" in resp.text
+        assert "/ui/approvals/tok-6" in resp.text
     finally:
         loop.close()

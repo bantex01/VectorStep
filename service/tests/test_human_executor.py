@@ -251,3 +251,72 @@ def test_resolve_approval_already_done_returns_false():
     finally:
         human._pending_approvals.pop("tok", None)
         loop.close()
+
+
+# ---------------------------------------------------------------------------
+# list_pending / get_pending_for_run — back the /ui/approvals list page and
+# the run detail page's "awaiting approval" banner.
+# ---------------------------------------------------------------------------
+
+def _seed_meta(token: str, **overrides):
+    from datetime import timedelta
+    from src.utils import utc_now
+    human._pending_meta[token] = {
+        "message": "Approve?",
+        "step": "approve-step",
+        "pipeline": "p",
+        "run_id": "run-1",
+        "team": None,
+        "created_at": utc_now() - timedelta(seconds=overrides.pop("age_seconds", 0)),
+        **overrides,
+    }
+
+
+def test_list_pending_includes_token_and_is_newest_first():
+    _seed_meta("tok-old", run_id="run-a", age_seconds=60)
+    _seed_meta("tok-new", run_id="run-b", age_seconds=0)
+
+    result = human.list_pending()
+
+    assert [r["token"] for r in result] == ["tok-new", "tok-old"]
+    assert result[0]["run_id"] == "run-b"
+
+
+def test_list_pending_empty_when_nothing_pending():
+    assert human.list_pending() == []
+
+
+def test_get_pending_for_run_filters_by_run_id():
+    _seed_meta("tok-1", run_id="run-a")
+    _seed_meta("tok-2", run_id="run-b")
+    _seed_meta("tok-3", run_id="run-a")
+
+    result = human.get_pending_for_run("run-a")
+
+    assert {r["token"] for r in result} == {"tok-1", "tok-3"}
+
+
+def test_get_pending_for_run_empty_for_unknown_run():
+    _seed_meta("tok-1", run_id="run-a")
+    assert human.get_pending_for_run("run-does-not-exist") == []
+
+
+async def test_execute_populates_run_id_in_pending_meta():
+    human.configure(
+        human_approval={"default": {"channel": "slack", "slack": {"bot_token": "t", "channel_id": "c"}}},
+        legacy_telegram={},
+        ui_base_url="http://x",
+    )
+
+    captured = {}
+
+    async def fake_send(self, text, token):
+        captured["meta"] = dict(human._pending_meta[token])
+        asyncio.get_running_loop().call_later(0, lambda: human.resolve_approval(token, True))
+
+    with patch.object(human.SlackApprovalChannel, "send", new=fake_send):
+        await human.HumanExecutor().execute(
+            _step(timeout=2), {"team": None, "pipeline_name": "p", "pipeline_run_id": "run-xyz"}
+        )
+
+    assert captured["meta"]["run_id"] == "run-xyz"

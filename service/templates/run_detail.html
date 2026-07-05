@@ -425,6 +425,27 @@
 {% endfor %}
 </div>
 
+<!-- Awaiting human approval banner -->
+{% if pending_approvals %}
+{% for item in pending_approvals %}
+<div class="mt-6 bg-amber-950/40 rounded-lg border border-amber-800/60 px-5 py-4 flex items-center justify-between gap-4">
+  <div class="flex items-center gap-3">
+    <span class="text-lg">⏸</span>
+    <div>
+      <p class="text-sm font-medium text-amber-200">Awaiting human approval — {{ item.step }}</p>
+      <p class="text-xs text-amber-400/80 mt-0.5">
+        Requested {{ format_ago(item.created_at) }}{% if item.team %} · routed to team {{ item.team }}{% endif %}
+      </p>
+    </div>
+  </div>
+  <a href="/ui/approvals/{{ item.token }}"
+     class="shrink-0 text-sm bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded-md transition-colors">
+    Review
+  </a>
+</div>
+{% endfor %}
+{% endif %}
+
 <!-- Live tail (shown only for in-progress runs) -->
 {% if run.status == "running" %}
 <div class="mt-6 bg-zinc-900 rounded-lg border border-zinc-800" id="live-tail-panel">

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Approvals — P-Ork{% endblock %}
+{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Pending approvals</h1>{% endblock %}
+{% block content %}
+
+<div class="bg-zinc-900 rounded-lg border border-zinc-800">
+  {% if pending %}
+  <table class="w-full">
+    <thead>
+      <tr class="text-xs text-zinc-500 uppercase tracking-wide border-b border-zinc-800">
+        <th class="text-left px-5 py-3 font-medium">Pipeline</th>
+        <th class="text-left px-5 py-3 font-medium">Step</th>
+        <th class="text-left px-5 py-3 font-medium">Team</th>
+        <th class="text-left px-5 py-3 font-medium">Requested</th>
+        <th class="px-5 py-3"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-zinc-800">
+      {% for item in pending %}
+      <tr class="hover:bg-zinc-800 transition-colors">
+        <td class="px-5 py-3">
+          <span class="text-sm font-medium text-zinc-100">{{ item.pipeline }}</span>
+        </td>
+        <td class="px-5 py-3 text-sm text-zinc-400">{{ item.step }}</td>
+        <td class="px-5 py-3">
+          {% if item.team %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">{{ item.team }}</span>
+          {% else %}
+          <span class="text-sm text-zinc-600">—</span>
+          {% endif %}
+        </td>
+        <td class="px-5 py-3 text-sm text-zinc-400" title="{{ item.created_at.isoformat() }}">
+          {{ format_ago(item.created_at) }}
+        </td>
+        <td class="px-5 py-3 text-right">
+          <a href="/ui/approvals/{{ item.token }}" class="text-xs text-indigo-400 hover:text-indigo-300 font-medium">Review →</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="px-5 py-16 text-center text-sm text-zinc-500">
+    Nothing pending — every <code>human</code> step is either resolved or none are running right now.
+  </div>
+  {% endif %}
+</div>
+
+{% endblock %}

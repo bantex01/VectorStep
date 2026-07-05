@@ -582,6 +582,9 @@ async def ui_run_detail(request: Request, run_id: str):
         result = await session.execute(select(RunFeedback).where(RunFeedback.run_id == run_id))
         feedback = result.scalar_one_or_none()
 
+    from .executors.human import get_pending_for_run
+    pending_approvals = get_pending_for_run(run_id) if run.status == "running" else []
+
     return templates.TemplateResponse(request, "run_detail.html", {
         "run": run,
         "display_items": display_items,
@@ -593,6 +596,7 @@ async def ui_run_detail(request: Request, run_id: str):
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
         "feedback": feedback,
+        "pending_approvals": pending_approvals,
         "active_page": "runs",
     })
 
@@ -1855,10 +1859,23 @@ async def ui_mcp(request: Request):
 
 # ── Human-in-the-loop approvals ────────────────────────────────────────────────
 #
-# Standalone (no sidebar) pages reached via a direct token link — used by the
+# /approvals is a normal dashboard page (sidebar chrome) listing every pending
+# approval regardless of channel — a universal fallback so a team isn't stuck if
+# their primary chat channel (Slack/Telegram) is unreachable. /approvals/{token} is
+# a standalone (no sidebar) page reached via a direct token link — used by the
 # Teams approval channel, which posts this link instead of an in-chat button
 # since Teams interactive cards need a public Bot Framework callback endpoint
 # this deployment doesn't expose. See executors/human.py TeamsApprovalChannel.
+
+@router.get("/approvals", response_class=HTMLResponse)
+async def ui_approvals_list(request: Request):
+    from .executors.human import list_pending
+
+    return templates.TemplateResponse(request, "approvals_list.html", {
+        "pending": list_pending(),
+        "active_page": "approvals",
+    })
+
 
 @router.get("/approvals/{token}", response_class=HTMLResponse)
 async def ui_approval(request: Request, token: str):
