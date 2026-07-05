@@ -33,7 +33,7 @@
     <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">
       {{ meta.pipeline }} &middot; {{ meta.step }}{% if meta.team %} &middot; {{ meta.team }}{% endif %}
     </p>
-    <pre class="mt-3 text-sm text-zinc-200 whitespace-pre-wrap font-sans">{{ meta.message }}</pre>
+    <pre class="mt-3 text-sm text-zinc-200 whitespace-pre-wrap font-sans">{{ meta.message | telegram_html }}</pre>
 
     <div class="mt-6 flex gap-3">
       <form method="post" action="/ui/approvals/{{ token }}/approve" class="flex-1">

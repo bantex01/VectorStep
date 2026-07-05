@@ -75,6 +75,11 @@ def list_pending() -> list[dict]:
     )
 
 
+def pending_count() -> int:
+    """Cheap count for the sidebar badge — avoids building the full list just to size it."""
+    return len(_pending_meta)
+
+
 def get_pending_for_run(run_id: str) -> list[dict]:
     """Pending approvals belonging to a specific run — backs the run detail page banner.
 

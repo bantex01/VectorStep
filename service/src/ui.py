@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
@@ -17,6 +18,7 @@ from sqlalchemy.orm import selectinload
 
 from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep, RunFeedback
+from .executors.human import pending_count as _pending_approval_count
 from .gateway import gateway_call_safe
 from .utils import utc_now
 from . import run_events
@@ -107,6 +109,46 @@ def _format_ago(dt: datetime) -> str:
     if secs < 86400:
         return f"{secs // 3600}h ago"
     return f"{secs // 86400}d ago"
+
+
+_TELEGRAM_HTML_TAG_RESTORE = [
+    (re.compile(r"&lt;b&gt;(.*?)&lt;/b&gt;", re.IGNORECASE | re.DOTALL), r"<b>\1</b>"),
+    (re.compile(r"&lt;strong&gt;(.*?)&lt;/strong&gt;", re.IGNORECASE | re.DOTALL), r"<strong>\1</strong>"),
+    (re.compile(r"&lt;i&gt;(.*?)&lt;/i&gt;", re.IGNORECASE | re.DOTALL), r"<i>\1</i>"),
+    (re.compile(r"&lt;em&gt;(.*?)&lt;/em&gt;", re.IGNORECASE | re.DOTALL), r"<em>\1</em>"),
+    (re.compile(r"&lt;code&gt;(.*?)&lt;/code&gt;", re.IGNORECASE | re.DOTALL), r"<code>\1</code>"),
+]
+# Only http(s) links are restored — never javascript:/data: schemes — and only from the
+# escaped form, so a raw unescaped "<a href=...>" smuggled in via {{summary}} or an
+# agent's own output never matches (it's not literal &lt;a href=&#34;...&gt; text).
+_TELEGRAM_HTML_LINK_RE = re.compile(
+    r'&lt;a href=&#34;(https?://[^&"]*)&#34;&gt;(.*?)&lt;/a&gt;', re.IGNORECASE | re.DOTALL
+)
+
+
+def _telegram_html_to_safe_html(text: str):
+    """Render the small Telegram HTML parse-mode subset used in `human` step
+    prompt_templates (<b>, <i>, <code>, <a href>) as real HTML on the /ui/approvals
+    pages, without trusting arbitrary content.
+
+    The message text is a fully-rendered Jinja2 prompt_template — it can embed
+    {{summary}}, {{steps.x.field}}, etc., which ultimately trace back to webhook
+    payloads or LLM output, neither of which is trusted input. So this escapes the
+    *entire* string first (exactly like Jinja2's default autoescape would), then
+    re-opens only the small whitelist of tags above from their escaped form. Anything
+    else — including an attempt to smuggle in a real <script> tag — stays inert
+    escaped text rather than becoming live markup.
+    """
+    from markupsafe import Markup, escape
+
+    escaped = str(escape(text))
+    for pattern, replacement in _TELEGRAM_HTML_TAG_RESTORE:
+        escaped = pattern.sub(replacement, escaped)
+    escaped = _TELEGRAM_HTML_LINK_RE.sub(
+        lambda m: f'<a href="{m.group(1)}" target="_blank" rel="noopener noreferrer">{m.group(2)}</a>',
+        escaped,
+    )
+    return Markup(escaped)
 
 
 def _source_label(source: str) -> str:
@@ -260,12 +302,14 @@ _OUTCOME_CLASSES = {
 templates.env.filters["to_yaml"] = _to_yaml
 templates.env.filters["tojson"] = _to_json
 templates.env.filters["format_number"] = lambda n: f"{int(n):,}"
+templates.env.filters["telegram_html"] = _telegram_html_to_safe_html
 templates.env.globals.update({
     "status_classes": _status_classes,
     "confidence_bar_color": _confidence_bar_color,
     "format_duration": _format_duration,
     "format_seconds": _format_seconds,
     "format_ago": _format_ago,
+    "pending_approval_count": _pending_approval_count,
     "source_label": _source_label,
     "outcome_classes": lambda o: _OUTCOME_CLASSES.get(o or "", "bg-zinc-800 text-zinc-400 ring-zinc-600"),
 })
