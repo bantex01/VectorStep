@@ -1851,3 +1851,54 @@ async def ui_mcp(request: Request):
         "total_tools": sum(len(s["tools"]) for s in servers),
         "active_page": "mcp",
     })
+
+
+# ── Human-in-the-loop approvals ────────────────────────────────────────────────
+#
+# Standalone (no sidebar) pages reached via a direct token link — used by the
+# Teams approval channel, which posts this link instead of an in-chat button
+# since Teams interactive cards need a public Bot Framework callback endpoint
+# this deployment doesn't expose. See executors/human.py TeamsApprovalChannel.
+
+@router.get("/approvals/{token}", response_class=HTMLResponse)
+async def ui_approval(request: Request, token: str):
+    from .executors.human import get_pending_meta
+
+    meta = get_pending_meta(token)
+    if meta is None:
+        return templates.TemplateResponse(request, "approval.html", {
+            "state": "not_found",
+            "token": token,
+        })
+
+    return templates.TemplateResponse(request, "approval.html", {
+        "state": "pending",
+        "token": token,
+        "meta": meta,
+    })
+
+
+@router.post("/approvals/{token}/approve", response_class=HTMLResponse)
+async def ui_approval_approve(request: Request, token: str):
+    return _decide(request, token, approved=True)
+
+
+@router.post("/approvals/{token}/reject", response_class=HTMLResponse)
+async def ui_approval_reject(request: Request, token: str):
+    return _decide(request, token, approved=False)
+
+
+def _decide(request: Request, token: str, approved: bool):
+    from .executors.human import resolve_approval
+
+    if not resolve_approval(token, approved):
+        return templates.TemplateResponse(request, "approval.html", {
+            "state": "not_found",
+            "token": token,
+        })
+
+    return templates.TemplateResponse(request, "approval.html", {
+        "state": "decided",
+        "token": token,
+        "decision": "approve" if approved else "reject",
+    })

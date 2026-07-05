@@ -26,6 +26,7 @@ async def build_context(
     - pipeline_run_id, pipeline_name, current_step
     - steps.<name>.<field> references for all previously completed steps
     - A top-level `labels` dict for convenience (always present)
+    - A top-level `team` field (owning team resolved from the auth token, or None)
     - An `artifacts` dict when artifact_store is provided, giving downstream steps
       access to artifact content via {{artifacts.step_name.key}}
     """
@@ -34,6 +35,7 @@ async def build_context(
         "pipeline_name": pipeline.name,
         "current_step": current_step,
         "labels": dict(normalised.labels),
+        "team": normalised.team,
         **pipeline.vars,
     }
 

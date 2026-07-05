@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>P-Ork approval</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="h-full bg-zinc-950 text-zinc-100 antialiased flex items-center justify-center min-h-screen p-6">
+<div class="w-full max-w-lg">
+
+  <div class="flex items-center gap-2.5 mb-6 justify-center">
+    <svg width="32" height="32" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" class="shrink-0">
+      <ellipse cx="15" cy="17" rx="9" ry="11" fill="#e5e7eb"/>
+      <ellipse cx="15" cy="17" rx="5.5" ry="7" fill="#f9fafb"/>
+      <ellipse cx="49" cy="17" rx="9" ry="11" fill="#e5e7eb"/>
+      <ellipse cx="49" cy="17" rx="5.5" ry="7" fill="#f9fafb"/>
+      <circle cx="32" cy="37" r="22" fill="#f3f4f6" stroke="#d1d5db" stroke-width="1"/>
+      <circle cx="24" cy="32" r="3.2" fill="#111827"/>
+      <circle cx="40" cy="32" r="3.2" fill="#111827"/>
+      <circle cx="25.2" cy="30.8" r="1.1" fill="white"/>
+      <circle cx="41.2" cy="30.8" r="1.1" fill="white"/>
+      <ellipse cx="32" cy="45" rx="11" ry="7.5" fill="#e5e7eb" stroke="#d1d5db" stroke-width="0.8"/>
+      <circle cx="28" cy="45" r="2.4" fill="#6b7280"/>
+      <circle cx="36" cy="45" r="2.4" fill="#6b7280"/>
+      <path d="M26 52.5 Q32 57 38 52.5" stroke="#374151" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+    </svg>
+    <span class="font-bold text-zinc-50 tracking-tight text-lg">P-Ork approval</span>
+  </div>
+
+  {% if state == "pending" %}
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">
+      {{ meta.pipeline }} &middot; {{ meta.step }}{% if meta.team %} &middot; {{ meta.team }}{% endif %}
+    </p>
+    <pre class="mt-3 text-sm text-zinc-200 whitespace-pre-wrap font-sans">{{ meta.message }}</pre>
+
+    <div class="mt-6 flex gap-3">
+      <form method="post" action="/ui/approvals/{{ token }}/approve" class="flex-1">
+        <button type="submit" class="w-full py-2.5 rounded-md bg-green-600 hover:bg-green-500 text-white text-sm font-medium transition-colors">
+          ✅ Approve
+        </button>
+      </form>
+      <form method="post" action="/ui/approvals/{{ token }}/reject" class="flex-1">
+        <button type="submit" class="w-full py-2.5 rounded-md bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors">
+          ❌ Reject
+        </button>
+      </form>
+    </div>
+  </div>
+
+  {% elif state == "decided" %}
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 text-center">
+    {% if decision == "approve" %}
+    <p class="text-green-400 text-sm font-medium">✅ Approved — the pipeline will continue.</p>
+    {% else %}
+    <p class="text-red-400 text-sm font-medium">❌ Rejected — the pipeline has recorded your decision.</p>
+    {% endif %}
+    <p class="mt-2 text-xs text-zinc-500">You can close this page.</p>
+  </div>
+
+  {% else %}
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 text-center">
+    <p class="text-zinc-300 text-sm font-medium">This approval link is no longer valid.</p>
+    <p class="mt-2 text-xs text-zinc-500">
+      It may have already been decided, timed out, or the pipeline has moved on.
+    </p>
+  </div>
+  {% endif %}
+
+</div>
+</body>
+</html>

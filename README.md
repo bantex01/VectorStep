@@ -73,7 +73,7 @@ service/
 │   │   ├── openclaw_ws.py      # OpenClaw executor — Gateway WebSocket API (Ed25519 auth)
 │   │   ├── openclaw.py         # OpenClaw executor — CLI subprocess (legacy, not registered)
 │   │   │   ├── gateway.py          # P-Ork Gateway executor — WebSocket API (token auth)
-│   │   ├── human.py            # Human-in-the-loop executor (Telegram inline keyboard)
+│   │   ├── human.py            # Human-in-the-loop executor (Telegram/Slack/Teams, per-team routing)
 │   │   ├── pipeline.py         # Sub-pipeline executor — calls another pipeline by name
 │   │   └── webhook.py          # Webhook output executor (HTTP POST)
 │   ├── pipeline/
@@ -91,6 +91,7 @@ service/
 │   └── notifications/
 │       ├── telegram.py         # Telegram notification handler
 │       ├── telegram_poller.py  # Long-poll loop for HITL Telegram button callbacks
+│       ├── slack_poller.py     # Slack Socket Mode listener for HITL Slack button callbacks
 │       └── webhook.py          # Webhook notification handler
 ├── templates/                  # Jinja2 HTML templates for the UI
 ├── logs/                       # Rotating log files (auto-created, gitignored)
@@ -960,9 +961,9 @@ The P-Ork Gateway exposes three REST endpoints consumed by P-Ork:
 
 ---
 
-#### `human` — Human-in-the-Loop (Telegram)
+#### `human` — Human-in-the-Loop (Telegram, Slack, Microsoft Teams)
 
-**`executor: human`** — Sends a Telegram inline keyboard message and pauses the pipeline until the operator clicks Approve or Reject, or `timeout_seconds` elapses.
+**`executor: human`** — Sends an approval request and pauses the pipeline until the operator approves or rejects, or `timeout_seconds` elapses.
 
 | Outcome | confidence | proceed |
 |---|---|---|
@@ -970,7 +971,9 @@ The P-Ork Gateway exposes three REST endpoints consumed by P-Ork:
 | Rejected | 0.0 | true — triggers `on_low_confidence` action |
 | Timeout | — | step marked `failed` |
 
-The `prompt_template` renders to the Telegram message text. Default timeout is 300s. Requires a **separate** Telegram bot from OpenClaw (Telegram only allows one simultaneous `getUpdates` poller per bot token).
+The `prompt_template` renders to the approval message text. Default timeout is 300s.
+
+**Which channel a run uses is resolved per-team, not per-pipeline.** The same `executor: human` step works unchanged for every team — P-Ork looks up the run's `team` (resolved from the webhook auth token, §3b) against `human_approval.teams` in `config.yaml`, falling back to `human_approval.default`, falling back to the legacy Telegram-only config if `human_approval` is omitted entirely. This keeps team onboarding a config-only change (like issuing a token, §3b) rather than requiring a new executor or a pipeline fork per team.
 
 ```yaml
 - name: approve-remediation
@@ -984,6 +987,34 @@ The `prompt_template` renders to the Telegram message text. Default timeout is 3
 
     Proposed action: {{steps.investigation.next_step_context}}
 ```
+
+**Config (`config.yaml`):**
+
+```yaml
+human_approval:
+  ui_base_url: https://pork.internal.example.com   # required for the msteams channel — see below
+  default:
+    channel: telegram
+  teams:
+    team-a:
+      channel: slack
+      slack:
+        bot_token: ${SLACK_BOT_TOKEN_TEAMA}
+        app_token: ${SLACK_APP_TOKEN_TEAMA}
+        channel_id: C0123456
+    team-b:
+      channel: msteams
+      msteams:
+        webhook_url: ${TEAMS_WEBHOOK_URL_TEAMB}
+```
+
+| Channel | How the human responds | Requires |
+|---|---|---|
+| `telegram` | Inline-keyboard Approve/Reject buttons, resolved by the existing Telegram long-poll (`notifications/telegram_poller.py`). Requires a **separate** Telegram bot from OpenClaw (Telegram only allows one simultaneous `getUpdates` poller per bot token). | `human_approval.*.telegram.{bot_token,chat_id}`, or falls back to `notifications.telegram` |
+| `slack` | Interactive Approve/Reject buttons via a Slack app's Socket Mode connection (`notifications/slack_poller.py`) — no public HTTPS endpoint needed, free on any Slack plan. | `human_approval.*.slack.{bot_token,app_token,channel_id}` |
+| `msteams` | One-way notification (via a Power Automate webhook flow) linking to a P-Ork web page (`GET /ui/approvals/{token}`) where the human clicks Approve/Reject. Real interactive Adaptive Card buttons in Teams need a registered Azure Bot with a public callback endpoint — this deployment doesn't expose one, so Teams gets a notify-and-click-through flow instead. | `human_approval.*.msteams.webhook_url`, `human_approval.ui_base_url` |
+
+If `human_approval` is omitted entirely, every `human` step behaves exactly as before this feature existed — the single global `notifications.telegram` bot/chat, no team awareness required.
 
 ---
 

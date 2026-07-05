@@ -4,7 +4,7 @@ import shlex
 
 import httpx
 
-from ..executors.human import get_pending_approvals
+from ..executors.human import resolve_approval
 
 logger = logging.getLogger(__name__)
 
@@ -111,21 +111,19 @@ async def poll_telegram_updates(
                         continue
 
                     action, token = callback_data.split(":", 1)
-                    pending = get_pending_approvals()
-                    future = pending.get(token)
+                    if action not in ("approve", "reject"):
+                        continue
 
-                    if future is None or future.done():
+                    if not resolve_approval(token, action == "approve"):
                         logger.debug(
                             "Received callback for unknown/expired token: %s", token
                         )
                         continue
 
-                    if action == "approve":
-                        future.set_result(True)
-                        logger.info("Approval received for token=%s", token)
-                    elif action == "reject":
-                        future.set_result(False)
-                        logger.info("Rejection received for token=%s", token)
+                    logger.info(
+                        "%s received for token=%s",
+                        "Approval" if action == "approve" else "Rejection", token,
+                    )
                     continue
 
                 # --- /run command ---

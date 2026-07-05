@@ -40,6 +40,39 @@ notifications:
     bot_token: ${TELEGRAM_BOT_TOKEN}
     chat_id: ${TELEGRAM_CHAT_ID}
 
+# Human-in-the-loop approval routing for `executor: human` steps — see README
+# §"human — Human-in-the-Loop". Routes each run to a channel based on its `team`
+# (resolved from the auth token that triggered it — see §3b), so different teams
+# can use different tools without forking pipelines.
+#
+# Omit this whole block entirely to keep pre-existing behaviour: every `human` step
+# falls back to the single Telegram bot configured under notifications.telegram above.
+# human_approval:
+#   # Reachable by whoever will click a Teams approval link (see the msteams channel
+#   # below) — NOT localhost unless every approver is on this same machine.
+#   ui_base_url: https://pork.internal.example.com
+#
+#   default:                     # used when a run's team has no entry under `teams` below
+#     channel: telegram          # telegram | slack | msteams
+#
+#   teams:
+#     team-a:
+#       channel: slack
+#       slack:
+#         bot_token: ${SLACK_BOT_TOKEN_TEAMA}   # xoxb-... — needs chat:write scope
+#         app_token: ${SLACK_APP_TOKEN_TEAMA}   # xapp-... — Socket Mode, no public endpoint needed
+#         channel_id: C0123456
+#     team-b:
+#       channel: msteams
+#       msteams:
+#         # Power Automate "Post to a channel when a webhook request is received" flow URL.
+#         # Posts a one-way notification linking to /ui/approvals/{token} — real interactive
+#         # Teams cards would need a public Bot Framework callback endpoint, which this
+#         # deployment doesn't expose.
+#         webhook_url: ${TEAMS_WEBHOOK_URL_TEAMB}
+#     team-c:
+#       channel: telegram         # falls through to notifications.telegram's bot/chat above
+
 logging:
   level: INFO
   dir: ./logs   # omit to disable file logging (stdout only)

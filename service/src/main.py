@@ -116,6 +116,7 @@ _step_library_dir: str = "./steps"
 _scheduler: AsyncIOScheduler | None = None
 _app_ref: "FastAPI | None" = None
 _poller_task: asyncio.Task | None = None
+_slack_poller_tasks: list[asyncio.Task] = []
 _artifact_store = None
 _artifact_retention_days: int = 7
 _dedup_enabled: bool = True
@@ -234,7 +235,7 @@ async def _cleanup_artifacts() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task, _artifact_store, _artifact_retention_days, _dedup_enabled, _dedup_window_seconds, _webhook_tokens, _max_concurrent_runs
+    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task, _slack_poller_tasks, _artifact_store, _artifact_retention_days, _dedup_enabled, _dedup_window_seconds, _webhook_tokens, _max_concurrent_runs
     _app_ref = app
 
     config = _load_config()
@@ -298,6 +299,8 @@ async def lifespan(app: FastAPI):
         "log": LogNotifier(),
     }
 
+    port = config.get("server", {}).get("port", 8000)
+
     telegram_cfg = config.get("notifications", {}).get("telegram", {})
     bot_token = telegram_cfg.get("bot_token", "")
     chat_id = telegram_cfg.get("chat_id", "")
@@ -305,11 +308,7 @@ async def lifespan(app: FastAPI):
         notifiers["telegram"] = TelegramNotifier(bot_token=bot_token, chat_id=chat_id)
         logger.info("Telegram notifier configured")
 
-        from .executors.human import configure as configure_human_executor
-        configure_human_executor(bot_token=bot_token, chat_id=chat_id)
-
         from .notifications.telegram_poller import poll_telegram_updates
-        port = config.get("server", {}).get("port", 8000)
 
         # /run commands POST to our own /webhook over HTTP, so they need a
         # token themselves once auth.teams is configured — same as any other
@@ -340,6 +339,46 @@ async def lifespan(app: FastAPI):
         )
     else:
         logger.warning("Telegram notifier not configured — notifications will be skipped")
+
+    # Human-in-the-loop approval channel routing (executor: human) — independent of the
+    # notifications.telegram channel above, since a team may use human_approval without
+    # any Telegram bot at all (e.g. Slack- or Teams-only). See README §"human executor".
+    human_approval_cfg = config.get("human_approval", {})
+    ui_base_url = human_approval_cfg.get("ui_base_url") or f"http://localhost:{port}"
+    if not human_approval_cfg.get("ui_base_url"):
+        logger.warning(
+            "human_approval.ui_base_url not set — falling back to %s, which only works "
+            "for approvers on the same machine. Set it to a URL reachable by whoever "
+            "will click Teams approval links.", ui_base_url,
+        )
+
+    from .executors.human import configure as configure_human_executor
+    configure_human_executor(
+        human_approval=human_approval_cfg,
+        legacy_telegram={"bot_token": bot_token, "chat_id": chat_id} if bot_token and chat_id else {},
+        ui_base_url=ui_base_url,
+    )
+
+    # One Slack Socket Mode listener per distinct app_token referenced across
+    # human_approval config — resolves Approve/Reject button clicks, no public endpoint.
+    slack_app_tokens = set()
+    for team_cfg in human_approval_cfg.get("teams", {}).values():
+        if team_cfg.get("channel") == "slack":
+            token = team_cfg.get("slack", {}).get("app_token", "")
+            if token:
+                slack_app_tokens.add(token)
+    default_channel_cfg = human_approval_cfg.get("default") or {}
+    if default_channel_cfg.get("channel") == "slack":
+        token = default_channel_cfg.get("slack", {}).get("app_token", "")
+        if token:
+            slack_app_tokens.add(token)
+
+    if slack_app_tokens:
+        from .notifications.slack_poller import poll_slack_events
+        _slack_poller_tasks = [
+            asyncio.create_task(poll_slack_events(app_token)) for app_token in slack_app_tokens
+        ]
+        logger.info("Slack Socket Mode listener(s) started: %d app(s)", len(slack_app_tokens))
 
     # Build executor registry — both gateway executors accept URL + credentials from config
     executors_cfg = config.get("executors", {})
@@ -449,6 +488,14 @@ async def lifespan(app: FastAPI):
         _poller_task.cancel()
         try:
             await _poller_task
+        except asyncio.CancelledError:
+            pass
+
+    for task in _slack_poller_tasks:
+        task.cancel()
+    for task in _slack_poller_tasks:
+        try:
+            await task
         except asyncio.CancelledError:
             pass
 
