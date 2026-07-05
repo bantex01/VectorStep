@@ -47,13 +47,25 @@ notifications:
 #
 # Omit this whole block entirely to keep pre-existing behaviour: every `human` step
 # falls back to the single Telegram bot configured under notifications.telegram above.
+#
+# IMPORTANT: that fallback is a `telegram`-only special case (it reads notifications.telegram
+# above when no nested `telegram:` block is given). `slack` and `msteams` have no equivalent
+# fallback — a `default:` (or `teams.<name>:`) entry using either of those channels MUST
+# include its own nested `slack:`/`msteams:` credentials block, exactly like a team entry does.
+# Writing `default: {channel: slack}` alone will raise "missing bot_token/channel_id" at
+# runtime the first time a `human` step falls through to it.
 # human_approval:
 #   # Reachable by whoever will click a Teams approval link (see the msteams channel
 #   # below) — NOT localhost unless every approver is on this same machine.
 #   ui_base_url: https://pork.internal.example.com
 #
 #   default:                     # used when a run's team has no entry under `teams` below
-#     channel: telegram          # telegram | slack | msteams
+#     channel: telegram          # telegram | slack | msteams — telegram can omit the nested
+#                                 # block below and it'll use notifications.telegram above;
+#                                 # slack/msteams must supply their nested block here too.
+#     # telegram:                # optional — only needed to override notifications.telegram
+#     #   bot_token: ${TELEGRAM_BOT_TOKEN}
+#     #   chat_id: ${TELEGRAM_CHAT_ID}
 #
 #   teams:
 #     team-a:

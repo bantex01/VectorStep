@@ -1016,6 +1016,8 @@ human_approval:
 
 If `human_approval` is omitted entirely, every `human` step behaves exactly as before this feature existed — the single global `notifications.telegram` bot/chat, no team awareness required.
 
+**The `notifications.telegram` fallback only applies to the `telegram` channel.** It's a special case: a `human_approval.*` entry with `channel: telegram` and no nested `telegram:` block reads `notifications.telegram` instead. `slack` and `msteams` have no equivalent fallback — a `default:` or `teams.<name>:` entry using either of those channels must include its own nested `slack:`/`msteams:` credentials, exactly like any other channel entry. Omitting it raises `RuntimeError: Slack/Teams approval channel missing ...` the first time a run resolves to that entry.
+
 ---
 
 #### `webhook` — HTTP POST Output
