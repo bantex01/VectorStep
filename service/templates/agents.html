@@ -124,7 +124,8 @@
           <div class="flex items-center gap-2 mt-2 flex-wrap">
             <span class="text-xs text-zinc-500">used by</span>
             {% for pname in used_by %}
-              <a onclick="event.stopPropagation()" href="/ui/pipelines/{{ pname }}" class="text-xs text-indigo-400 hover:text-indigo-300 underline underline-offset-2">{{ pname }}</a>
+              <span onclick="event.preventDefault(); event.stopPropagation(); window.location.href='/ui/pipelines/{{ pname }}'"
+                    class="text-xs text-indigo-400 hover:text-indigo-300 underline underline-offset-2 cursor-pointer">{{ pname }}</span>
             {% endfor %}
           </div>
         {% endif %}
