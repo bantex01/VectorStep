@@ -817,7 +817,11 @@ async def ui_run_stream(request: Request, run_id: str):
 
 
 def _agents_in_pipeline(p: PipelineConfig) -> list[str]:
-    """Distinct agent names referenced by a pipeline's steps, read straight from config.
+    """Distinct `executor:agent` identifiers referenced by a pipeline's steps, read straight from config.
+
+    Prefixed with the executor (openclaw/gateway/etc.) for the same reason the Agent
+    Library page namespaces agents that way — the same agent name can exist on
+    multiple backends and they are not the same agent (see README §Agent Library).
 
     Reliable and available even for pipelines that have never run — unlike the model
     actually used, which depends on the agent's own backend config and is only known
@@ -829,15 +833,15 @@ def _agents_in_pipeline(p: PipelineConfig) -> list[str]:
             for s in step.parallel.steps:
                 a = s.executor_config.get("agent")
                 if a:
-                    agents.add(a)
+                    agents.add(f"{s.executor}:{a}")
         elif isinstance(step, FanOutGroupConfig):
             a = step.fan_out.executor_config.get("agent")
             if a:
-                agents.add(a)
+                agents.add(f"{step.fan_out.executor}:{a}")
         else:
             a = step.executor_config.get("agent")
             if a:
-                agents.add(a)
+                agents.add(f"{step.executor}:{a}")
     return sorted(agents)
 
 
