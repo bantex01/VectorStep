@@ -1,7 +1,73 @@
 {% extends "base.html" %}
 {% block title %}Agents — P-Ork{% endblock %}
-{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Agents</h1>{% endblock %}
+{% block page_heading %}
+<h1 class="text-2xl font-semibold text-zinc-50">Agents</h1>
+{% if all_executors or all_models %}
+<form method="get" action="/ui/agents" class="flex items-center gap-2 mt-3">
+  {% if all_executors %}
+  <select name="executor" onchange="this.form.submit()"
+          class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    <option value="">All executors</option>
+    {% for e in all_executors %}
+      <option value="{{ e }}" {% if selected_executor == e %}selected{% endif %}>{{ e }}</option>
+    {% endfor %}
+  </select>
+  {% endif %}
+  {% if all_models %}
+  <select name="model" onchange="this.form.submit()"
+          class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    <option value="">All models</option>
+    {% for m in all_models %}
+      <option value="{{ m }}" {% if selected_model == m %}selected{% endif %}>{{ m }}</option>
+    {% endfor %}
+  </select>
+  {% endif %}
+  {% if selected_executor or selected_model %}
+    <a href="/ui/agents" class="text-sm text-zinc-500 hover:text-zinc-300">Clear</a>
+  {% endif %}
+</form>
+{% endif %}
+{% endblock %}
 {% block content %}
+
+<!-- Stat cards -->
+<div class="grid grid-cols-4 gap-4 mb-6">
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Agents</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_agent_count }}</p>
+    <p class="mt-1 text-xs text-zinc-500">
+      {% if executor_counts %}
+        {% for e, n in executor_counts.items() %}{{ n }} {{ e }}{% if not loop.last %}, {% endif %}{% endfor %}
+      {% else %}—{% endif %}
+    </p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Success rate</p>
+    {% if overall_success_rate is not none %}
+      <p class="mt-2 text-3xl font-semibold {% if overall_success_rate >= 80 %}text-green-400{% elif overall_success_rate >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">
+        {{ overall_success_rate }}%
+      </p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+    {% endif %}
+    <p class="mt-1 text-xs text-zinc-500">non-failure steps, all time</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Steps run</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_steps }}</p>
+    <p class="mt-1 text-xs text-zinc-500">all time</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Tokens</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ (total_input_tokens + total_output_tokens) | format_number }}</p>
+    <p class="mt-1 text-xs text-zinc-500">{{ total_input_tokens | format_number }} in / {{ total_output_tokens | format_number }} out</p>
+  </div>
+
+</div>
 
 {% if gateway_errors %}
 <div class="space-y-2 mb-6">
@@ -42,10 +108,25 @@
           {% endif %}
         </div>
         {% if agent.get('model') %}
-          <p class="text-sm text-zinc-500 font-mono">{{ agent.get('model') }}</p>
+          <p class="text-sm text-zinc-500 font-mono">
+            {{ agent.get('model') }}
+            {% if agent.get('model_fallbacks') %}
+              <span class="text-zinc-600">→</span>
+              {% for fb in agent.model_fallbacks %}{{ fb }}{% if not loop.last %}, {% endif %}{% endfor %}
+            {% endif %}
+          </p>
         {% endif %}
         {% if agent.get('description') %}
           <p class="text-sm text-zinc-400 mt-1.5 leading-snug line-clamp-3">{{ agent.get('description') }}</p>
+        {% endif %}
+        {% set used_by = pipelines_by_agent.get(stats_key, []) %}
+        {% if used_by %}
+          <div class="flex items-center gap-2 mt-2 flex-wrap">
+            <span class="text-xs text-zinc-500">used by</span>
+            {% for pname in used_by %}
+              <a onclick="event.stopPropagation()" href="/ui/pipelines/{{ pname }}" class="text-xs text-indigo-400 hover:text-indigo-300 underline underline-offset-2">{{ pname }}</a>
+            {% endfor %}
+          </div>
         {% endif %}
       </div>
 
@@ -67,6 +148,12 @@
             <p class="text-lg font-semibold text-zinc-200">{{ stats.get('total', 0) }}</p>
             <p class="text-xs text-zinc-500">runs</p>
           </div>
+          {% if stats.get('avg_input_tokens') is not none %}
+            <div class="text-right">
+              <p class="text-sm text-zinc-300">{{ stats.avg_input_tokens | format_number }} / {{ stats.avg_output_tokens | format_number }}</p>
+              <p class="text-xs text-zinc-500">avg in/out per step</p>
+            </div>
+          {% endif %}
           {% if stats.get('last_run') %}
             <div class="text-right">
               <p class="text-sm text-zinc-300">{{ format_ago(stats.get('last_run')) }}</p>
@@ -86,7 +173,11 @@
 </div>
 {% else %}
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 px-5 py-16 text-center text-sm text-zinc-500">
-  No agents found. Make sure at least one executor backend (OpenClaw Gateway or P-Ork Gateway) is reachable.
+  {% if selected_executor or selected_model %}
+    No agents match the selected filters. <a href="/ui/agents" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">Clear filter</a>
+  {% else %}
+    No agents found. Make sure at least one executor backend (OpenClaw Gateway or P-Ork Gateway) is reachable.
+  {% endif %}
 </div>
 {% endif %}
 

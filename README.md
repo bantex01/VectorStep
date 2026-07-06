@@ -955,7 +955,7 @@ The P-Ork Gateway exposes three REST endpoints consumed by P-Ork:
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /agents` | Agent list (name, model, tools) |
+| `GET /agents` | Agent list (name, model, model_fallbacks, tools) |
 | `GET /agents/{name}/soul` | `soul.md` content — shown in the Soul tab of the agent detail page |
 | `GET /agents/{name}/agent` | Raw `agent.yaml` content — shown in the Config tab of the agent detail page |
 
@@ -1634,7 +1634,7 @@ The web UI is served under `/ui` and provides the following pages:
 | Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, accuracy feedback summary bar, recent runs, YAML viewer, and **Run now** button |
 | Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, and a **tag filter** (`?tag=`) |
-| Agents | `/ui/agents` | Unified agent library across all executor backends |
+| Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
 | Schedules | `/ui/schedules` | Active cron schedules with next-run times |
 | Insights — Overview | `/ui/insights` | Run/failure/token/accuracy totals, runs by team, and MCP tool-use counts, over a selectable time range (24h/7d/30d/all-time) |
 | Insights — By Pipeline | `/ui/insights/pipelines` | Per-pipeline run/failure/token totals and which teams triggered each pipeline in range |

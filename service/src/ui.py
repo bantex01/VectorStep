@@ -1897,7 +1897,7 @@ async def _fetch_pork_gateway_agent_files(agent_id: str) -> dict[str, str | None
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/agents", response_class=HTMLResponse)
-async def ui_agents(request: Request):
+async def ui_agents(request: Request, executor: str | None = None, model: str | None = None):
     # Fetch from both backends concurrently
     (oc_agents, oc_error), (gw_agents, gw_error) = await asyncio.gather(
         _fetch_openclaw_agents(),
@@ -1969,11 +1969,25 @@ async def ui_agents(request: Request):
         )
         step_rows = rows.all()
 
+        token_rows = await session.execute(
+            select(
+                PipelineStep.agent,
+                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
+                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+            )
+            .where(PipelineStep.agent.isnot(None))
+            .group_by(PipelineStep.agent)
+        )
+        tokens_by_agent: dict[str, tuple[int, int]] = {
+            agent: (inp, out) for agent, inp, out in token_rows.all()
+        }
+
     agent_stats: dict[str, dict] = {}
     for row in step_rows:
         s = agent_stats.setdefault(
             row.agent,
-            {"succeeded": 0, "failed": 0, "total": 0, "last_run": None, "success_rate": None},
+            {"succeeded": 0, "failed": 0, "total": 0, "last_run": None, "success_rate": None,
+             "avg_input_tokens": None, "avg_output_tokens": None},
         )
         s["total"] += row.n
         if row.status == "failed":
@@ -1983,9 +1997,13 @@ async def ui_agents(request: Request):
         if row.last_run and (s["last_run"] is None or row.last_run > s["last_run"]):
             s["last_run"] = row.last_run
 
-    for s in agent_stats.values():
+    for key, s in agent_stats.items():
         if s["total"] > 0:
             s["success_rate"] = round(s["succeeded"] / s["total"] * 100, 1)
+            inp, out = tokens_by_agent.get(key, (0, 0))
+            if inp or out:
+                s["avg_input_tokens"] = round(inp / s["total"])
+                s["avg_output_tokens"] = round(out / s["total"])
 
     # If both backends are unreachable, synthesise stub entries from DB history
     # so the page still renders something useful.  Only synthesise for rows that
@@ -1994,16 +2012,62 @@ async def ui_agents(request: Request):
         seen: set[str] = set()
         for key in sorted(agent_stats.keys()):
             if ":" in key:
-                executor, _, aid = key.partition(":")
-                stub_key = f"{executor}:{aid}"
+                stub_executor, _, aid = key.partition(":")
+                stub_key = f"{stub_executor}:{aid}"
                 if stub_key not in seen:
                     seen.add(stub_key)
-                    all_agents.append({"id": aid, "name": aid, "executor": executor})
+                    all_agents.append({"id": aid, "name": aid, "executor": stub_executor})
+
+    # Reverse lookup — which pipelines reference each "executor:agent", read from config
+    # (same source as the Pipelines page's agent badges).
+    all_pipelines = getattr(request.app.state, "pipelines", [])
+    pipelines_by_agent: dict[str, list[str]] = defaultdict(list)
+    for p in all_pipelines:
+        for key in _agents_in_pipeline(p):
+            pipelines_by_agent[key].append(p.name)
+
+    # ── Filter option universes (unfiltered) ──────────────────────────────────
+    all_executors = sorted({a.get("executor", "") for a in all_agents if a.get("executor")})
+    all_models = sorted({
+        m for a in all_agents
+        for m in ([a["model"]] if a.get("model") else []) + (a.get("model_fallbacks") or [])
+    })
+
+    if executor:
+        all_agents = [a for a in all_agents if a.get("executor") == executor]
+    if model:
+        all_agents = [
+            a for a in all_agents
+            if a.get("model") == model or model in (a.get("model_fallbacks") or [])
+        ]
+
+    # ── Header stat cards — scoped to the filtered agent set ─────────────────
+    filtered_keys = [
+        f"{a.get('executor', '')}:{a.get('id') or a.get('agentId') or a.get('name') or ''}"
+        for a in all_agents
+    ]
+    executor_counts = Counter(a.get("executor", "") for a in all_agents)
+    total_steps = sum(agent_stats.get(k, {}).get("total", 0) for k in filtered_keys)
+    total_succeeded = sum(agent_stats.get(k, {}).get("succeeded", 0) for k in filtered_keys)
+    overall_success_rate = round(total_succeeded / total_steps * 100) if total_steps else None
+    total_input_tokens = sum(tokens_by_agent.get(k, (0, 0))[0] for k in filtered_keys)
+    total_output_tokens = sum(tokens_by_agent.get(k, (0, 0))[1] for k in filtered_keys)
 
     return templates.TemplateResponse(request, "agents.html", {
         "agents": all_agents,
         "agent_stats": agent_stats,
+        "pipelines_by_agent": pipelines_by_agent,
         "gateway_errors": gateway_errors,
+        "all_executors": all_executors,
+        "all_models": all_models,
+        "selected_executor": executor or "",
+        "selected_model": model or "",
+        "total_agent_count": len(all_agents),
+        "executor_counts": dict(executor_counts),
+        "overall_success_rate": overall_success_rate,
+        "total_steps": total_steps,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
         "active_page": "agents",
     })
 
