@@ -1628,9 +1628,9 @@ The web UI is served under `/ui` and provides the following pages:
 | Page | Route | Description |
 |---|---|---|
 | Dashboard | `/ui/` | 24h run counts by status, success rate, pipeline activity, recent runs |
-| Runs | `/ui/runs` | Filterable run history with status and pipeline filters |
+| Runs | `/ui/runs` | Run history with status/pipeline/team filters and a selectable time range (24h/7d/30d/all-time); stat cards (run count, success rate, escalated/failed, accuracy marked, accuracy %, tokens) are scoped to the active filters, not just the current page |
 | Run detail | `/ui/runs/{id}` | Full step breakdown with confidence bars, parsed output, verifier results, collapsible agent trace (gateway steps), collapsible run log, live tail for in-progress runs, and **accuracy feedback widget** |
-| Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status, run counts, and a **tag filter** (`?tag=`) |
+| Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status, run counts, per-pipeline agent badges (read from config), all-time success rate, avg tokens in/out per run, and **tag** (`?tag=`) / **agent** (`?agent=`) filters; header stat cards are scoped to the active filters |
 | Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, accuracy feedback summary bar, recent runs, YAML viewer, and **Run now** button |
 | Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, and a **tag filter** (`?tag=`) |

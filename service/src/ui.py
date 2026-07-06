@@ -20,6 +20,7 @@ from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep, RunFeedback
 from .executors.human import pending_count as _pending_approval_count
 from .gateway import gateway_call_safe
+from .models.pipeline import FanOutGroupConfig, ParallelGroupConfig, PipelineConfig
 from .utils import utc_now
 from . import run_events
 
@@ -815,11 +816,44 @@ async def ui_run_stream(request: Request, run_id: str):
     )
 
 
+def _agents_in_pipeline(p: PipelineConfig) -> list[str]:
+    """Distinct agent names referenced by a pipeline's steps, read straight from config.
+
+    Reliable and available even for pipelines that have never run — unlike the model
+    actually used, which depends on the agent's own backend config and is only known
+    from run history (see ui_pipelines for why models are deliberately left off).
+    """
+    agents: set[str] = set()
+    for step in p.steps:
+        if isinstance(step, ParallelGroupConfig):
+            for s in step.parallel.steps:
+                a = s.executor_config.get("agent")
+                if a:
+                    agents.add(a)
+        elif isinstance(step, FanOutGroupConfig):
+            a = step.fan_out.executor_config.get("agent")
+            if a:
+                agents.add(a)
+        else:
+            a = step.executor_config.get("agent")
+            if a:
+                agents.add(a)
+    return sorted(agents)
+
+
 @router.get("/pipelines", response_class=HTMLResponse)
-async def ui_pipelines(request: Request, tag: str | None = None):
+async def ui_pipelines(request: Request, tag: str | None = None, agent: str | None = None):
     all_pipelines = getattr(request.app.state, "pipelines", [])
     all_tags = sorted({t for p in all_pipelines for t in p.tags})
-    pipelines = [p for p in all_pipelines if tag in p.tags] if tag else all_pipelines
+    agents_by_pipeline = {p.name: _agents_in_pipeline(p) for p in all_pipelines}
+    all_agents = sorted({a for agents in agents_by_pipeline.values() for a in agents})
+
+    pipelines = all_pipelines
+    if tag:
+        pipelines = [p for p in pipelines if tag in p.tags]
+    if agent:
+        pipelines = [p for p in pipelines if agent in agents_by_pipeline.get(p.name, [])]
+
     sf = get_session_factory()
 
     async with sf() as session:
@@ -840,14 +874,54 @@ async def ui_pipelines(request: Request, tag: str | None = None):
             feedback_by_pipeline[name][outcome] = n
             feedback_by_pipeline[name]["total"] += n
 
+        token_rows = await session.execute(
+            select(
+                PipelineRun.pipeline_name,
+                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
+                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+            )
+            .join(PipelineStep, PipelineStep.run_id == PipelineRun.id)
+            .group_by(PipelineRun.pipeline_name)
+        )
+        tokens_by_pipeline: dict[str, tuple[int, int]] = {
+            name: (inp, out) for name, inp, out in token_rows.all()
+        }
+
     last_run: dict[str, datetime] = {}
     last_status: dict[str, str] = {}
     run_counts: dict[str, int] = {}
+    failed_counts: dict[str, int] = {}
     for run in all_runs:
         run_counts[run.pipeline_name] = run_counts.get(run.pipeline_name, 0) + 1
+        if run.status == "failed":
+            failed_counts[run.pipeline_name] = failed_counts.get(run.pipeline_name, 0) + 1
         if run.pipeline_name not in last_run:
             last_run[run.pipeline_name] = run.triggered_at
             last_status[run.pipeline_name] = run.status
+
+    success_rate_by_pipeline: dict[str, int] = {}
+    avg_tokens_by_pipeline: dict[str, tuple[int, int]] = {}
+    for name, n in run_counts.items():
+        success_rate_by_pipeline[name] = round((n - failed_counts.get(name, 0)) / n * 100)
+        inp, out = tokens_by_pipeline.get(name, (0, 0))
+        if inp or out:
+            avg_tokens_by_pipeline[name] = (round(inp / n), round(out / n))
+
+    # ── Header stat cards — scoped to the filtered pipeline set ─────────────
+    filtered_names = [p.name for p in pipelines]
+    scheduled_count = sum(1 for p in pipelines if p.schedule)
+
+    total_runs = sum(run_counts.get(name, 0) for name in filtered_names)
+    total_failed = sum(failed_counts.get(name, 0) for name in filtered_names)
+    overall_success_rate = (
+        round((total_runs - total_failed) / total_runs * 100) if total_runs else None
+    )
+
+    fb_correct = sum(feedback_by_pipeline.get(name, {}).get("correct", 0) for name in filtered_names)
+    fb_total = sum(feedback_by_pipeline.get(name, {}).get("total", 0) for name in filtered_names)
+    overall_accuracy_pct = round(fb_correct / fb_total * 100) if fb_total else None
+
+    agents_in_view_count = len({a for name in filtered_names for a in agents_by_pipeline.get(name, [])})
 
     return templates.TemplateResponse(request, "pipelines.html", {
         "pipelines": pipelines,
@@ -855,8 +929,18 @@ async def ui_pipelines(request: Request, tag: str | None = None):
         "last_status": last_status,
         "run_counts": run_counts,
         "feedback_by_pipeline": feedback_by_pipeline,
+        "agents_by_pipeline": agents_by_pipeline,
+        "success_rate_by_pipeline": success_rate_by_pipeline,
+        "avg_tokens_by_pipeline": avg_tokens_by_pipeline,
         "all_tags": all_tags,
+        "all_agents": all_agents,
         "selected_tag": tag or "",
+        "selected_agent": agent or "",
+        "total_pipeline_count": len(pipelines),
+        "scheduled_count": scheduled_count,
+        "overall_success_rate": overall_success_rate,
+        "overall_accuracy_pct": overall_accuracy_pct,
+        "agents_in_view_count": agents_in_view_count,
         "active_page": "pipelines",
     })
 

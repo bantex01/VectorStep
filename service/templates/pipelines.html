@@ -15,8 +15,9 @@
   </button>
 </div>
 <div id="reload-msg" class="hidden mt-3 px-4 py-2.5 rounded-md text-sm font-medium"></div>
-{% if all_tags %}
+{% if all_tags or all_agents %}
 <form method="get" action="/ui/pipelines" class="flex items-center gap-2 mt-3">
+  {% if all_tags %}
   <select name="tag" onchange="this.form.submit()"
           class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
     <option value="">All tags</option>
@@ -24,7 +25,17 @@
       <option value="{{ t }}" {% if selected_tag == t %}selected{% endif %}>{{ t }}</option>
     {% endfor %}
   </select>
-  {% if selected_tag %}
+  {% endif %}
+  {% if all_agents %}
+  <select name="agent" onchange="this.form.submit()"
+          class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    <option value="">All agents</option>
+    {% for a in all_agents %}
+      <option value="{{ a }}" {% if selected_agent == a %}selected{% endif %}>{{ a }}</option>
+    {% endfor %}
+  </select>
+  {% endif %}
+  {% if selected_tag or selected_agent %}
     <a href="/ui/pipelines" class="text-sm text-zinc-500 hover:text-zinc-300">Clear</a>
   {% endif %}
 </form>
@@ -60,6 +71,47 @@ async function reloadPipelines() {
 {% endblock %}
 {% block content %}
 
+<!-- Stat cards -->
+<div class="grid grid-cols-4 gap-4 mb-6">
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Pipelines</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_pipeline_count }}</p>
+    <p class="mt-1 text-xs text-zinc-500">{{ scheduled_count }} scheduled</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Success rate</p>
+    {% if overall_success_rate is not none %}
+      <p class="mt-2 text-3xl font-semibold {% if overall_success_rate >= 80 %}text-green-400{% elif overall_success_rate >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">
+        {{ overall_success_rate }}%
+      </p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+    {% endif %}
+    <p class="mt-1 text-xs text-zinc-500">non-failure runs, all time</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Accuracy</p>
+    {% if overall_accuracy_pct is not none %}
+      <p class="mt-2 text-3xl font-semibold {% if overall_accuracy_pct >= 80 %}text-green-400{% elif overall_accuracy_pct >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">
+        {{ overall_accuracy_pct }}%
+      </p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+    {% endif %}
+    <p class="mt-1 text-xs text-zinc-500">of marked runs, all time</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Agents in use</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ agents_in_view_count }}</p>
+    <p class="mt-1 text-xs text-zinc-500">across {{ total_pipeline_count }} pipeline{% if total_pipeline_count != 1 %}s{% endif %}</p>
+  </div>
+
+</div>
+
 {% if pipelines %}
 <div class="grid grid-cols-1 gap-4">
   {% for p in pipelines %}
@@ -87,6 +139,15 @@ async function reloadPipelines() {
             {% for t in p.tags %}
               <span onclick="event.preventDefault(); event.stopPropagation(); window.location.href='/ui/pipelines?tag=' + encodeURIComponent({{ t | tojson }})"
                     class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-700 hover:text-zinc-200 transition-colors cursor-pointer">{{ t }}</span>
+            {% endfor %}
+          </div>
+        {% endif %}
+        {% set agents = agents_by_pipeline.get(p.name, []) %}
+        {% if agents %}
+          <div class="flex items-center gap-1.5 flex-wrap mt-2">
+            {% for a in agents %}
+              <span onclick="event.preventDefault(); event.stopPropagation(); window.location.href='/ui/pipelines?agent=' + encodeURIComponent({{ a | tojson }})"
+                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-950 text-cyan-400 ring-1 ring-inset ring-cyan-800 hover:bg-cyan-900 transition-colors cursor-pointer">{{ a }}</span>
             {% endfor %}
           </div>
         {% endif %}
@@ -129,6 +190,16 @@ async function reloadPipelines() {
       {% if p.notifications %}
         <span>{{ p.notifications | length }} notification{% if p.notifications | length != 1 %}s{% endif %}</span>
       {% endif %}
+      {% set success_rate = success_rate_by_pipeline.get(p.name) %}
+      {% if success_rate is not none %}
+        <span class="{% if success_rate >= 80 %}text-green-400{% elif success_rate >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">
+          {{ success_rate }}% success
+        </span>
+      {% endif %}
+      {% set avg_tokens = avg_tokens_by_pipeline.get(p.name) %}
+      {% if avg_tokens %}
+        <span>~{{ avg_tokens[0] | format_number }} in / {{ avg_tokens[1] | format_number }} out per run</span>
+      {% endif %}
       {% set fb = feedback_by_pipeline.get(p.name) %}
       {% if fb and fb.total > 0 %}
         {% set acc_pct = (fb.correct / fb.total * 100)|round|int %}
@@ -143,8 +214,8 @@ async function reloadPipelines() {
 </div>
 {% else %}
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 px-5 py-16 text-center text-sm text-zinc-500">
-    {% if selected_tag %}
-      No pipelines tagged "{{ selected_tag }}". <a href="/ui/pipelines" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">Clear filter</a>
+    {% if selected_tag or selected_agent %}
+      No pipelines match the selected filters. <a href="/ui/pipelines" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">Clear filter</a>
     {% else %}
       No pipelines loaded. Add YAML files to the pipelines directory and reload.
     {% endif %}
