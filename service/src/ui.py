@@ -524,18 +524,26 @@ async def ui_runs(
     status: str | None = None,
     pipeline: str | None = None,
     team: str | None = None,
+    time_range: str = "all",
     limit: int = 50,
     offset: int = 0,
 ):
-    sf = get_session_factory()
-    async with sf() as session:
-        q = select(PipelineRun).order_by(PipelineRun.triggered_at.desc())
+    cutoff, range_label = _time_range_cutoff(time_range)
+
+    def _filtered(q):
         if status:
             q = q.where(PipelineRun.status == status)
         if pipeline:
             q = q.where(PipelineRun.pipeline_name == pipeline)
         if team:
             q = q.where(PipelineRun.team == team)
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        return q
+
+    sf = get_session_factory()
+    async with sf() as session:
+        q = _filtered(select(PipelineRun).order_by(PipelineRun.triggered_at.desc()))
         rows = await session.execute(q.limit(limit).offset(offset))
         runs = rows.scalars().all()
         feedback_by_run = await _feedback_by_run_id(session, [r.id for r in runs])
@@ -550,6 +558,44 @@ async def ui_runs(
         )
         team_names = [r[0] for r in rows.all()]
 
+        # Stat cards — aggregated over every run matching the active filters, not just the current page.
+        q = _filtered(select(PipelineRun.status, func.count()).group_by(PipelineRun.status))
+        rows = await session.execute(q)
+        status_counts: dict[str, int] = dict(rows.all())
+
+        total_matching = sum(status_counts.values())
+        non_terminal = status_counts.get("running", 0) + status_counts.get("interrupted", 0)
+        terminal = total_matching - non_terminal
+        success_rate = (
+            round((terminal - status_counts.get("failed", 0)) / terminal * 100)
+            if terminal > 0 else None
+        )
+        escalated_failed = (
+            status_counts.get("escalated", 0)
+            + status_counts.get("failed", 0)
+            + status_counts.get("aborted", 0)
+        )
+
+        q = _filtered(
+            select(RunFeedback.outcome, func.count())
+            .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
+            .group_by(RunFeedback.outcome)
+        )
+        rows = await session.execute(q)
+        feedback_counts: dict[str, int] = dict(rows.all())
+        marked_total = sum(feedback_counts.values())
+        accuracy_pct = (
+            round(feedback_counts.get("correct", 0) / marked_total * 100)
+            if marked_total > 0 else None
+        )
+
+        q = _filtered(
+            select(func.coalesce(func.sum(PipelineStep.input_tokens), 0) + func.coalesce(func.sum(PipelineStep.output_tokens), 0))
+            .select_from(PipelineRun)
+            .join(PipelineStep, PipelineStep.run_id == PipelineRun.id)
+        )
+        token_total = (await session.execute(q)).scalar() or 0
+
     return templates.TemplateResponse(request, "runs.html", {
         "runs": runs,
         "feedback_by_run": feedback_by_run,
@@ -558,10 +604,18 @@ async def ui_runs(
         "selected_status": status or "",
         "selected_pipeline": pipeline or "",
         "selected_team": team or "",
+        "time_range": time_range,
+        "range_label": range_label,
         "limit": limit,
         "offset": offset,
         "statuses": ["completed", "running", "escalated", "aborted", "failed", "stopped", "interrupted"],
         "active_page": "runs",
+        "total_matching": total_matching,
+        "success_rate": success_rate,
+        "escalated_failed": escalated_failed,
+        "marked_total": marked_total,
+        "accuracy_pct": accuracy_pct,
+        "token_total": token_total,
     })
 
 

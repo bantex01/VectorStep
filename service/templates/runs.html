@@ -24,11 +24,66 @@
         <option value="{{ name }}" {% if selected_team == name %}selected{% endif %}>{{ name }}</option>
       {% endfor %}
     </select>
+    <select name="time_range" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="24h" {% if time_range == "24h" %}selected{% endif %}>Last 24 hours</option>
+      <option value="7d"  {% if time_range == "7d"  %}selected{% endif %}>Last 7 days</option>
+      <option value="30d" {% if time_range == "30d" %}selected{% endif %}>Last 30 days</option>
+      <option value="all" {% if time_range == "all" %}selected{% endif %}>All time</option>
+    </select>
     <button type="submit" class="text-sm bg-indigo-600 text-white px-3 py-1.5 rounded-md hover:bg-indigo-500 transition-colors">Filter</button>
-    {% if selected_status or selected_pipeline or selected_team %}
+    {% if selected_status or selected_pipeline or selected_team or time_range != "all" %}
       <a href="/ui/runs" class="text-sm text-zinc-500 hover:text-zinc-300 px-2">Clear</a>
     {% endif %}
   </form>
+</div>
+
+<!-- Stat cards -->
+<div class="grid grid-cols-5 gap-4 mb-6">
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Runs</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_matching }}</p>
+    <p class="mt-1 text-xs text-zinc-500">{{ range_label }}</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Success rate</p>
+    {% if success_rate is not none %}
+      <p class="mt-2 text-3xl font-semibold {% if success_rate >= 80 %}text-green-400{% elif success_rate >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">
+        {{ success_rate }}%
+      </p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+    {% endif %}
+    <p class="mt-1 text-xs text-zinc-500">non-failure runs</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Escalated/failed</p>
+    <p class="mt-2 text-3xl font-semibold {% if escalated_failed > 0 %}text-amber-400{% else %}text-zinc-50{% endif %}">
+      {{ escalated_failed }}
+    </p>
+    <p class="mt-1 text-xs text-zinc-500">escalated + failed + aborted</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Accuracy marked</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ marked_total }}</p>
+    <p class="mt-1 text-xs text-zinc-500">of {{ total_matching }} runs</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Accuracy</p>
+    {% if accuracy_pct is not none %}
+      <p class="mt-2 text-3xl font-semibold {% if accuracy_pct >= 80 %}text-green-400{% elif accuracy_pct >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">
+        {{ accuracy_pct }}%
+      </p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+    {% endif %}
+    <p class="mt-1 text-xs text-zinc-500">{{ token_total | format_number }} tokens</p>
+  </div>
+
 </div>
 
 <div class="bg-zinc-900 rounded-lg border border-zinc-800">
@@ -85,11 +140,11 @@
     <span class="text-xs text-zinc-500">Showing {{ runs | length }} runs</span>
     <div class="flex gap-2">
       {% if offset > 0 %}
-        <a href="/ui/runs?status={{ selected_status }}&pipeline={{ selected_pipeline }}&team={{ selected_team }}&limit={{ limit }}&offset={{ [offset - limit, 0] | max }}"
+        <a href="/ui/runs?status={{ selected_status }}&pipeline={{ selected_pipeline }}&team={{ selected_team }}&time_range={{ time_range }}&limit={{ limit }}&offset={{ [offset - limit, 0] | max }}"
            class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 border border-zinc-700 rounded-md">← Previous</a>
       {% endif %}
       {% if runs | length == limit %}
-        <a href="/ui/runs?status={{ selected_status }}&pipeline={{ selected_pipeline }}&team={{ selected_team }}&limit={{ limit }}&offset={{ offset + limit }}"
+        <a href="/ui/runs?status={{ selected_status }}&pipeline={{ selected_pipeline }}&team={{ selected_team }}&time_range={{ time_range }}&limit={{ limit }}&offset={{ offset + limit }}"
            class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 border border-zinc-700 rounded-md">Next →</a>
       {% endif %}
     </div>
@@ -97,7 +152,7 @@
 
   {% else %}
   <div class="px-5 py-16 text-center text-sm text-zinc-500">
-    {% if selected_status or selected_pipeline or selected_team %}
+    {% if selected_status or selected_pipeline or selected_team or time_range != "all" %}
       No runs match the selected filters.
     {% else %}
       No runs yet.
