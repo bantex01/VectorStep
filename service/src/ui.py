@@ -848,20 +848,31 @@ def _agents_in_pipeline(p: PipelineConfig) -> list[str]:
     from run history (see ui_pipelines for why models are deliberately left off).
     """
     agents: set[str] = set()
+
+    def _add_verifier(verifier) -> None:
+        if verifier is None:
+            return
+        a = verifier.executor_config.get("agent")
+        if a:
+            agents.add(f"{verifier.executor}:{a}")
+
     for step in p.steps:
         if isinstance(step, ParallelGroupConfig):
             for s in step.parallel.steps:
                 a = s.executor_config.get("agent")
                 if a:
                     agents.add(f"{s.executor}:{a}")
+                _add_verifier(s.verifier)
         elif isinstance(step, FanOutGroupConfig):
             a = step.fan_out.executor_config.get("agent")
             if a:
                 agents.add(f"{step.fan_out.executor}:{a}")
+            _add_verifier(step.fan_out.verifier)
         else:
             a = step.executor_config.get("agent")
             if a:
                 agents.add(f"{step.executor}:{a}")
+            _add_verifier(step.verifier)
     return sorted(agents)
 
 
