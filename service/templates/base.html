@@ -89,6 +89,13 @@
         </svg>
         Agents
       </a>
+      <a href="/ui/providers" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
+        {% if active_page == 'providers' %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
+        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12a7 7 0 1114 0 7 7 0 01-14 0zM12 8v4l2.5 2.5M21 21l-4.35-4.35"/>
+        </svg>
+        Providers
+      </a>
       <a href="/ui/mcp" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
         {% if active_page == 'mcp' %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
         <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">

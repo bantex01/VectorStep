@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block title %}Providers — P-Ork{% endblock %}
+{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Providers</h1>{% endblock %}
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-end mb-6">
+  <form method="get" action="/ui/providers">
+    <select name="time_range" onchange="this.form.submit()" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="24h" {% if time_range == "24h" %}selected{% endif %}>Last 24 hours</option>
+      <option value="7d"  {% if time_range == "7d"  %}selected{% endif %}>Last 7 days</option>
+      <option value="30d" {% if time_range == "30d" %}selected{% endif %}>Last 30 days</option>
+      <option value="all" {% if time_range == "all" %}selected{% endif %}>All time</option>
+    </select>
+  </form>
+</div>
+
+<!-- Stat cards -->
+<div class="grid grid-cols-4 gap-4 mb-6">
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Providers</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ provider_count }}</p>
+    <p class="mt-1 text-xs text-zinc-500">{{ range_label }}</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Calls</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_steps | format_number }}</p>
+    <p class="mt-1 text-xs text-zinc-500">gateway-executed steps</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Success rate</p>
+    {% if overall_success_rate is not none %}
+      <p class="mt-2 text-3xl font-semibold {% if overall_success_rate >= 80 %}text-green-400{% elif overall_success_rate >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">
+        {{ overall_success_rate }}%
+      </p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+    {% endif %}
+    <p class="mt-1 text-xs text-zinc-500">across all providers</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Tokens</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ (total_input_tokens + total_output_tokens) | format_number }}</p>
+    <p class="mt-1 text-xs text-zinc-500" title="input / output">↑{{ total_input_tokens | format_number }} ↓{{ total_output_tokens | format_number }}</p>
+  </div>
+
+</div>
+
+{% if not provider_rows %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 px-5 py-16 text-center text-sm text-zinc-500">
+  No gateway-executed steps in range. Only steps using <code class="text-zinc-400">executor: gateway</code> report a model/provider — OpenClaw steps don't report tokens (see README).
+</div>
+{% else %}
+
+<!-- Charts -->
+<div class="grid grid-cols-2 gap-6 mb-6">
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Calls by provider</h2>
+    <div class="h-64"><canvas id="chart-calls"></canvas></div>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Tokens by provider</h2>
+    {% if token_chart.labels %}
+      <div class="h-64"><canvas id="chart-tokens"></canvas></div>
+    {% else %}
+      <p class="text-sm text-zinc-500">No token data in range</p>
+    {% endif %}
+  </div>
+
+</div>
+
+<div class="bg-zinc-900 rounded-lg border border-zinc-800">
+  <table class="w-full">
+    <thead>
+      <tr class="text-xs text-zinc-500 uppercase tracking-wide border-b border-zinc-800">
+        <th class="text-left px-5 py-3 font-medium">Provider</th>
+        <th class="text-left px-5 py-3 font-medium">Calls</th>
+        <th class="text-left px-5 py-3 font-medium">Success rate</th>
+        <th class="text-left px-5 py-3 font-medium">Avg duration</th>
+        <th class="text-left px-5 py-3 font-medium">Tokens</th>
+        <th class="text-left px-5 py-3 font-medium">Models</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-zinc-800">
+      {% for row in provider_rows %}
+      <tr class="hover:bg-zinc-800 transition-colors">
+        <td class="px-5 py-3">
+          <span class="text-sm font-medium text-zinc-100">{{ row.provider }}</span>
+        </td>
+        <td class="px-5 py-3 text-sm text-zinc-200">{{ row.step_count | format_number }}</td>
+        <td class="px-5 py-3">
+          {% if row.success_rate is not none %}
+            <span class="text-sm font-medium {% if row.success_rate >= 80 %}text-green-400{% elif row.success_rate >= 60 %}text-amber-400{% else %}text-red-400{% endif %}">
+              {{ row.success_rate }}%
+            </span>
+          {% else %}
+            <span class="text-sm text-zinc-600">—</span>
+          {% endif %}
+        </td>
+        <td class="px-5 py-3 text-sm text-zinc-200">{{ format_seconds(row.avg_duration_secs) }}</td>
+        <td class="px-5 py-3">
+          {% if row.input_tokens or row.output_tokens %}
+            <span class="text-sm text-zinc-200" title="↑{{ row.input_tokens | format_number }} ↓{{ row.output_tokens | format_number }}">
+              {{ (row.input_tokens + row.output_tokens) | format_number }}
+            </span>
+          {% else %}
+            <span class="text-sm text-zinc-600">—</span>
+          {% endif %}
+        </td>
+        <td class="px-5 py-3">
+          <div class="flex gap-1 flex-wrap">
+            {% for model in row.models %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">{{ model }}</span>
+            {% endfor %}
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+  const PALETTE = ['#6366f1', '#22d3ee', '#fbbf24', '#34d399', '#fb7185', '#a78bfa', '#71717a'];
+  Chart.defaults.color = '#a1a1aa';
+  Chart.defaults.borderColor = '#27272a';
+  Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
+
+  const vertX = { grid: { display: false }, ticks: { maxRotation: 55, minRotation: 0, autoSkip: false } };
+  const vertY = { grid: { color: '#27272a' } };
+
+  const callsData = {{ calls_chart | tojson | safe }};
+  new Chart(document.getElementById('chart-calls'), {
+    type: 'bar',
+    data: { labels: callsData.labels, datasets: [{ label: 'Calls', data: callsData.data, backgroundColor: PALETTE[0] }] },
+    options: { maintainAspectRatio: false, scales: { x: vertX, y: vertY }, plugins: { legend: { display: false } } },
+  });
+
+  const tokenData = {{ token_chart | tojson | safe }};
+  if (tokenData.labels.length) {
+    new Chart(document.getElementById('chart-tokens'), {
+      type: 'bar',
+      data: {
+        labels: tokenData.labels,
+        datasets: [
+          { label: 'Input', data: tokenData.input, backgroundColor: PALETTE[0] },
+          { label: 'Output', data: tokenData.output, backgroundColor: PALETTE[1] },
+        ],
+      },
+      options: {
+        maintainAspectRatio: false,
+        scales: { x: vertX, y: { ...vertY, stacked: true } },
+        plugins: { legend: { position: 'top', labels: { boxWidth: 12 } } },
+      },
+    });
+  }
+</script>
+
+{% endif %}
+{% endblock %}

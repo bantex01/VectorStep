@@ -158,6 +158,21 @@ def _source_label(source: str) -> str:
     )
 
 
+def _provider_from_model(model: str | None) -> str:
+    """Derive the P-Ork Gateway provider key from a model string's prefix.
+
+    Mirrors P-Ork Gateway's LLMRouter.get_provider_and_model: a "prefix/model"
+    string routes to that provider; a bare model name (no slash) defaults to
+    Anthropic. Only meaningful for `executor: gateway` steps — OpenClaw's own
+    model strings aren't provider-prefixed the same way.
+    """
+    if not model:
+        return "unknown"
+    if "/" in model:
+        return model.split("/", 1)[0]
+    return "anthropic"
+
+
 _TIME_RANGES = {
     "24h": (timedelta(hours=24), "24 hours"),
     "7d": (timedelta(days=7), "7 days"),
@@ -2069,6 +2084,126 @@ async def ui_agents(request: Request, executor: str | None = None, model: str | 
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
         "active_page": "agents",
+    })
+
+
+@router.get("/providers", response_class=HTMLResponse)
+async def ui_providers(request: Request, time_range: str = "7d"):
+    """Token/call spend grouped by LLM provider (gateway executor only — see
+    _provider_from_model). A lightweight built-in alternative to standing up
+    Grafana dashboards for "how much are we spending on provider X".
+    """
+    cutoff, range_label = _time_range_cutoff(time_range)
+    sf = get_session_factory()
+
+    async with sf() as session:
+        q = (
+            select(
+                PipelineStep.model, func.count().label("n"),
+                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
+                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+                func.avg(PipelineStep.duration_ms),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.executor == "gateway", PipelineStep.model.is_not(None))
+            .group_by(PipelineStep.model)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        model_totals = rows.all()
+
+        q = (
+            select(PipelineStep.model, func.count().label("n"))
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(
+                PipelineStep.executor == "gateway",
+                PipelineStep.model.is_not(None),
+                PipelineStep.status == "failed",
+            )
+            .group_by(PipelineStep.model)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        failed_by_model: dict[str, int] = dict(rows.all())
+
+    # Aggregate per-model rows into provider buckets (provider isn't a DB column —
+    # it's derived from the model string prefix, same as the Gateway's own routing).
+    provider_agg: dict[str, dict] = {}
+    for model, step_count, input_tokens, output_tokens, avg_duration_ms in model_totals:
+        provider = _provider_from_model(model)
+        p = provider_agg.setdefault(provider, {
+            "step_count": 0, "failed_count": 0,
+            "input_tokens": 0, "output_tokens": 0,
+            "duration_weighted": 0.0, "duration_n": 0,
+            "models": Counter(),
+        })
+        p["step_count"] += step_count
+        p["failed_count"] += failed_by_model.get(model, 0)
+        p["input_tokens"] += input_tokens
+        p["output_tokens"] += output_tokens
+        if avg_duration_ms is not None:
+            p["duration_weighted"] += avg_duration_ms * step_count
+            p["duration_n"] += step_count
+        p["models"][model] += step_count
+
+    provider_rows = []
+    for provider, p in provider_agg.items():
+        success_rate = (
+            round((p["step_count"] - p["failed_count"]) / p["step_count"] * 100)
+            if p["step_count"] else None
+        )
+        avg_duration_secs = (
+            (p["duration_weighted"] / p["duration_n"]) / 1000
+            if p["duration_n"] else None
+        )
+        provider_rows.append({
+            "provider": provider,
+            "step_count": p["step_count"],
+            "failed_count": p["failed_count"],
+            "success_rate": success_rate,
+            "avg_duration_secs": avg_duration_secs,
+            "input_tokens": p["input_tokens"],
+            "output_tokens": p["output_tokens"],
+            "models": [m for m, _ in p["models"].most_common()],
+        })
+    provider_rows.sort(key=lambda r: r["step_count"], reverse=True)
+
+    total_steps = sum(r["step_count"] for r in provider_rows)
+    total_failed = sum(r["failed_count"] for r in provider_rows)
+    overall_success_rate = round((total_steps - total_failed) / total_steps * 100) if total_steps else None
+    total_input_tokens = sum(r["input_tokens"] for r in provider_rows)
+    total_output_tokens = sum(r["output_tokens"] for r in provider_rows)
+
+    token_chart_rows = sorted(
+        (r for r in provider_rows if r["input_tokens"] or r["output_tokens"]),
+        key=lambda r: r["input_tokens"] + r["output_tokens"], reverse=True,
+    )
+    token_chart = {
+        "labels": [r["provider"] for r in token_chart_rows],
+        "input": [r["input_tokens"] for r in token_chart_rows],
+        "output": [r["output_tokens"] for r in token_chart_rows],
+    }
+
+    calls_chart_rows = sorted(provider_rows, key=lambda r: r["step_count"], reverse=True)
+    calls_chart = {
+        "labels": [r["provider"] for r in calls_chart_rows],
+        "data": [r["step_count"] for r in calls_chart_rows],
+    }
+
+    return templates.TemplateResponse(request, "providers.html", {
+        "time_range": time_range,
+        "range_label": range_label,
+        "provider_rows": provider_rows,
+        "provider_count": len(provider_rows),
+        "total_steps": total_steps,
+        "overall_success_rate": overall_success_rate,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "token_chart": token_chart,
+        "calls_chart": calls_chart,
+        "active_page": "providers",
     })
 
 
