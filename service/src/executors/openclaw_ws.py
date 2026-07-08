@@ -108,6 +108,22 @@ def _extract_json_object(text: str) -> dict | None:
         return None
 
 
+class UnconfiguredOpenClawExecutor(BaseExecutor):
+    """Registered in place of OpenClawWSExecutor when executors.openclaw.url is unset.
+
+    Without this, the raw OpenClawWSExecutor class stays in the registry (via
+    dict(EXECUTORS) in main.py) and silently connects using its hardcoded
+    defaults (ws://127.0.0.1:18789/rpc, ~/.openclaw/identity) — masking the
+    fact that the executor was never actually configured.
+    """
+
+    async def execute(self, step: StepConfig, context: dict) -> LLMOutput:
+        raise RuntimeError(
+            f"Step '{step.name}': executor 'openclaw' is not configured — "
+            "set executors.openclaw.url in config.yaml"
+        )
+
+
 class OpenClawWSExecutor(BaseExecutor):
     """Executor that invokes OpenClaw agents via the Gateway WebSocket API.
 

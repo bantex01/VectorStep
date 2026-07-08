@@ -22,7 +22,7 @@ import functools
 
 from .executors import EXECUTORS
 from .executors.gateway import GatewayExecutor
-from .executors.openclaw_ws import OpenClawWSExecutor, validate_identity
+from .executors.openclaw_ws import OpenClawWSExecutor, UnconfiguredOpenClawExecutor, validate_identity
 from .metrics import PorkCollector, fetch_metrics_data
 from .models.context import NormalisedContext
 from .models.pipeline import PipelineConfig
@@ -413,6 +413,9 @@ async def lifespan(app: FastAPI):
             gateway_url=openclaw_url,
             identity_dir=openclaw_identity_dir,
         )
+    else:
+        executors["openclaw"] = UnconfiguredOpenClawExecutor
+        logger.info("OpenClaw executor not configured — executors.openclaw.url missing")
 
     # Configure agent source URLs for the UI layer
     pork_gateway_rest = gateway_cfg.get("rest_url") or os.environ.get("PORK_GATEWAY_URL", "http://localhost:18780")
