@@ -42,6 +42,7 @@ class PipelineStep(Base):
     executor: Mapped[str] = mapped_column(String, nullable=False)
     agent: Mapped[str | None] = mapped_column(String, nullable=True)   # executor_config.agent
     model: Mapped[str | None] = mapped_column(String, nullable=True)  # actual model used (from response metadata)
+    provider: Mapped[str | None] = mapped_column(String, nullable=True)  # gateway provider key (gateway executor only)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     raw_output: Mapped[str | None] = mapped_column(Text, nullable=True)          # JSON
     parsed_output: Mapped[str | None] = mapped_column(Text, nullable=True)       # JSON

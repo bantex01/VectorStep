@@ -11,4 +11,5 @@ class LLMOutput(BaseModel):
     next_step_context: str
     reasoning: dict | None = None
     model: str | None = None      # populated from executor metadata, not agent self-report
+    provider: str | None = None   # populated from executor metadata (gateway executor only)
     raw_response: dict = {}

@@ -270,12 +270,15 @@ class GatewayExecutor(BaseExecutor):
                 f"Last payload: {last_text[:500]}"
             )
 
-        model = result.get("meta", {}).get("agentMeta", {}).get("model")
+        agent_meta = result.get("meta", {}).get("agentMeta", {})
+        model = agent_meta.get("model")
+        provider = agent_meta.get("provider")
 
         try:
             return LLMOutput(
                 **parsed,
                 model=model,
+                provider=provider,
                 raw_response=result,
             )
         except Exception as exc:

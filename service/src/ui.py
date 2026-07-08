@@ -159,12 +159,17 @@ def _source_label(source: str) -> str:
 
 
 def _provider_from_model(model: str | None) -> str:
-    """Derive the P-Ork Gateway provider key from a model string's prefix.
+    """Best-effort provider guess from a model string's prefix, for PipelineStep
+    rows recorded before the `provider` column existed (it's populated directly
+    from the Gateway's agentMeta.provider for every step since).
 
-    Mirrors P-Ork Gateway's LLMRouter.get_provider_and_model: a "prefix/model"
-    string routes to that provider; a bare model name (no slash) defaults to
-    Anthropic. Only meaningful for `executor: gateway` steps — OpenClaw's own
-    model strings aren't provider-prefixed the same way.
+    This is NOT reliable in general: `PipelineStep.model` stores whatever the
+    underlying LLM API reports as its own "model" field, which for most
+    providers is NOT the same as the Gateway's routing prefix — e.g. OpenRouter
+    reports "deepseek/deepseek-v4-pro-...", not "openrouter/deepseek/...", so
+    this would incorrectly bucket it under "deepseek". Only Azure's provider
+    happens to prepend its own prefix, and bare Anthropic model strings have no
+    prefix, so those two are the only cases this can guess correctly.
     """
     if not model:
         return "unknown"
@@ -2099,14 +2104,14 @@ async def ui_providers(request: Request, time_range: str = "7d"):
     async with sf() as session:
         q = (
             select(
-                PipelineStep.model, func.count().label("n"),
+                PipelineStep.provider, PipelineStep.model, func.count().label("n"),
                 func.coalesce(func.sum(PipelineStep.input_tokens), 0),
                 func.coalesce(func.sum(PipelineStep.output_tokens), 0),
                 func.avg(PipelineStep.duration_ms),
             )
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineStep.executor == "gateway", PipelineStep.model.is_not(None))
-            .group_by(PipelineStep.model)
+            .group_by(PipelineStep.provider, PipelineStep.model)
         )
         if cutoff:
             q = q.where(PipelineRun.triggered_at >= cutoff)
@@ -2114,33 +2119,38 @@ async def ui_providers(request: Request, time_range: str = "7d"):
         model_totals = rows.all()
 
         q = (
-            select(PipelineStep.model, func.count().label("n"))
+            select(PipelineStep.provider, PipelineStep.model, func.count().label("n"))
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(
                 PipelineStep.executor == "gateway",
                 PipelineStep.model.is_not(None),
                 PipelineStep.status == "failed",
             )
-            .group_by(PipelineStep.model)
+            .group_by(PipelineStep.provider, PipelineStep.model)
         )
         if cutoff:
             q = q.where(PipelineRun.triggered_at >= cutoff)
         rows = await session.execute(q)
-        failed_by_model: dict[str, int] = dict(rows.all())
+        failed_by_model: dict[tuple[str | None, str], int] = {
+            (provider, model): n for provider, model, n in rows.all()
+        }
 
-    # Aggregate per-model rows into provider buckets (provider isn't a DB column —
-    # it's derived from the model string prefix, same as the Gateway's own routing).
+    # Aggregate per-model rows into provider buckets. `provider` is populated
+    # directly by the Gateway (agentMeta.provider) for steps run after this
+    # column was added; older rows fall back to a best-effort guess from the
+    # model string prefix (unreliable for OpenRouter, whose reported model is
+    # "vendor/model", not "openrouter/vendor/model" — see _provider_from_model).
     provider_agg: dict[str, dict] = {}
-    for model, step_count, input_tokens, output_tokens, avg_duration_ms in model_totals:
-        provider = _provider_from_model(model)
-        p = provider_agg.setdefault(provider, {
+    for provider, model, step_count, input_tokens, output_tokens, avg_duration_ms in model_totals:
+        effective_provider = provider or _provider_from_model(model)
+        p = provider_agg.setdefault(effective_provider, {
             "step_count": 0, "failed_count": 0,
             "input_tokens": 0, "output_tokens": 0,
             "duration_weighted": 0.0, "duration_n": 0,
             "models": Counter(),
         })
         p["step_count"] += step_count
-        p["failed_count"] += failed_by_model.get(model, 0)
+        p["failed_count"] += failed_by_model.get((provider, model), 0)
         p["input_tokens"] += input_tokens
         p["output_tokens"] += output_tokens
         if avg_duration_ms is not None:

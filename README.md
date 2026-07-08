@@ -555,6 +555,7 @@ class LLMOutput(BaseModel):
 
     # --- Set by the executor (agents must NOT include these) ---
     model: str | None = None      # Populated from API metadata by the executor.
+    provider: str | None = None   # Gateway provider key (gateway executor only) — see §Providers.
     raw_response: dict = {}       # Full unparsed response for audit. Set by executor.
 ```
 
@@ -572,6 +573,7 @@ class LLMOutput(BaseModel):
 | `reasoning` | No | Recommended for triage/analysis steps; improves verifier quality. |
 | `artifacts` | No | `{name: content}` dict. Runner writes each value to disk; content is not stored in the database. See §5a. |
 | `model` | No | Do not include — the executor sets this from API metadata. |
+| `provider` | No | Do not include — the `gateway` executor sets this from `agentMeta.provider` (the P-Ork Gateway provider that served the call, e.g. `anthropic`/`openrouter`/`azure`). `None` for other executors. |
 | `raw_response` | No | Do not include — set by the executor. |
 | Any extra field | No | Freely add domain fields (`jira_ticket`, `action`, etc.). All are stored and accessible downstream. |
 
@@ -1635,6 +1637,7 @@ The web UI is served under `/ui` and provides the following pages:
 | Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, and a **tag filter** (`?tag=`) |
 | Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
+| Providers | `/ui/providers` | Calls/success-rate/tokens grouped by LLM provider (`anthropic`, `openrouter`, `azure`, etc. — `executor: gateway` steps only), with a per-provider breakdown of which models were used, over a selectable time range (24h/7d/30d/all-time) |
 | Schedules | `/ui/schedules` | Active cron schedules with next-run times |
 | Insights — Overview | `/ui/insights` | Run/failure/token/accuracy totals, runs by team, and MCP tool-use counts, over a selectable time range (24h/7d/30d/all-time) |
 | Insights — By Pipeline | `/ui/insights/pipelines` | Per-pipeline run/failure/token totals and which teams triggered each pipeline in range |

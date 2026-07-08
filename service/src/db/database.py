@@ -62,6 +62,7 @@ _COLUMN_MIGRATIONS = [
     ("pipeline_steps", "input_tokens", "INTEGER"),
     ("pipeline_steps", "output_tokens", "INTEGER"),
     ("pipeline_runs", "team", "TEXT"),
+    ("pipeline_steps", "provider", "TEXT"),
 ]
 
 _INDEX_MIGRATIONS = [
