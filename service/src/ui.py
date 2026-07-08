@@ -836,6 +836,43 @@ async def ui_run_stream(request: Request, run_id: str):
     )
 
 
+def _agent_usage_in_pipeline(p: PipelineConfig) -> list[dict]:
+    """Every (step, role, executor:agent) usage in a pipeline, read straight from config.
+
+    role is "primary" or "verifier" — the same agent can be a primary in one step
+    and a verifier (reviewer or challenger — both use the same VerifierConfig
+    shape, see README §6) in another, so a given agent can carry both roles.
+    Powers the pipeline detail page's Agents card. _agents_in_pipeline collapses
+    this down to a flat set of `executor:agent` keys for badges/filtering.
+    """
+    usage: list[dict] = []
+
+    def _add(step_name: str, executor: str, agent: str | None, role: str) -> None:
+        if agent:
+            usage.append({
+                "step": step_name, "executor": executor, "agent": agent,
+                "role": role, "key": f"{executor}:{agent}",
+            })
+
+    def _add_verifier(step_name: str, verifier) -> None:
+        if verifier is not None:
+            _add(step_name, verifier.executor, verifier.executor_config.get("agent"), "verifier")
+
+    for step in p.steps:
+        if isinstance(step, ParallelGroupConfig):
+            for s in step.parallel.steps:
+                branch_name = f"{step.parallel.name}/{s.name}"
+                _add(branch_name, s.executor, s.executor_config.get("agent"), "primary")
+                _add_verifier(branch_name, s.verifier)
+        elif isinstance(step, FanOutGroupConfig):
+            _add(step.fan_out.name, step.fan_out.executor, step.fan_out.executor_config.get("agent"), "primary")
+            _add_verifier(step.fan_out.name, step.fan_out.verifier)
+        else:
+            _add(step.name, step.executor, step.executor_config.get("agent"), "primary")
+            _add_verifier(step.name, step.verifier)
+    return usage
+
+
 def _agents_in_pipeline(p: PipelineConfig) -> list[str]:
     """Distinct `executor:agent` identifiers referenced by a pipeline's steps, read straight from config.
 
@@ -847,33 +884,7 @@ def _agents_in_pipeline(p: PipelineConfig) -> list[str]:
     actually used, which depends on the agent's own backend config and is only known
     from run history (see ui_pipelines for why models are deliberately left off).
     """
-    agents: set[str] = set()
-
-    def _add_verifier(verifier) -> None:
-        if verifier is None:
-            return
-        a = verifier.executor_config.get("agent")
-        if a:
-            agents.add(f"{verifier.executor}:{a}")
-
-    for step in p.steps:
-        if isinstance(step, ParallelGroupConfig):
-            for s in step.parallel.steps:
-                a = s.executor_config.get("agent")
-                if a:
-                    agents.add(f"{s.executor}:{a}")
-                _add_verifier(s.verifier)
-        elif isinstance(step, FanOutGroupConfig):
-            a = step.fan_out.executor_config.get("agent")
-            if a:
-                agents.add(f"{step.fan_out.executor}:{a}")
-            _add_verifier(step.fan_out.verifier)
-        else:
-            a = step.executor_config.get("agent")
-            if a:
-                agents.add(f"{step.executor}:{a}")
-            _add_verifier(step.verifier)
-    return sorted(agents)
+    return sorted({u["key"] for u in _agent_usage_in_pipeline(p)})
 
 
 @router.get("/pipelines", response_class=HTMLResponse)
@@ -1612,6 +1623,44 @@ async def ui_pipeline_detail(request: Request, name: str):
 
     feedback_total = sum(feedback_counts.values())
 
+    # Group this pipeline's agent usage by executor:agent, then enrich with each
+    # agent's live-configured model + fallbacks (only known from the backend's
+    # own config, unlike everything else here which comes straight from the
+    # pipeline YAML — see _agent_usage_in_pipeline).
+    usage = _agent_usage_in_pipeline(pipeline)
+    agents_grouped: dict[str, dict] = {}
+    for u in usage:
+        g = agents_grouped.setdefault(u["key"], {
+            "executor": u["executor"], "agent": u["agent"], "roles": set(), "steps": [],
+        })
+        g["roles"].add(u["role"])
+        if u["step"] not in g["steps"]:
+            g["steps"].append(u["step"])
+
+    live_by_key: dict[str, dict] = {}
+    if agents_grouped:
+        (oc_agents, _), (gw_agents, _) = await asyncio.gather(
+            _fetch_openclaw_agents(), _fetch_pork_gateway_agents(),
+        )
+        for a in oc_agents:
+            live_by_key[f"openclaw:{a.get('id') or a.get('name')}"] = a
+        for a in gw_agents:
+            live_by_key[f"gateway:{a.get('id') or a.get('name')}"] = a
+
+    pipeline_agents = []
+    for key, g in sorted(agents_grouped.items()):
+        live = live_by_key.get(key)
+        pipeline_agents.append({
+            "key": key,
+            "executor": g["executor"],
+            "agent": g["agent"],
+            "roles": sorted(g["roles"]),
+            "steps": g["steps"],
+            "found": live is not None,
+            "model": live.get("model") if live else None,
+            "model_fallbacks": (live.get("model_fallbacks") or []) if live else [],
+        })
+
     return templates.TemplateResponse(request, "pipeline_detail.html", {
         "pipeline": pipeline,
         "raw_yaml": raw_yaml,
@@ -1621,6 +1670,7 @@ async def ui_pipeline_detail(request: Request, name: str):
         "total_runs": sum(status_counts.values()),
         "feedback_counts": feedback_counts,
         "feedback_total": feedback_total,
+        "pipeline_agents": pipeline_agents,
         "active_page": "pipelines",
     })
 

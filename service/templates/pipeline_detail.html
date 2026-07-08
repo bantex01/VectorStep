@@ -114,6 +114,48 @@
   {% endif %}
 </div>
 
+<!-- Agents -->
+{% if pipeline_agents %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6">
+  <div class="px-5 py-4 border-b border-zinc-800">
+    <h2 class="text-sm font-semibold text-zinc-200">Agents</h2>
+  </div>
+  <div class="divide-y divide-zinc-800">
+    {% for a in pipeline_agents %}
+    <div class="px-5 py-3 flex items-center justify-between gap-4 flex-wrap">
+      <div class="flex items-center gap-2 flex-wrap">
+        <a href="/ui/agents/{{ a.executor }}/{{ a.agent }}" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-950 text-cyan-400 ring-1 ring-inset ring-cyan-800 hover:bg-cyan-900 transition-colors">
+          {{ a.executor }}:{{ a.agent }}
+        </a>
+        {% if 'primary' in a.roles %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">primary</span>
+        {% endif %}
+        {% if 'verifier' in a.roles %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-950 text-purple-400 ring-1 ring-inset ring-purple-800">verifier</span>
+        {% endif %}
+        <span class="text-xs text-zinc-500">{{ a.steps | join(', ') }}</span>
+      </div>
+      <div class="flex items-center gap-1.5 flex-wrap justify-end">
+        {% if a.found %}
+          {% if a.model %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-mono bg-zinc-800 text-zinc-300 ring-1 ring-inset ring-zinc-700">{{ a.model }}</span>
+          {% endif %}
+          {% for fb in a.model_fallbacks %}
+            <span title="fallback" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-mono bg-zinc-800 text-zinc-500 ring-1 ring-inset ring-zinc-700">{{ fb }}</span>
+          {% endfor %}
+          {% if not a.model %}
+            <span class="text-xs text-zinc-600">no model configured</span>
+          {% endif %}
+        {% else %}
+          <span class="text-xs text-zinc-600">agent config unavailable</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <!-- Accuracy feedback summary -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6 px-5 py-4">
   <div class="flex items-center justify-between mb-3">
