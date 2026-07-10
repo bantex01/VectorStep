@@ -237,6 +237,93 @@ async def test_execute_no_channel_configured_raises():
         await human.HumanExecutor().execute(_step(), {"team": "team-x", "pipeline_name": "p"})
 
 
+# ---------------------------------------------------------------------------
+# stage=testing gating (_testing in context)
+# ---------------------------------------------------------------------------
+
+async def test_execute_testing_no_channel_configured_still_works():
+    """A testing pipeline with zero human_approval config still registers a
+    UI-decidable approval instead of raising."""
+    human.configure(human_approval={}, legacy_telegram={}, ui_base_url="http://x")
+
+    exec_task = asyncio.get_running_loop().create_task(
+        human.HumanExecutor().execute(
+            _step(timeout=2), {"team": "team-x", "pipeline_name": "p", "_testing": True}
+        )
+    )
+    await asyncio.sleep(0)  # let execute() register pending state
+    token = next(iter(human._pending_meta))
+    human.resolve_approval(token, True)
+    result = await exec_task
+
+    assert result.confidence == 1.0
+
+
+async def test_execute_testing_does_not_send_externally_even_with_channel_configured():
+    human.configure(
+        human_approval={"default": {"channel": "slack", "slack": {"bot_token": "t", "channel_id": "c"}}},
+        legacy_telegram={},
+        ui_base_url="http://x",
+    )
+
+    with patch.object(human.SlackApprovalChannel, "send", new=AsyncMock()) as mock_send:
+        exec_task = asyncio.get_running_loop().create_task(
+            human.HumanExecutor().execute(
+                _step(timeout=2), {"team": None, "pipeline_name": "p", "_testing": True}
+            )
+        )
+        await asyncio.sleep(0)
+        token = next(iter(human._pending_meta))
+        human.resolve_approval(token, True)
+        result = await exec_task
+
+    mock_send.assert_not_awaited()
+    assert result.confidence == 1.0
+
+
+async def test_execute_testing_timeout_auto_approves():
+    human.configure(human_approval={}, legacy_telegram={}, ui_base_url="http://x")
+
+    result = await human.HumanExecutor().execute(
+        _step(timeout=1), {"team": None, "pipeline_name": "p", "_testing": True}
+    )
+
+    assert result.confidence == 1.0
+    assert human._pending_approvals == {}
+    assert human._pending_meta == {}
+
+
+async def test_execute_testing_reject_still_resolves_to_zero_confidence():
+    human.configure(human_approval={}, legacy_telegram={}, ui_base_url="http://x")
+
+    exec_task = asyncio.get_running_loop().create_task(
+        human.HumanExecutor().execute(
+            _step(timeout=2), {"team": None, "pipeline_name": "p", "_testing": True}
+        )
+    )
+    await asyncio.sleep(0)
+    token = next(iter(human._pending_meta))
+    human.resolve_approval(token, False)
+    result = await exec_task
+
+    assert result.confidence == 0.0
+    assert result.raw_response["approved"] is False
+
+
+async def test_execute_production_unchanged_when_testing_absent():
+    """No _testing key in context at all behaves exactly like production."""
+    human.configure(human_approval={}, legacy_telegram={}, ui_base_url="http://x")
+    with pytest.raises(RuntimeError, match="no approval channel configured"):
+        await human.HumanExecutor().execute(_step(), {"team": "team-x", "pipeline_name": "p"})
+
+
+def test_pending_meta_records_stage():
+    _seed_meta("tok-testing", stage="testing")
+    _seed_meta("tok-prod", stage="production")
+    assert human._pending_meta["tok-testing"]["stage"] == "testing"
+    assert human._pending_meta["tok-prod"]["stage"] == "production"
+
+
 def test_resolve_approval_unknown_token_returns_false():
     assert human.resolve_approval("does-not-exist", True) is False
 

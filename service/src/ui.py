@@ -35,6 +35,14 @@ templates = Jinja2Templates(
 
 # ── Template helpers ──────────────────────────────────────────────────────────
 
+def _production_only(q):
+    """Scope a PipelineRun-touching query to stage=production — applied to every
+    aggregate/rollup surface (dashboard cards, insights, success/accuracy bars).
+    Browse/list surfaces (the runs list, recent-runs tables) stay unfiltered and
+    show a stage badge instead — see stage_badge() in templates/_macros.html."""
+    return q.where(PipelineRun.stage == "production")
+
+
 def _status_classes(status: str) -> str:
     return {
         "completed":   "bg-green-950 text-green-400 ring-green-800",
@@ -360,37 +368,37 @@ async def ui_dashboard(request: Request):
     cutoff_7d  = utc_now() - timedelta(days=7)
 
     async with sf() as session:
-        rows = await session.execute(
+        rows = await session.execute(_production_only(
             select(PipelineRun.status, func.count().label("n"))
             .where(PipelineRun.triggered_at >= cutoff_24h)
             .group_by(PipelineRun.status)
-        )
+        ))
         counts_24h: dict[str, int] = dict(rows.all())
 
-        rows = await session.execute(
+        rows = await session.execute(_production_only(
             select(PipelineRun.status, func.count().label("n"))
             .group_by(PipelineRun.status)
-        )
+        ))
         counts_all: dict[str, int] = dict(rows.all())
 
-        rows = await session.execute(
+        rows = await session.execute(_production_only(
             select(PipelineRun.pipeline_name, func.count().label("n"))
             .where(PipelineRun.triggered_at >= cutoff_7d)
             .group_by(PipelineRun.pipeline_name)
             .order_by(func.count().desc())
-        )
+        ))
         pipeline_activity = rows.all()
 
-        rows = await session.execute(
+        rows = await session.execute(_production_only(
             select(PipelineRun.pipeline_name, PipelineRun.team, func.count().label("n"))
             .where(PipelineRun.triggered_at >= cutoff_7d)
             .group_by(PipelineRun.pipeline_name, PipelineRun.team)
-        )
+        ))
         teams_by_pipeline: dict[str, list[tuple[str, int]]] = defaultdict(list)
         for name, team, n in rows.all():
             teams_by_pipeline[name].append((team or "unattributed", n))
 
-        rows = await session.execute(
+        rows = await session.execute(_production_only(
             select(
                 PipelineRun.pipeline_name,
                 func.coalesce(func.sum(PipelineStep.input_tokens), 0)
@@ -399,16 +407,18 @@ async def ui_dashboard(request: Request):
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineRun.triggered_at >= cutoff_7d, PipelineStep.input_tokens.is_not(None))
             .group_by(PipelineRun.pipeline_name)
-        )
+        ))
         tokens_by_pipeline: dict[str, int] = dict(rows.all())
 
-        rows = await session.execute(
+        rows = await session.execute(_production_only(
             select(PipelineRun.source, func.count().label("n"))
             .where(PipelineRun.triggered_at >= cutoff_24h)
             .group_by(PipelineRun.source)
-        )
+        ))
         source_counts = dict(rows.all())
 
+        # Browse surface — shows testing runs too (badged in the template), unlike
+        # every aggregate query above/below.
         rows = await session.execute(
             select(PipelineRun)
             .order_by(PipelineRun.triggered_at.desc())
@@ -417,14 +427,16 @@ async def ui_dashboard(request: Request):
         recent_runs = rows.scalars().all()
         feedback_by_run = await _feedback_by_run_id(session, [r.id for r in recent_runs])
 
-        rows = await session.execute(
+        rows = await session.execute(_production_only(
             select(PipelineRun.triggered_at, PipelineRun.status)
             .where(PipelineRun.triggered_at >= cutoff_24h)
-        )
+        ))
         runs_ts_raw = rows.all()
 
         rows = await session.execute(
             select(RunFeedback.pipeline_name, RunFeedback.outcome, func.count().label("n"))
+            .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
+            .where(PipelineRun.stage == "production")
             .group_by(RunFeedback.pipeline_name, RunFeedback.outcome)
         )
         feedback_agg: dict[str, dict[str, int]] = {}
@@ -433,21 +445,21 @@ async def ui_dashboard(request: Request):
             d[outcome] = n
             d["total"] += n
 
-        rows = await session.execute(
+        rows = await session.execute(_production_only(
             select(PipelineStep.executor, PipelineStep.agent, func.count().label("n"))
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineRun.triggered_at >= cutoff_7d, PipelineStep.agent.is_not(None))
             .group_by(PipelineStep.executor, PipelineStep.agent)
             .order_by(func.count().desc())
             .limit(5)
-        )
+        ))
         top_agents = rows.all()
 
-        rows = await session.execute(
+        rows = await session.execute(_production_only(
             select(PipelineStep.agent_trace)
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineRun.triggered_at >= cutoff_7d, PipelineStep.agent_trace.is_not(None))
-        )
+        ))
         tool_call_counts: Counter = Counter()
         for (trace_json,) in rows.all():
             try:
@@ -545,6 +557,7 @@ async def ui_runs(
     status: str | None = None,
     pipeline: str | None = None,
     team: str | None = None,
+    stage: str | None = None,
     time_range: str = "all",
     limit: int = 50,
     offset: int = 0,
@@ -558,12 +571,17 @@ async def ui_runs(
             q = q.where(PipelineRun.pipeline_name == pipeline)
         if team:
             q = q.where(PipelineRun.team == team)
+        if stage:
+            q = q.where(PipelineRun.stage == stage)
         if cutoff:
             q = q.where(PipelineRun.triggered_at >= cutoff)
         return q
 
     sf = get_session_factory()
     async with sf() as session:
+        # Browse surface — shows testing runs too (badged in the template) unless the
+        # user explicitly filters by stage; only the stat cards below are always
+        # scoped to production, regardless of the stage filter.
         q = _filtered(select(PipelineRun).order_by(PipelineRun.triggered_at.desc()))
         rows = await session.execute(q.limit(limit).offset(offset))
         runs = rows.scalars().all()
@@ -579,8 +597,9 @@ async def ui_runs(
         )
         team_names = [r[0] for r in rows.all()]
 
-        # Stat cards — aggregated over every run matching the active filters, not just the current page.
-        q = _filtered(select(PipelineRun.status, func.count()).group_by(PipelineRun.status))
+        # Stat cards — aggregated over every run matching the active filters, not just the
+        # current page, and always scoped to production (see _production_only).
+        q = _production_only(_filtered(select(PipelineRun.status, func.count()).group_by(PipelineRun.status)))
         rows = await session.execute(q)
         status_counts: dict[str, int] = dict(rows.all())
 
@@ -597,11 +616,11 @@ async def ui_runs(
             + status_counts.get("aborted", 0)
         )
 
-        q = _filtered(
+        q = _production_only(_filtered(
             select(RunFeedback.outcome, func.count())
             .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
             .group_by(RunFeedback.outcome)
-        )
+        ))
         rows = await session.execute(q)
         feedback_counts: dict[str, int] = dict(rows.all())
         marked_total = sum(feedback_counts.values())
@@ -610,11 +629,11 @@ async def ui_runs(
             if marked_total > 0 else None
         )
 
-        q = _filtered(
+        q = _production_only(_filtered(
             select(func.coalesce(func.sum(PipelineStep.input_tokens), 0) + func.coalesce(func.sum(PipelineStep.output_tokens), 0))
             .select_from(PipelineRun)
             .join(PipelineStep, PipelineStep.run_id == PipelineRun.id)
-        )
+        ))
         token_total = (await session.execute(q)).scalar() or 0
 
     return templates.TemplateResponse(request, "runs.html", {
@@ -625,6 +644,8 @@ async def ui_runs(
         "selected_status": status or "",
         "selected_pipeline": pipeline or "",
         "selected_team": team or "",
+        "selected_stage": stage or "",
+        "stage_values": ["testing", "production"],
         "time_range": time_range,
         "range_label": range_label,
         "limit": limit,
@@ -903,16 +924,19 @@ async def ui_pipelines(request: Request, tag: str | None = None, agent: str | No
     sf = get_session_factory()
 
     async with sf() as session:
-        rows = await session.execute(
+        # All aggregates on this page (last-run status, run counts, success rate, avg
+        # tokens, accuracy) are rollups, not a browse list — scoped to production.
+        rows = await session.execute(_production_only(
             select(PipelineRun)
             .order_by(PipelineRun.triggered_at.desc())
-        )
+        ))
         all_runs = rows.scalars().all()
 
-        fb_rows = await session.execute(
+        fb_rows = await session.execute(_production_only(
             select(RunFeedback.pipeline_name, RunFeedback.outcome, func.count().label("n"))
+            .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
             .group_by(RunFeedback.pipeline_name, RunFeedback.outcome)
-        )
+        ))
         feedback_by_pipeline: dict[str, dict[str, int]] = {}
         for name, outcome, n in fb_rows.all():
             if name not in feedback_by_pipeline:
@@ -920,7 +944,7 @@ async def ui_pipelines(request: Request, tag: str | None = None, agent: str | No
             feedback_by_pipeline[name][outcome] = n
             feedback_by_pipeline[name]["total"] += n
 
-        token_rows = await session.execute(
+        token_rows = await session.execute(_production_only(
             select(
                 PipelineRun.pipeline_name,
                 func.coalesce(func.sum(PipelineStep.input_tokens), 0),
@@ -928,7 +952,7 @@ async def ui_pipelines(request: Request, tag: str | None = None, agent: str | No
             )
             .join(PipelineStep, PipelineStep.run_id == PipelineRun.id)
             .group_by(PipelineRun.pipeline_name)
-        )
+        ))
         tokens_by_pipeline: dict[str, tuple[int, int]] = {
             name: (inp, out) for name, inp, out in token_rows.all()
         }
@@ -996,20 +1020,21 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
     cutoff, range_label = _time_range_cutoff(time_range)
     sf = get_session_factory()
 
+    # Every query below is a rollup for this insights page — scoped to production.
     async with sf() as session:
-        q = select(PipelineRun.status, func.count().label("n")).group_by(PipelineRun.status)
+        q = _production_only(select(PipelineRun.status, func.count().label("n")).group_by(PipelineRun.status))
         if cutoff:
             q = q.where(PipelineRun.triggered_at >= cutoff)
         rows = await session.execute(q)
         status_counts: dict[str, int] = dict(rows.all())
 
-        q = select(PipelineRun.team, func.count().label("n")).group_by(PipelineRun.team)
+        q = _production_only(select(PipelineRun.team, func.count().label("n")).group_by(PipelineRun.team))
         if cutoff:
             q = q.where(PipelineRun.triggered_at >= cutoff)
         rows = await session.execute(q)
         team_counts = rows.all()
 
-        q = (
+        q = _production_only(
             select(
                 func.coalesce(func.sum(PipelineStep.input_tokens), 0),
                 func.coalesce(func.sum(PipelineStep.output_tokens), 0),
@@ -1023,7 +1048,7 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
 
         # Fetch model + trace together so we can count both tool calls and LLM
         # call iterations per model in a single pass over the blobs.
-        q = (
+        q = _production_only(
             select(PipelineStep.model, PipelineStep.agent_trace)
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineStep.executor == "gateway")
@@ -1034,7 +1059,7 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         model_traces = rows.all()
 
-        q = (
+        q = _production_only(
             select(PipelineRun.pipeline_name, func.count().label("n"))
             .group_by(PipelineRun.pipeline_name)
             .order_by(func.count().desc())
@@ -1044,7 +1069,7 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         pipeline_run_counts = rows.all()
 
-        q = (
+        q = _production_only(
             select(PipelineStep.agent, func.count().label("n"))
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .group_by(PipelineStep.agent)
@@ -1055,7 +1080,7 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         agent_step_counts = rows.all()
 
-        q = (
+        q = _production_only(
             select(
                 PipelineStep.model,
                 func.coalesce(func.sum(PipelineStep.input_tokens), 0),
@@ -1070,20 +1095,27 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         tokens_by_model = rows.all()
 
-        q = select(RunFeedback.outcome, func.count().label("n")).group_by(RunFeedback.outcome)
+        q = (
+            select(RunFeedback.outcome, func.count().label("n"))
+            .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
+            .where(PipelineRun.stage == "production")
+            .group_by(RunFeedback.outcome)
+        )
         if cutoff:
             q = q.where(RunFeedback.submitted_at >= cutoff)
         rows = await session.execute(q)
         feedback_by_outcome: dict[str, int] = dict(rows.all())
 
         # Raw rows for timeseries bucketing — one consolidated fetch per level.
-        q = select(PipelineRun.triggered_at, PipelineRun.status, PipelineRun.team, PipelineRun.pipeline_name)
+        q = _production_only(
+            select(PipelineRun.triggered_at, PipelineRun.status, PipelineRun.team, PipelineRun.pipeline_name)
+        )
         if cutoff:
             q = q.where(PipelineRun.triggered_at >= cutoff)
         rows = await session.execute(q)
         run_ts_rows = rows.all()
 
-        q = (
+        q = _production_only(
             select(
                 PipelineRun.triggered_at,
                 PipelineStep.agent,
@@ -1238,14 +1270,17 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
     cutoff, range_label = _time_range_cutoff(time_range)
     sf = get_session_factory()
 
+    # Every query below is a rollup for this insights page — scoped to production.
     async with sf() as session:
-        q = select(PipelineRun.pipeline_name, func.count().label("n")).group_by(PipelineRun.pipeline_name)
+        q = _production_only(
+            select(PipelineRun.pipeline_name, func.count().label("n")).group_by(PipelineRun.pipeline_name)
+        )
         if cutoff:
             q = q.where(PipelineRun.triggered_at >= cutoff)
         rows = await session.execute(q)
         run_counts = dict(rows.all())
 
-        q = (
+        q = _production_only(
             select(PipelineRun.pipeline_name, func.count().label("n"))
             .where(PipelineRun.status == "failed")
             .group_by(PipelineRun.pipeline_name)
@@ -1255,7 +1290,7 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         failed_counts = dict(rows.all())
 
-        q = (
+        q = _production_only(
             select(
                 PipelineRun.pipeline_name,
                 func.coalesce(func.sum(PipelineStep.input_tokens), 0),
@@ -1270,7 +1305,7 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         token_totals = {name: (i, o) for name, i, o in rows.all()}
 
-        q = (
+        q = _production_only(
             select(PipelineRun.pipeline_name, PipelineRun.team)
             .distinct()
             .group_by(PipelineRun.pipeline_name, PipelineRun.team)
@@ -1285,7 +1320,7 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         # No duration column on pipeline_runs — compute from timestamps in Python
         # (same approach _format_duration already uses) rather than a cross-dialect
         # SQL timestamp-diff. Only terminal runs (completed_at set) count.
-        q = (
+        q = _production_only(
             select(PipelineRun.pipeline_name, PipelineRun.triggered_at, PipelineRun.completed_at)
             .where(PipelineRun.completed_at.is_not(None))
         )
@@ -1299,7 +1334,7 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
                 durations_by_pipeline[name].append(secs)
 
         # Status breakdown per pipeline (for drilldown status bar)
-        q = (
+        q = _production_only(
             select(PipelineRun.pipeline_name, PipelineRun.status, func.count().label("n"))
             .group_by(PipelineRun.pipeline_name, PipelineRun.status)
         )
@@ -1311,7 +1346,7 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
             status_counts_by_pipeline[name][status] = n
 
         # All runs in range — used for per-pipeline timeseries and recent-runs list
-        q = (
+        q = _production_only(
             select(
                 PipelineRun.id,
                 PipelineRun.pipeline_name,
@@ -1327,7 +1362,7 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         all_runs_raw = rows.all()
 
         # Feedback per pipeline scoped to the same time range (via run date)
-        fb_q = (
+        fb_q = _production_only(
             select(RunFeedback.pipeline_name, RunFeedback.outcome, func.count().label("n"))
             .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
             .group_by(RunFeedback.pipeline_name, RunFeedback.outcome)
@@ -1500,8 +1535,9 @@ async def ui_insights_agents(request: Request, time_range: str = "7d"):
     cutoff, range_label = _time_range_cutoff(time_range)
     sf = get_session_factory()
 
+    # Every query below is a rollup for this insights page — scoped to production.
     async with sf() as session:
-        q = (
+        q = _production_only(
             select(
                 PipelineStep.executor, PipelineStep.agent, func.count().label("n"),
                 func.coalesce(func.sum(PipelineStep.input_tokens), 0),
@@ -1516,7 +1552,7 @@ async def ui_insights_agents(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         step_totals = rows.all()
 
-        q = (
+        q = _production_only(
             select(PipelineStep.executor, PipelineStep.agent, func.count().label("n"))
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineStep.status == "failed")
@@ -1527,7 +1563,7 @@ async def ui_insights_agents(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         failed_counts = {(executor, agent): n for executor, agent, n in rows.all()}
 
-        q = (
+        q = _production_only(
             select(PipelineStep.executor, PipelineStep.agent, PipelineStep.model)
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineStep.model.is_not(None))
@@ -1598,6 +1634,7 @@ async def ui_pipeline_detail(request: Request, name: str):
 
     sf = get_session_factory()
     async with sf() as session:
+        # Browse surface — shows testing runs too (badged in the template).
         rows = await session.execute(
             select(PipelineRun)
             .where(PipelineRun.pipeline_name == name)
@@ -1607,18 +1644,20 @@ async def ui_pipeline_detail(request: Request, name: str):
         recent_runs = rows.scalars().all()
         feedback_by_run = await _feedback_by_run_id(session, [r.id for r in recent_runs])
 
-        rows = await session.execute(
+        # Success-rate / accuracy bars below are rollups — scoped to production.
+        rows = await session.execute(_production_only(
             select(PipelineRun.status, func.count().label("n"))
             .where(PipelineRun.pipeline_name == name)
             .group_by(PipelineRun.status)
-        )
+        ))
         status_counts = dict(rows.all())
 
-        rows = await session.execute(
+        rows = await session.execute(_production_only(
             select(RunFeedback.outcome, func.count().label("n"))
+            .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
             .where(RunFeedback.pipeline_name == name)
             .group_by(RunFeedback.outcome)
-        )
+        ))
         feedback_counts = dict(rows.all())
 
     feedback_total = sum(feedback_counts.values())
@@ -1684,15 +1723,19 @@ async def ui_pipeline_feedback(request: Request, name: str):
 
     sf = get_session_factory()
     async with sf() as session:
+        # Chronological browse list — includes testing runs, badged (see stage below).
+        # The config-fingerprint comparison further down is production-only, since
+        # mixing testing and production runs would corrupt "compare accuracy before
+        # vs after a pipeline change."
         rows = await session.execute(
-            select(RunFeedback, PipelineRun.triggered_at, PipelineRun.status)
+            select(RunFeedback, PipelineRun.triggered_at, PipelineRun.status, PipelineRun.stage)
             .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
             .where(RunFeedback.pipeline_name == name)
             .order_by(RunFeedback.submitted_at.desc())
         )
         feedback_rows = rows.all()
 
-        run_ids = [fb.run_id for fb, _, _ in feedback_rows]
+        run_ids = [fb.run_id for fb, _, _, _ in feedback_rows]
         steps_by_run: dict[str, list] = defaultdict(list)
         if run_ids:
             step_rows = await session.execute(
@@ -1705,7 +1748,7 @@ async def ui_pipeline_feedback(request: Request, name: str):
 
     # Build per-run records annotated with config fingerprint
     marked_runs = []
-    for fb, triggered_at, run_status in feedback_rows:
+    for fb, triggered_at, run_status, stage in feedback_rows:
         steps = steps_by_run.get(fb.run_id, [])
         fp = _config_fingerprint(steps) if steps else "unknown"
         desc = _config_description(steps) if steps else {"steps": [], "models": []}
@@ -1716,13 +1759,16 @@ async def ui_pipeline_feedback(request: Request, name: str):
             "submitted_at": fb.submitted_at,
             "triggered_at": triggered_at,
             "run_status": run_status,
+            "stage": stage,
             "fingerprint": fp,
             "config": desc,
         })
 
-    # Group by config fingerprint
+    # Group by config fingerprint — summary cards and this comparison are rollups,
+    # scoped to production only (unlike the chronological marked_runs list above).
+    production_marked_runs = [r for r in marked_runs if r["stage"] == "production"]
     config_groups: dict[str, dict] = {}
-    for r in marked_runs:
+    for r in production_marked_runs:
         fp = r["fingerprint"]
         if fp not in config_groups:
             config_groups[fp] = {
@@ -1752,10 +1798,10 @@ async def ui_pipeline_feedback(request: Request, name: str):
         g["total"] = total
         g["correct_pct"] = round(g["correct"] / total * 100) if total else 0
 
-    total_marked = len(marked_runs)
-    total_correct = sum(1 for r in marked_runs if r["outcome"] == "correct")
-    total_partial = sum(1 for r in marked_runs if r["outcome"] == "partial")
-    total_incorrect = sum(1 for r in marked_runs if r["outcome"] == "incorrect")
+    total_marked = len(production_marked_runs)
+    total_correct = sum(1 for r in production_marked_runs if r["outcome"] == "correct")
+    total_partial = sum(1 for r in production_marked_runs if r["outcome"] == "partial")
+    total_incorrect = sum(1 for r in production_marked_runs if r["outcome"] == "incorrect")
 
     return templates.TemplateResponse(request, "pipeline_feedback.html", {
         "pipeline": pipeline,

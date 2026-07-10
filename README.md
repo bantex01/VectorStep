@@ -42,7 +42,8 @@ samples/                      # Copy-and-adapt templates for new deployments (gi
 │   ├── generic-webhook-new-order.yaml
 │   ├── human-approval-test.yaml
 │   ├── otel-triage-verified.yaml
-│   └── tagged-example.yaml
+│   ├── tagged-example.yaml
+│   └── stage-testing-example.yaml
 └── steps/                      # Step definition templates — copy to service/steps/
     ├── first-line-triage.yaml
     ├── sre-investigation.yaml
@@ -338,6 +339,94 @@ steps will undercount regardless of this feature.
 
 ---
 
+### 3c. Pipeline Stages (testing vs production)
+
+Every pipeline has a `stage: testing | production` field. `testing` is the
+**default** — an unmarked or newly-authored pipeline is fully executable and
+fully observable inside P-Ork's own UI, but inert to the outside world and
+excluded from every aggregate metric. `production` is today's pre-existing
+behaviour. Promotion is a one-line YAML diff, reviewed in git like any other
+config change, applied with `POST /reload`/SIGHUP — **there is no UI toggle**,
+consistent with `tags`/`version` staying git-controlled.
+
+```yaml
+name: my-pipeline
+stage: testing        # testing (default) | production
+...
+```
+
+`stage` is **pipeline-level only** — there is no step-level override. It is
+persisted on the run row at trigger time (`pipeline_runs.stage`), not derived
+by joining against the current pipeline config, so promoting a pipeline to
+`production` never retroactively reclassifies its prior testing runs.
+
+#### What `testing` mutes
+
+Four independent outbound paths are gated — every one of them logs what *would*
+have happened instead of silently doing nothing:
+
+| Path | Testing behaviour |
+|---|---|
+| `notifications:` block (§9a) | Forced to the `log` channel regardless of configured channel; run log gets a `notification_suppressed_testing` event instead of `notification_sent`. |
+| `executor: notify` (§10c) | The HTTP call is skipped; the rendered body is logged and the step returns a synthetic success (`confidence=1.0`, `raw_response.suppressed_testing=true`) so downstream steps still run. |
+| Step-level `on_failure.webhook` (§10b) | Skipped entirely; a `step_failure_webhook_suppressed_testing` run-log event records the URL that would have been called. |
+| `executor: human` (§9 "human") | The external channel (Telegram/Slack/Teams) is **not** sent — but the approval is still registered in P-Ork's own UI (`/ui/approvals` and the run-detail banner), so a real Approve/Reject decision can be made. A Reject still resolves to `confidence=0.0` and drives `on_low_confidence`/downstream `when:` exactly as in production. Unlike production, a timeout **auto-approves** (`confidence=1.0`) rather than failing the step, so a forgotten testing approval never wedges the pipeline. A testing pipeline with no `human_approval` config at all still works — the channel is never resolved/built when testing. |
+
+All four gates key off a single `_testing` boolean the runner injects into every
+step's Jinja2/executor context (`{{ _testing }}` is available in prompts, though
+the muting itself is automatic — pipeline authors don't need to reference it).
+
+#### Trigger gating
+
+A `stage: testing` pipeline does not fire from real ingestion traffic:
+
+```bash
+POST /webhook?source=alertmanager
+# → {"status": "skipped_testing", "pipeline": "...", "reason": "..."}
+
+POST /webhook?source=alertmanager&allow_testing=true
+# → {"status": "accepted", "run_id": "..."}   — deliberately opted in
+```
+
+The **Run now** button (`POST /pipelines/{name}/run`) and re-run
+(`POST /runs/{run_id}/rerun`) always run a testing pipeline — both are
+deliberate manual actions, not real ingestion traffic.
+
+#### Metrics and UI exclusion
+
+A `stage: testing` run contributes **zero** to every aggregate/rollup surface:
+`GET /metrics` (all series, including `pork_human_approvals_pending`, which
+excludes testing approvals from its in-memory gauge the same way the
+DB-backed counters do), the dashboard's stat cards and top-agents/top-tools
+cards, the runs-page stat cards, pipeline success/accuracy bars, the
+config-fingerprint accuracy comparison on `/ui/pipelines/{name}/feedback`, and
+both Insights pages (`/ui/insights/pipelines` and `/ui/insights/agents`).
+
+**Browse surfaces are the exception** — the runs list, dashboard's recent-runs
+table, a pipeline's recent-runs table, and the chronological "every marked
+run" table on the feedback page all show testing runs too, marked with an
+amber **TESTING** badge, so testing activity stays fully visible for
+debugging. `/ui/runs` has a `?stage=testing|production` filter (mirroring the
+existing `team` filter) for browsing one stage at a time; the stat cards atop
+that page always reflect production only, independent of this filter.
+
+#### Promotion workflow
+
+1. Develop and exercise a pipeline with the default `stage: testing` (or set
+   it explicitly) — run it via **Run now** or `?allow_testing=true`, watch it
+   in the UI, confirm accuracy feedback looks right.
+2. When ready, change one line: `stage: production`.
+3. `POST /reload` (or SIGHUP). The pipeline now fires from real traffic, its
+   outbound notifications/webhooks/approvals go out for real, and new runs
+   count toward every metric and rollup. Prior testing runs are unaffected —
+   the DB already recorded them as `stage=testing`.
+
+See `samples/pipelines/stage-testing-example.yaml` for a complete worked example
+covering all three testing-gated executor paths (`notify`, `on_failure.webhook`,
+`human`) plus muted pipeline `notifications:`, with the promotion comment inline.
+
+---
+
 ### 4. Pipeline Config Schema (YAML)
 
 Model selection is handled by the named agent's own config in the executor backend. To override the model for a specific step, set `executor_config.model` — this is passed directly to the executor and takes precedence over the agent's configured model.
@@ -351,6 +440,7 @@ name: alert-triage-critical
 description: Full triage pipeline for critical alerts
 tags: [critical, sre, grafana]  # optional — free-form labels, searchable on /ui/pipelines
 version: 1
+stage: production                # testing (default) | production — see §3c
 
 trigger:
   match:
@@ -1430,6 +1520,7 @@ retry:
 | `logs` | json, nullable | Structured run event log — array of `{ts, level, event, msg}` objects. Populated at run completion. Events cover step start/complete/fail/skip/escalate/abort, verifier results, parallel group outcomes, notifications sent, and (for `interrupted` runs) the startup interruption sweep. |
 | `parent_run_id` | uuid, nullable, indexed | Set for sub-pipeline runs (`executor: pipeline`). Links back to the parent run. NULL for top-level runs. |
 | `team` | str, nullable, indexed | Owning team, resolved from the Bearer token that authenticated the webhook (see §3b). NULL for unattributed/legacy-token runs. |
+| `stage` | str, indexed | `testing` or `production`, copied from `PipelineConfig.stage` (see §3c) at trigger time — persisted per-run so promoting a pipeline never reclassifies its prior runs. Defaults to `production` at the DB layer for rows that predate this column. |
 
 **pipeline_steps**
 
@@ -1474,6 +1565,8 @@ retry:
 POST /webhook?source=<source>
 # → {"status": "accepted", "run_id": "<uuid>"}
 # → {"status": "deduplicated", "run_id": "<uuid>", "reason": "..."}  — see §3a
+# → {"status": "skipped_testing", "pipeline": "...", "reason": "..."}  — see §3c;
+#   pass ?allow_testing=true to run a stage=testing pipeline from this source
 
 # Reload step library and all pipeline YAMLs from disk without restarting
 POST /reload
@@ -1489,7 +1582,10 @@ GET /schedules
 # List runs — newest first. Filters: ?status=escalated, ?pipeline=alert-triage-critical, ?team=payments
 # Pagination: ?limit=50&offset=0 (max 200)
 GET /runs
-# → {"runs": [{id, pipeline_name, source, status, triggered_at, completed_at}, ...]}
+# → {"runs": [{id, pipeline_name, source, status, team, stage, triggered_at, completed_at}, ...]}
+# stage is "testing" or "production" (see §3c), included on both the list and the
+# full detail response below — persisted per-run, so it reflects the pipeline's
+# stage at the time the run was triggered rather than its current config.
 
 # Full run detail — includes all steps with confidence scores and parsed output
 GET /runs/{run_id}
@@ -1533,6 +1629,10 @@ GET /metrics
 `rate()`/ratios in PromQL for escalation rate, per-agent success rate, and verifier veto
 frequency rather than relying on pre-baked percentages.
 
+Every metric below is scoped to `stage=production` — a `stage=testing` pipeline (the
+default, see §3c) contributes to none of them, including the metrics that query
+`pipeline_steps` without otherwise touching `pipeline_runs`.
+
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `pork_pipeline_runs_total` | counter | `pipeline`, `status` | Total runs by pipeline and terminal status |
@@ -1544,7 +1644,7 @@ frequency rather than relying on pre-baked percentages.
 | `pork_pipeline_tokens_total` | counter | `team`, `pipeline`, `executor`, `agent`, `model`, `direction` | Cumulative input/output tokens consumed, broken down by owning team (§3b) for cost attribution. `direction` is `input`/`output`. NULL team/model are bucketed as `""` rather than dropped, so unattributed spend stays visible. Steps from executors that don't report tokens (`openclaw`, `human`, `webhook`) are excluded rather than padded as zero. |
 | `pork_human_approval_decisions_total` | counter | `team`, `pipeline`, `decision` | Cumulative `human` step (§9 `executor: human`) approve/reject decisions. `decision` is `approved`/`rejected`, derived from `primary_confidence` (1.0/0.0 — see the executor's contract). Timeouts leave `primary_confidence` NULL and are excluded rather than miscounted as either outcome. NULL team is bucketed as `""`. |
 | `pork_pipeline_feedback_total` | counter | `pipeline`, `outcome` | Cumulative human accuracy feedback (§Accuracy feedback — the same data backing `/ui/pipelines/{name}/feedback`). `outcome` is `correct`/`partial`/`incorrect`. |
-| `pork_human_approvals_pending` | gauge | `team` | Currently pending `human` step approvals, awaiting a response on whichever channel (Telegram/Slack/Teams) that team is routed to (§ "human — Human-in-the-Loop"). Unlike every other metric here this isn't derived from the database — pending approvals are in-memory only — so it reflects only this process's current state, not a historical/cumulative total. NULL team is bucketed as `""`. Always emits at least a zero-valued series so the metric doesn't disappear from dashboards when nothing's pending. |
+| `pork_human_approvals_pending` | gauge | `team` | Currently pending `human` step approvals, awaiting a response on whichever channel (Telegram/Slack/Teams) that team is routed to (§ "human — Human-in-the-Loop"). Unlike every other metric here this isn't derived from the database — pending approvals are in-memory only — so it reflects only this process's current state, not a historical/cumulative total. NULL team is bucketed as `""`. Always emits at least a zero-valued series so the metric doesn't disappear from dashboards when nothing's pending. Excludes `stage=testing` pending approvals, same as every other series on this page — see §3c. |
 
 Dollar-cost conversion is intentionally not provided — there's no per-model
 pricing table yet, so this metric is raw token counts only.
@@ -1629,19 +1729,19 @@ The web UI is served under `/ui` and provides the following pages:
 
 | Page | Route | Description |
 |---|---|---|
-| Dashboard | `/ui/` | 24h run counts by status, success rate, pipeline activity, recent runs |
-| Runs | `/ui/runs` | Run history with status/pipeline/team filters and a selectable time range (24h/7d/30d/all-time); stat cards (run count, success rate, escalated/failed, accuracy marked, accuracy %, tokens) are scoped to the active filters, not just the current page |
-| Run detail | `/ui/runs/{id}` | Full step breakdown with confidence bars, parsed output, verifier results, collapsible agent trace (gateway steps), collapsible run log, live tail for in-progress runs, and **accuracy feedback widget** |
-| Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status, run counts, per-pipeline agent badges (read from config), all-time success rate, avg tokens in/out per run, and **tag** (`?tag=`) / **agent** (`?agent=`) filters; header stat cards are scoped to the active filters |
-| Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, **Agents card** (every agent used by the pipeline — including verifiers/challengers — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), accuracy feedback summary bar, recent runs, YAML viewer, and **Run now** button |
-| Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) |
+| Dashboard | `/ui/` | 24h run counts by status, success rate, pipeline activity, recent runs (production only, see §3c) — recent runs shows testing runs too, badged |
+| Runs | `/ui/runs` | Run history with status/pipeline/team/**stage** (`?stage=testing\|production`, §3c) filters and a selectable time range (24h/7d/30d/all-time); stat cards (run count, success rate, escalated/failed, accuracy marked, accuracy %, tokens) are always scoped to production, independent of the stage filter; the list itself shows testing runs too, badged |
+| Run detail | `/ui/runs/{id}` | Full step breakdown with confidence bars, parsed output, verifier results, collapsible agent trace (gateway steps), collapsible run log, live tail for in-progress runs, **accuracy feedback widget**, and a **TESTING** badge when `stage=testing` |
+| Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status, run counts, per-pipeline agent badges (read from config), all-time success rate, avg tokens in/out per run, a **TESTING** badge per pipeline (§3c), and **tag** (`?tag=`) / **agent** (`?agent=`) filters; header stat cards and all per-pipeline rollups are scoped to production |
+| Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, stage badge, **Agents card** (every agent used by the pipeline — including verifiers/challengers — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), accuracy feedback summary bar (production only), recent runs (badged, all stages), YAML viewer, and **Run now** button (always runs regardless of stage) |
+| Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) — summary cards and the config-fingerprint comparison are production only; the chronological "every marked run" table shows all stages, badged |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, and a **tag filter** (`?tag=`) |
 | Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
 | Providers | `/ui/providers` | Calls/success-rate/tokens grouped by LLM provider (`anthropic`, `openrouter`, `azure`, etc. — `executor: gateway` steps only), with a per-provider breakdown of which models were used, over a selectable time range (24h/7d/30d/all-time) |
 | Schedules | `/ui/schedules` | Active cron schedules with next-run times |
-| Insights — Overview | `/ui/insights` | Run/failure/token/accuracy totals, runs by team, and MCP tool-use counts, over a selectable time range (24h/7d/30d/all-time) |
-| Insights — By Pipeline | `/ui/insights/pipelines` | Per-pipeline run/failure/token totals and which teams triggered each pipeline in range |
-| Insights — By Agent | `/ui/insights/agents` | Per-agent step/success-rate/token totals and which models each agent used in range |
+| Insights — Overview | `/ui/insights` | Run/failure/token/accuracy totals, runs by team, and MCP tool-use counts, over a selectable time range (24h/7d/30d/all-time) — production only |
+| Insights — By Pipeline | `/ui/insights/pipelines` | Per-pipeline run/failure/token totals and which teams triggered each pipeline in range — production only |
+| Insights — By Agent | `/ui/insights/agents` | Per-agent step/success-rate/token totals and which models each agent used in range — production only |
 
 ### Running a pipeline manually
 
@@ -1945,6 +2045,10 @@ The `steps/` directory is gitignored — steps are personal to your deployment. 
 | In-flight dedup always wins regardless of `window_seconds` | Prevents two overlapping triage/remediation runs for the same alert — the dangerous case — independent of how the recency window is tuned |
 | Alert `status` (firing/resolved) folded into the Alertmanager fingerprint | A resolve notification must never be suppressed as a duplicate of the firing run it's closing out |
 | `trigger.dedup` as a sibling of `trigger.match`, not inside it | Keeps `match` purely about resolver conditions (`_matches()` iterates every key as a field/label comparison) — dedup is an execution-policy concern, not a matching condition |
+| `stage` defaults to `testing`, not `production` | New/WIP pipelines are safe by default — nothing pages a real human or counts toward metrics until someone deliberately promotes it (§3c) |
+| `pipeline_runs.stage` persisted per-run, not joined from the live config | Captures stage-at-run-time — promoting a pipeline to `production` never retroactively moves prior testing runs into production metrics |
+| `stage` gates four outbound paths individually rather than one flag | `notifications:`, `executor: notify`, `on_failure.webhook`, and `executor: human` are genuinely independent side-effect sources — muting the pipeline as a whole would still need per-path logic, so it's implemented where each one fires |
+| No UI toggle for `stage` | Consistent with `tags`/`version` — pipeline behaviour stays entirely git-controlled config, reviewable in a diff |
 
 ---
 

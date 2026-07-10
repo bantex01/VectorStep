@@ -42,26 +42,35 @@ class MetricsData:
 
 
 async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData:
+    # Every query is scoped to stage=production — a testing pipeline (default stage,
+    # see PipelineConfig.stage) contributes nothing to any /metrics series. Queries
+    # that don't otherwise touch pipeline_runs pick up a join purely for this filter.
     async with session_factory() as session:
         rows = await session.execute(
             select(PipelineRun.pipeline_name, PipelineRun.status, func.count())
+            .where(PipelineRun.stage == "production")
             .group_by(PipelineRun.pipeline_name, PipelineRun.status)
         )
         run_counts = rows.all()
 
         runs_in_progress = await session.scalar(
-            select(func.count()).where(PipelineRun.status == "running")
+            select(func.count()).where(
+                PipelineRun.status == "running", PipelineRun.stage == "production"
+            )
         )
 
         rows = await session.execute(
             select(PipelineStep.executor, PipelineStep.agent, PipelineStep.status, func.count())
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineRun.stage == "production")
             .group_by(PipelineStep.executor, PipelineStep.agent, PipelineStep.status)
         )
         step_counts = rows.all()
 
         rows = await session.execute(
             select(PipelineStep.executor, PipelineStep.agent, PipelineStep.duration_ms)
-            .where(PipelineStep.duration_ms.is_not(None))
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.duration_ms.is_not(None), PipelineRun.stage == "production")
         )
         step_durations = [(executor, agent, ms / 1000.0) for executor, agent, ms in rows.all()]
 
@@ -74,7 +83,8 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
                     else_=0,
                 )),
             )
-            .where(PipelineStep.verifier_confidence.is_not(None))
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.verifier_confidence.is_not(None), PipelineRun.stage == "production")
             .group_by(PipelineStep.agent)
         )
         verifier_counts = rows.all()
@@ -93,7 +103,7 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
                 func.coalesce(func.sum(PipelineStep.output_tokens), 0),
             )
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-            .where(PipelineStep.input_tokens.is_not(None))
+            .where(PipelineStep.input_tokens.is_not(None), PipelineRun.stage == "production")
             .group_by(
                 PipelineRun.team, PipelineRun.pipeline_name,
                 PipelineStep.executor, PipelineStep.agent, PipelineStep.model,
@@ -113,13 +123,19 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
                 func.count(),
             )
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-            .where(PipelineStep.executor == "human", PipelineStep.primary_confidence.is_not(None))
+            .where(
+                PipelineStep.executor == "human",
+                PipelineStep.primary_confidence.is_not(None),
+                PipelineRun.stage == "production",
+            )
             .group_by(PipelineRun.team, PipelineRun.pipeline_name, decision_case)
         )
         human_decisions = list(rows.all())
 
         rows = await session.execute(
             select(RunFeedback.pipeline_name, RunFeedback.outcome, func.count())
+            .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
+            .where(PipelineRun.stage == "production")
             .group_by(RunFeedback.pipeline_name, RunFeedback.outcome)
         )
         feedback_counts = list(rows.all())
@@ -222,9 +238,12 @@ class PorkCollector(Collector):
     def _pending_approvals_gauge() -> GaugeMetricFamily:
         """Pending human approvals aren't persisted (in-memory only — see
         executors/human.py), so unlike everything else in this collector this reads
-        live process state directly rather than the pre-fetched MetricsData."""
+        live process state directly rather than the pre-fetched MetricsData.
+        Testing-stage approvals are excluded, same as every other series here."""
         pending_by_team: dict[str, int] = defaultdict(int)
         for item in _list_pending_approvals():
+            if item.get("stage") == "testing":
+                continue
             pending_by_team[item.get("team") or ""] += 1
 
         gauge = GaugeMetricFamily(

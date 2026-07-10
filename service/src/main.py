@@ -582,6 +582,7 @@ async def webhook(
     source: str | None = Query(default=None),
     x_pipeline_source: str | None = Header(default=None),
     strategy: AlertmanagerStrategy = Query(default="most_severe"),
+    allow_testing: bool = Query(default=False),
 ):
     team = _resolve_team(request.headers.get("Authorization", ""))
 
@@ -614,7 +615,7 @@ async def webhook(
         normalised.source, normalised.pipeline, normalised.severity,
     )
 
-    return await _trigger_run(normalised)
+    return await _trigger_run(normalised, allow_testing=allow_testing)
 
 
 @app.post("/pipelines/{name}/run")
@@ -640,12 +641,13 @@ async def run_pipeline_now(name: str, request: Request):
 
     logger.info("Manual run triggered from UI: pipeline=%s", normalised.pipeline)
 
-    return await _trigger_run(normalised)
+    # "Run now" is a deliberate manual action — always runnable regardless of stage.
+    return await _trigger_run(normalised, allow_testing=True)
 
 
-async def _trigger_run(normalised: NormalisedContext) -> JSONResponse:
+async def _trigger_run(normalised: NormalisedContext, allow_testing: bool = False) -> JSONResponse:
     """Resolve a pipeline for a normalised context and either return a
-    dedup/overload response or kick off a new run. Shared by the public
+    skipped/dedup/overload response or kick off a new run. Shared by the public
     /webhook endpoint and the internal 'Run now' UI trigger.
     """
     pipeline = resolve_pipeline(normalised, _pipelines)
@@ -654,6 +656,20 @@ async def _trigger_run(normalised: NormalisedContext) -> JSONResponse:
             status_code=422,
             detail=f"No pipeline matched for source='{normalised.source}' "
                    f"severity='{normalised.severity}' labels={normalised.labels}",
+        )
+
+    if pipeline.stage == "testing" and not allow_testing:
+        logger.info(
+            "Testing pipeline '%s' not triggered from %s (allow_testing not set)",
+            pipeline.name, normalised.source,
+        )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "skipped_testing",
+                "pipeline": pipeline.name,
+                "reason": "Pipeline is stage=testing; pass allow_testing=true to run it from this source.",
+            },
         )
 
     if normalised.fingerprint:
@@ -827,6 +843,7 @@ def _format_run_summary(run: PipelineRun) -> dict:
         "source": run.source,
         "status": run.status,
         "team": run.team,
+        "stage": run.stage,
         "triggered_at": run.triggered_at.isoformat(),
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
     }

@@ -180,6 +180,53 @@ async def test_execute_custom_method():
 
 
 # ---------------------------------------------------------------------------
+# stage=testing gating (_testing in context)
+# ---------------------------------------------------------------------------
+
+async def test_execute_suppressed_when_testing():
+    step = _step(payload={"text": "Alert: {{summary}}"})
+    executor = NotifyExecutor()
+    ctx = {"summary": "disk full on prod", "_testing": True}
+
+    with patch.object(httpx.AsyncClient, "request", new=AsyncMock()) as mock_request:
+        result = await executor.execute(step, ctx)
+
+    mock_request.assert_not_awaited()
+    assert result.confidence == 1.0
+    assert result.raw_response["suppressed_testing"] is True
+    assert result.raw_response["url"] == "https://hooks.example.com/alert"
+    assert "suppressed" in result.summary
+
+
+async def test_execute_not_suppressed_when_testing_false():
+    step = _step(payload={"text": "hi"})
+    executor = NotifyExecutor()
+
+    async def fake_request(self, method, url, content=None, headers=None):
+        return _mock_response()
+
+    with patch.object(httpx.AsyncClient, "request", new=fake_request):
+        result = await executor.execute(step, {"_testing": False})
+
+    assert result.raw_response.get("suppressed_testing") is None
+    assert "200" in result.summary
+
+
+async def test_execute_not_suppressed_when_testing_absent():
+    """Context without _testing at all (e.g. older/unrelated callers) behaves as production."""
+    step = _step(payload={"text": "hi"})
+    executor = NotifyExecutor()
+
+    async def fake_request(self, method, url, content=None, headers=None):
+        return _mock_response()
+
+    with patch.object(httpx.AsyncClient, "request", new=fake_request):
+        result = await executor.execute(step, {})
+
+    assert result.raw_response.get("suppressed_testing") is None
+
+
+# ---------------------------------------------------------------------------
 # _resolve_env
 # ---------------------------------------------------------------------------
 

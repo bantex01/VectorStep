@@ -22,6 +22,8 @@ async def test_team_column_migration_idempotent(tmp_path):
 
     assert "team" in columns
     assert "ix_pipeline_runs_team" in indexes
+    assert "stage" in columns
+    assert "ix_pipeline_runs_stage" in indexes
 
 
 async def test_team_column_queryable_after_migration(tmp_path):

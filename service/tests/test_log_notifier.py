@@ -159,3 +159,81 @@ async def test_dispatch_notification_routes_to_log_notifier(caplog):
     assert "Escalated: test-pipeline" in caplog.text
     record = next(r for r in caplog.records if "Escalated" in r.message)
     assert record.levelno == logging.ERROR
+
+
+async def test_dispatch_notification_production_uses_configured_channel():
+    """stage=production sends to the configured channel and logs notification_sent."""
+    from src.pipeline.runner import PipelineRunner
+    from src.models.pipeline import PipelineConfig, TriggerConfig, NotificationConfig
+
+    notifier = LogNotifier()
+    runner = PipelineRunner(
+        executors={}, session_factory=None, notifiers={"log": notifier},
+    )
+    pipeline = PipelineConfig(
+        name="test-pipeline",
+        trigger=TriggerConfig(),
+        steps=[],
+        stage="production",
+        notifications={"escalate": [NotificationConfig(channel="log", template="hi")]},
+    )
+    run_log: list = []
+    await runner._dispatch_notification(
+        pipeline=pipeline, action="escalate", context={}, run_log=run_log,
+    )
+    events = [e["event"] for e in run_log]
+    assert "notification_sent" in events
+    assert "notification_suppressed_testing" not in events
+
+
+async def test_dispatch_notification_testing_routes_to_log_and_suppresses(caplog):
+    """stage=testing (the default) mutes a telegram notification to the log channel."""
+    from src.pipeline.runner import PipelineRunner
+    from src.models.pipeline import PipelineConfig, TriggerConfig, NotificationConfig
+
+    notifier = LogNotifier()
+    runner = PipelineRunner(
+        executors={}, session_factory=None, notifiers={"log": notifier},
+    )
+    pipeline = PipelineConfig(
+        name="test-pipeline",
+        trigger=TriggerConfig(),
+        steps=[],
+        notifications={
+            "escalate": [
+                NotificationConfig(channel="telegram", template="Escalated: {{pipeline_name}}")
+            ]
+        },
+    )
+    run_log: list = []
+    with caplog.at_level(logging.DEBUG, logger="pork.notifications"):
+        await runner._dispatch_notification(
+            pipeline=pipeline,
+            action="escalate",
+            context={"pipeline_name": "test-pipeline"},
+            run_log=run_log,
+        )
+
+    assert "Escalated: test-pipeline" in caplog.text
+    events = [e["event"] for e in run_log]
+    assert "notification_suppressed_testing" in events
+    assert "notification_sent" not in events
+
+
+async def test_dispatch_notification_testing_no_log_notifier_registered():
+    """If no 'log' notifier is registered, testing-mode gating skips cleanly (warns, doesn't raise)."""
+    from src.pipeline.runner import PipelineRunner
+    from src.models.pipeline import PipelineConfig, TriggerConfig, NotificationConfig
+
+    runner = PipelineRunner(executors={}, session_factory=None, notifiers={})
+    pipeline = PipelineConfig(
+        name="test-pipeline",
+        trigger=TriggerConfig(),
+        steps=[],
+        notifications={"escalate": [NotificationConfig(channel="telegram", template="hi")]},
+    )
+    run_log: list = []
+    await runner._dispatch_notification(
+        pipeline=pipeline, action="escalate", context={}, run_log=run_log,
+    )
+    assert run_log == []

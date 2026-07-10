@@ -1394,6 +1394,7 @@ class PipelineRunner:
                 fingerprint=normalised.fingerprint,
                 parent_run_id=parent_run_id,
                 team=normalised.team,
+                stage=pipeline.stage,
             ))
             try:
                 await session.commit()
@@ -1558,6 +1559,15 @@ class PipelineRunner:
         """Fire the step-level on_failure.webhook callback. Never raises — failures are logged."""
         webhook = step.on_failure.webhook
         assert webhook is not None
+
+        if pipeline.stage == "testing":
+            _log_event(
+                run_log, "info", "step_failure_webhook_suppressed_testing",
+                f"[testing] Step-failure webhook suppressed: {step.name} → {webhook.url}",
+                step=step.name,
+            )
+            return
+
         try:
             ctx = await build_context(pipeline, normalised, run_id, step.name, step_outputs)
             ctx["step_failure"] = {
@@ -1616,18 +1626,28 @@ class PipelineRunner:
             logger.debug("No notification config for action '%s' — skipping", action)
             return
 
+        testing = pipeline.stage == "testing"
         for notification in notifications:
-            notifier = self._notifiers.get(notification.channel)
+            channel = "log" if testing else notification.channel
+            notifier = self._notifiers.get(channel)
             if not notifier:
                 logger.warning(
                     "No notifier registered for channel '%s' — skipping notification for action '%s'",
-                    notification.channel, action,
+                    channel, action,
                 )
                 continue
             await notifier.send(notification, context)
-            _log_event(run_log, "info", "notification_sent",
-                       f"Notification sent: {action} → {notification.channel}",
-                       action=action, channel=notification.channel)
+            if testing:
+                _log_event(
+                    run_log, "info", "notification_suppressed_testing",
+                    f"[testing] Notification routed to log: {action} → would have been "
+                    f"{notification.channel}",
+                    action=action, channel=notification.channel,
+                )
+            else:
+                _log_event(run_log, "info", "notification_sent",
+                           f"Notification sent: {action} → {notification.channel}",
+                           action=action, channel=notification.channel)
 
     # ------------------------------------------------------------------
     # Executor cache

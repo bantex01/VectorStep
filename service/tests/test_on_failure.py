@@ -342,7 +342,7 @@ async def test_fire_step_failure_webhook_posts_rendered_payload():
         await runner._fire_step_failure_webhook(
             step=step,
             result=step_result,
-            pipeline=PipelineConfig(name="p", trigger=TriggerConfig(), steps=[step]),
+            pipeline=PipelineConfig(name="p", trigger=TriggerConfig(), steps=[step], stage="production"),
             normalised=_make_normalised(),
             run_id="run-8",
             step_outputs={},
@@ -380,7 +380,7 @@ async def test_fire_step_failure_webhook_logs_failure_and_never_raises():
         await runner._fire_step_failure_webhook(
             step=step,
             result=step_result,
-            pipeline=PipelineConfig(name="p", trigger=TriggerConfig(), steps=[step]),
+            pipeline=PipelineConfig(name="p", trigger=TriggerConfig(), steps=[step], stage="production"),
             normalised=_make_normalised(),
             run_id="run-9",
             step_outputs={},
@@ -389,3 +389,34 @@ async def test_fire_step_failure_webhook_logs_failure_and_never_raises():
 
     events = [e["event"] for e in run_log]
     assert "step_failure_webhook_failed" in events
+
+
+async def test_fire_step_failure_webhook_suppressed_in_testing():
+    """stage=testing (the default) never sends the webhook, and logs the suppression instead."""
+    step = StepConfig(
+        name="flaky",
+        executor="gateway",
+        on_failure={"webhook": {"url": "https://hooks.example.com/notify"}},
+    )
+    runner = _make_runner()
+
+    import httpx
+    with patch.object(httpx.AsyncClient, "request", new=AsyncMock()) as mock_request:
+        run_log: list = []
+        step_result = MagicMock()
+        step_result.output = None
+        step_result.status = "failed"
+
+        await runner._fire_step_failure_webhook(
+            step=step,
+            result=step_result,
+            pipeline=PipelineConfig(name="p", trigger=TriggerConfig(), steps=[step]),  # default stage=testing
+            normalised=_make_normalised(),
+            run_id="run-10",
+            step_outputs={},
+            run_log=run_log,
+        )
+
+    mock_request.assert_not_awaited()
+    events = [e["event"] for e in run_log]
+    assert "step_failure_webhook_suppressed_testing" in events

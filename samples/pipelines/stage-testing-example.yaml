@@ -1,0 +1,125 @@
+name: stage-testing-example
+description: Demonstrates stage=testing muting — a notify step, an on_failure webhook, a human approval step, and pipeline notifications all get routed to the log/UI instead of firing for real.
+version: 1
+
+# testing (the default — this line could be omitted entirely) makes the pipeline
+# fully runnable and fully visible in P-Ork's own UI, but inert to the outside
+# world and excluded from every aggregate metric. See README §3c.
+#
+# To promote this pipeline once you're happy with it, change this one line and
+# POST /reload (or send SIGHUP):
+#   stage: production
+stage: testing
+
+trigger:
+  match:
+    test: stage-testing-example
+
+context_template:
+  include:
+    - summary
+
+steps:
+  - name: triage
+    executor: openclaw
+    executor_config:
+      agent: main
+      session_key: "agent:main:{{pipeline_run_id}}:triage"
+    confidence_threshold: 0.5
+    on_low_confidence: proceed
+    # A step-level failure webhook — suppressed in testing (a
+    # step_failure_webhook_suppressed_testing run-log event is recorded instead).
+    on_failure:
+      policy: continue
+      webhook:
+        url: "${PAGERDUTY_URL}"
+        payload:
+          summary: "Triage step failed: {{step_failure.summary}}"
+          severity: critical
+    prompt_template: |
+      This is a test pipeline run exercising stage=testing behaviour. Summarise
+      what you've been asked to do.
+
+      Context: {{summary}}
+
+      Return JSON only, no other text:
+      {
+        "confidence": 0.95,
+        "summary": "Triage complete — ready for notification and approval",
+        "next_step_context": "Triage passed",
+        "reasoning": {}
+      }
+
+  - name: alert-pagerduty
+    executor: notify
+    # In testing, no HTTP call is made — the rendered body is logged instead and
+    # the step returns a synthetic success so the pipeline still proceeds.
+    on_failure: continue
+    executor_config:
+      url: "${PAGERDUTY_EVENTS_URL}"
+      payload:
+        routing_key: "${PAGERDUTY_ROUTING_KEY}"
+        event_action: trigger
+        payload:
+          summary: "{{summary}}"
+          source: pork
+          custom_details:
+            triage_summary: "{{steps.triage.summary}}"
+
+  - name: human-approval
+    executor: human
+    timeout_seconds: 300
+    confidence_threshold: 0.5
+    on_low_confidence: abort
+    on_abort: rejected
+    # In testing, nothing is sent to Telegram/Slack/Teams — the approval is
+    # registered in P-Ork's own UI (/ui/approvals and the run-detail banner) so
+    # a real decision can still be made. A timeout auto-approves instead of
+    # failing the step, so a forgotten testing approval never wedges the run.
+    prompt_template: |
+      <b>P-Ork approval request (stage=testing)</b>
+
+      Pipeline: <code>{{pipeline_name}}</code>
+      Run: <code>{{pipeline_run_id}}</code>
+
+      Triage: {{steps.triage.summary}}
+
+      Approve to continue, or reject to abort.
+
+  - name: post-approval
+    executor: openclaw
+    executor_config:
+      agent: main
+      session_key: "agent:main:{{pipeline_run_id}}:post-approval"
+    confidence_threshold: 0.5
+    on_low_confidence: proceed
+    prompt_template: |
+      A human just approved this testing pipeline run. Produce a short
+      completion message confirming the approval was received.
+
+      Return JSON only, no other text:
+      {
+        "confidence": 0.95,
+        "proceed": false,
+        "proceed_reason": "Post-approval step complete — pipeline finished",
+        "summary": "Human approval received — pipeline completed successfully",
+        "next_step_context": "",
+        "reasoning": {}
+      }
+
+notifications:
+  # In testing, both of these are forced to the log channel regardless of the
+  # telegram channel configured below — the run log records what would have
+  # been sent and where (notification_suppressed_testing).
+  rejected:
+    - channel: telegram
+      template: |
+        ❌ Rejected: {{pipeline_name}}
+        Run: {{pipeline_run_id}}
+        The human approval step was rejected or timed out.
+  stopped:
+    - channel: telegram
+      template: |
+        ✅ Done: {{pipeline_name}}
+        Run: {{pipeline_run_id}}
+        {{step_summary}}

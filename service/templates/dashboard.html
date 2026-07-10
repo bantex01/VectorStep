@@ -228,6 +228,7 @@
         </td>
         <td class="px-5 py-3">
           <a href="/ui/runs/{{ run.id }}" class="text-sm font-medium text-zinc-100 hover:text-indigo-400">{{ run.pipeline_name }}</a>
+          {{ macros.stage_badge(run.stage) }}
         </td>
         <td class="px-5 py-3 text-sm text-zinc-400">{{ source_label(run.source) }}</td>
         <td class="px-5 py-3 text-sm text-zinc-400" title="{{ run.triggered_at.isoformat() }}">{{ format_ago(run.triggered_at) }}</td>

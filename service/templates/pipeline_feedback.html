@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as macros %}
 {% block title %}Accuracy — {{ pipeline.name }} — P-Ork{% endblock %}
 {% block page_heading %}
 <nav class="flex items-center gap-2 text-sm text-zinc-500">
@@ -178,6 +179,7 @@
           <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(r.run_status) }}">
             {{ r.run_status }}
           </span>
+          {{ macros.stage_badge(r.stage) }}
         </td>
         <td class="px-5 py-3">
           <span class="font-mono text-xs text-zinc-500 bg-zinc-800 px-1.5 py-0.5 rounded">{{ r.fingerprint }}</span>

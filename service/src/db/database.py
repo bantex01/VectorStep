@@ -63,6 +63,7 @@ _COLUMN_MIGRATIONS = [
     ("pipeline_steps", "output_tokens", "INTEGER"),
     ("pipeline_runs", "team", "TEXT"),
     ("pipeline_steps", "provider", "TEXT"),
+    ("pipeline_runs", "stage", "TEXT DEFAULT 'production'"),
 ]
 
 _INDEX_MIGRATIONS = [
@@ -76,6 +77,7 @@ _INDEX_MIGRATIONS = [
     # e.g. sub-pipelines, re-runs) are correctly unaffected.
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_pipeline_runs_running_fingerprint "
     "ON pipeline_runs (pipeline_name, fingerprint) WHERE status = 'running'",
+    "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_stage ON pipeline_runs (stage)",
 ]
 
 

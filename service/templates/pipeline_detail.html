@@ -41,6 +41,7 @@
             Scheduled
           </span>
         {% endif %}
+        {{ macros.stage_badge(pipeline.stage) }}
       </div>
       {% if pipeline.description %}
         <p class="text-sm text-zinc-400">{{ pipeline.description }}</p>
@@ -217,6 +218,7 @@
           <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(run.status) }}">
             {{ run.status }}
           </span>
+          {{ macros.stage_badge(run.stage) }}
         </td>
         <td class="px-5 py-3 text-sm text-zinc-400">{{ source_label(run.source) }}</td>
         <td class="px-5 py-3 text-sm text-zinc-400" title="{{ run.triggered_at.isoformat() }}">{{ format_ago(run.triggered_at) }}</td>

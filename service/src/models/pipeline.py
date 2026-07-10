@@ -205,6 +205,7 @@ class PipelineConfig(BaseModel):
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     version: int = 1
+    stage: Literal["testing", "production"] = "testing"
     trigger: TriggerConfig
     vars: dict[str, str] = Field(default_factory=dict)
     context_template: ContextTemplateConfig = Field(default_factory=ContextTemplateConfig)

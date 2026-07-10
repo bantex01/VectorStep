@@ -1,5 +1,11 @@
 {# Shared small UI fragments used across multiple templates. #}
 
+{% macro stage_badge(stage) -%}
+{% if stage == "testing" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800" title="stage=testing — muted side-effects, excluded from aggregate metrics">TESTING</span>
+{%- endif %}
+{%- endmacro %}
+
 {% macro feedback_badge(outcome) -%}
 {% if outcome == "correct" %}
 <span class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-green-950 text-green-400 ring-1 ring-inset ring-green-800 text-xs leading-none" title="Marked correct">✓</span>

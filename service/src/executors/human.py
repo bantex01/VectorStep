@@ -312,17 +312,25 @@ class HumanExecutor(BaseExecutor):
         token = str(uuid.uuid4())
         timeout = step.timeout_seconds or _DEFAULT_TIMEOUT
         team = context.get("team")
+        testing = context.get("_testing", False)
 
         message_text = _jinja_env.from_string(step.prompt_template).render(**context)
 
-        channel_cfg = _resolve_channel_config(team)
-        if not channel_cfg:
-            raise RuntimeError(
-                "HumanExecutor: no approval channel configured for team="
-                f"{team!r} — set human_approval.default or human_approval.teams.{team} "
-                "in config.yaml (or notifications.telegram for the legacy fallback)"
-            )
-        channel = _build_channel(channel_cfg)
+        # In testing, the external channel is never resolved/built — a testing pipeline
+        # with no human_approval config at all still works, since the decision is made
+        # in P-Ork's own UI (/ui/approvals) rather than sent out.
+        channel = None
+        channel_name = None
+        if not testing:
+            channel_cfg = _resolve_channel_config(team)
+            if not channel_cfg:
+                raise RuntimeError(
+                    "HumanExecutor: no approval channel configured for team="
+                    f"{team!r} — set human_approval.default or human_approval.teams.{team} "
+                    "in config.yaml (or notifications.telegram for the legacy fallback)"
+                )
+            channel = _build_channel(channel_cfg)
+            channel_name = channel_cfg.get("channel")
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
@@ -333,21 +341,35 @@ class HumanExecutor(BaseExecutor):
             "pipeline": context.get("pipeline_name"),
             "run_id": context.get("pipeline_run_id"),
             "team": team,
+            "stage": "testing" if testing else "production",
             "created_at": utc_now(),
         }
 
         try:
-            await channel.send(message_text, token)
-            logger.info(
-                "Human approval requested: step=%s token=%s team=%s channel=%s timeout=%ss",
-                step.name, token, team, channel_cfg.get("channel"), timeout,
-            )
+            if testing:
+                logger.info(
+                    "[testing] Human approval NOT sent externally; awaiting UI decision: "
+                    "step=%s token=%s", step.name, token,
+                )
+            else:
+                await channel.send(message_text, token)
+                logger.info(
+                    "Human approval requested: step=%s token=%s team=%s channel=%s timeout=%ss",
+                    step.name, token, team, channel_name, timeout,
+                )
             approved = await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
         except asyncio.TimeoutError:
-            logger.warning(
-                "Human approval timed out: step=%s token=%s", step.name, token
-            )
-            raise RuntimeError(f"Human approval timed out after {timeout}s")
+            if testing:
+                logger.info(
+                    "[testing] Human approval timed out → auto-approving: step=%s token=%s",
+                    step.name, token,
+                )
+                approved = True
+            else:
+                logger.warning(
+                    "Human approval timed out: step=%s token=%s", step.name, token
+                )
+                raise RuntimeError(f"Human approval timed out after {timeout}s")
         finally:
             _pending_approvals.pop(token, None)
             _pending_meta.pop(token, None)

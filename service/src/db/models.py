@@ -26,6 +26,7 @@ class PipelineRun(Base):
     fingerprint: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # dedup key
     parent_run_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # set for sub-pipeline runs
     team: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # owning team, from auth token resolution
+    stage: Mapped[str] = mapped_column(String, nullable=False, default="production", index=True)  # "testing" | "production" — see PipelineConfig.stage
 
     steps: Mapped[list["PipelineStep"]] = relationship(
         "PipelineStep", back_populates="run", order_by="PipelineStep.step_index"

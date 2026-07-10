@@ -190,6 +190,11 @@ async def test_fetch_metrics_data_counts_feedback_by_pipeline_and_outcome(tmp_pa
     session_factory = get_session_factory()
 
     async with session_factory() as session:
+        for run_id in ("run-1", "run-2", "run-3"):
+            session.add(PipelineRun(
+                id=run_id, pipeline_name="p", source="generic", status="completed",
+                normalised_context="{}", raw_payload="{}",
+            ))
         session.add(RunFeedback(id="fb-1", run_id="run-1", pipeline_name="p", outcome="correct"))
         session.add(RunFeedback(id="fb-2", run_id="run-2", pipeline_name="p", outcome="correct"))
         session.add(RunFeedback(id="fb-3", run_id="run-3", pipeline_name="p", outcome="partial"))
@@ -203,6 +208,77 @@ async def test_fetch_metrics_data_counts_feedback_by_pipeline_and_outcome(tmp_pa
 # ---------------------------------------------------------------------------
 # pork_human_approvals_pending — live gauge, not derived from MetricsData
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# stage=testing exclusion — every DB-derived series in fetch_metrics_data
+# ---------------------------------------------------------------------------
+
+async def test_fetch_metrics_data_excludes_testing_runs(tmp_path):
+    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
+    await create_tables()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        session.add(PipelineRun(
+            id="run-prod", pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}", team="payments", stage="production",
+        ))
+        session.add(PipelineRun(
+            id="run-test", pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}", team="payments", stage="testing",
+        ))
+        for run_id, suffix in (("run-prod", "a"), ("run-test", "b")):
+            session.add(PipelineStep(
+                id=f"step-{suffix}", run_id=run_id, step_name=f"s-{suffix}", step_index=0,
+                executor="gateway", agent="agent-x", model="m", prompt="", status="completed",
+                executed_at=datetime(2026, 1, 1), input_tokens=100, output_tokens=50,
+                duration_ms=1000, verifier_confidence=0.9, primary_confidence=1.0,
+                effective_confidence=0.5,
+            ))
+            session.add(PipelineStep(
+                id=f"human-{suffix}", run_id=run_id, step_name=f"h-{suffix}", step_index=1,
+                executor="human", agent=None, model=None, prompt="", status="completed",
+                executed_at=datetime(2026, 1, 1), primary_confidence=1.0,
+            ))
+        session.add(RunFeedback(id="fb-prod", run_id="run-prod", pipeline_name="p", outcome="correct"))
+        session.add(RunFeedback(id="fb-test", run_id="run-test", pipeline_name="p", outcome="incorrect"))
+        await session.commit()
+
+    metrics_data = await fetch_metrics_data(session_factory)
+
+    assert metrics_data.run_counts == [("p", "completed", 1)]
+    assert len(metrics_data.token_usage) == 1
+    assert metrics_data.token_usage[0][:2] == ("payments", "p")
+    assert len(metrics_data.human_decisions) == 1
+    assert metrics_data.human_decisions[0][:2] == ("payments", "p")
+    assert metrics_data.feedback_counts == [("p", "correct", 1)]
+    # Step-only aggregates (no independent stage awareness pre-join) also exclude testing.
+    assert sum(n for _, _, _, n in metrics_data.step_counts) == 2  # gateway + human, prod run only
+    assert len(metrics_data.step_durations) == 1
+    assert len(metrics_data.verifier_counts) == 1
+    assert metrics_data.verifier_counts[0][1] == 1  # one verified step, from the prod run only
+
+
+def test_pending_approvals_gauge_excludes_testing():
+    human._pending_meta.clear()
+    human._pending_meta["tok-prod"] = {
+        "team": "barkham", "pipeline": "p", "step": "s", "run_id": "r",
+        "message": "m", "stage": "production", "created_at": human.utc_now(),
+    }
+    human._pending_meta["tok-test"] = {
+        "team": "barkham", "pipeline": "p", "step": "s", "run_id": "r",
+        "message": "m", "stage": "testing", "created_at": human.utc_now(),
+    }
+    try:
+        data = _empty_metrics_data()
+        families = list(PorkCollector(data).collect())
+        family = _find_family(families, "pork_human_approvals_pending")
+
+        by_team = {s.labels["team"]: s.value for s in family.samples}
+        assert by_team == {"barkham": 1}
+    finally:
+        human._pending_meta.clear()
+
 
 def test_pending_approvals_gauge_zero_when_nothing_pending():
     human._pending_meta.clear()

@@ -62,6 +62,18 @@ class NotifyExecutor(BaseExecutor):
         rendered_payload = _render_values(raw_payload, context)
         body = json.dumps(rendered_payload).encode()
 
+        if context.get("_testing"):
+            logger.info(
+                "[testing] NotifyExecutor suppressed: step=%s url=%s body=%s",
+                step.name, url, body,
+            )
+            return LLMOutput(
+                confidence=1.0,
+                summary=f"[testing] notify suppressed (would POST to {url})",
+                next_step_context="Notification suppressed in testing stage.",
+                raw_response={"suppressed_testing": True, "url": url},
+            )
+
         logger.info("NotifyExecutor: step=%s method=%s url=%s", step.name, method, url)
 
         async with httpx.AsyncClient(timeout=timeout) as client:

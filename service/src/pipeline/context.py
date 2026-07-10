@@ -36,6 +36,7 @@ async def build_context(
         "current_step": current_step,
         "labels": dict(normalised.labels),
         "team": normalised.team,
+        "_testing": pipeline.stage == "testing",
         **pipeline.vars,
     }
 
