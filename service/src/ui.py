@@ -186,6 +186,21 @@ def _provider_from_model(model: str | None) -> str:
     return "anthropic"
 
 
+def _qualified_model(provider: str | None, model: str | None) -> str:
+    """Prefix a bare model string with its provider, e.g. "claude-sonnet-5" ->
+    "anthropic/claude-sonnet-5", so two agents/steps using the same model name
+    through different providers aren't conflated. Falls back to _provider_from_model
+    when the provider column isn't populated (pre-migration rows). Avoids
+    double-prefixing when the model string already carries the same prefix (e.g.
+    Azure deployments, which come back as "azure/<deployment>" already)."""
+    if not model:
+        return "—"
+    effective_provider = provider or _provider_from_model(model)
+    if model.startswith(effective_provider + "/"):
+        return model
+    return f"{effective_provider}/{model}"
+
+
 _TIME_RANGES = {
     "24h": (timedelta(hours=24), "24 hours"),
     "7d": (timedelta(days=7), "7 days"),
@@ -1928,6 +1943,7 @@ async def _fetch_step_model_stats(
                     PipelineStep.step_name,
                     PipelineStep.agent,
                     PipelineStep.model,
+                    PipelineStep.provider,
                     PipelineStep.status,
                     func.count().label("n"),
                     func.coalesce(func.sum(PipelineStep.input_tokens), 0),
@@ -1938,16 +1954,18 @@ async def _fetch_step_model_stats(
                 .where(PipelineStep.step_name.in_(all_names))
                 .group_by(
                     PipelineStep.step_name, PipelineStep.agent,
-                    PipelineStep.model, PipelineStep.status,
+                    PipelineStep.model, PipelineStep.provider, PipelineStep.status,
                 )
             )
         )
         db_rows = rows.all()
 
-    # (step_name, agent, model) -> aggregated counters
-    combo_stats: dict[tuple[str, str | None, str | None], dict] = {}
-    for step_name, agent, model, status, n, in_tok, out_tok, last_run in db_rows:
-        key = (step_name, agent, model)
+    # (step_name, agent, qualified_model) -> aggregated counters. Qualifying the model
+    # with its provider (see _qualified_model) up front means two providers that happen
+    # to report the same bare model string aren't silently merged together.
+    combo_stats: dict[tuple[str, str | None, str], dict] = {}
+    for step_name, agent, model, provider, status, n, in_tok, out_tok, last_run in db_rows:
+        key = (step_name, agent, _qualified_model(provider, model))
         c = combo_stats.setdefault(key, {
             "total": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0, "last_run": None,
         })
@@ -1962,7 +1980,7 @@ async def _fetch_step_model_stats(
     result: dict[str, list[dict]] = {}
     for lib_name, names in runtime_names.items():
         # Re-aggregate by (agent, model) across every runtime name for this library step.
-        by_agent_model: dict[tuple[str | None, str | None], dict] = {}
+        by_agent_model: dict[tuple[str | None, str], dict] = {}
         for (step_name, agent, model), c in combo_stats.items():
             if step_name not in names:
                 continue
@@ -2475,6 +2493,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
             _production_only(
                 select(
                     PipelineStep.model,
+                    PipelineStep.provider,
                     PipelineStep.status,
                     func.count().label("n"),
                     func.coalesce(func.sum(PipelineStep.input_tokens), 0).label("input_tokens"),
@@ -2484,7 +2503,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
                 )
                 .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
                 .where(PipelineStep.agent == prefixed_key)
-                .group_by(PipelineStep.model, PipelineStep.status)
+                .group_by(PipelineStep.model, PipelineStep.provider, PipelineStep.status)
             )
         )
         model_status_rows = rows.all()
@@ -2494,6 +2513,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
                 select(
                     PipelineStep.step_name,
                     PipelineStep.model,
+                    PipelineStep.provider,
                     PipelineStep.status,
                     func.count().label("n"),
                     func.coalesce(func.sum(PipelineStep.input_tokens), 0).label("input_tokens"),
@@ -2502,7 +2522,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
                 )
                 .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
                 .where(PipelineStep.agent == prefixed_key)
-                .group_by(PipelineStep.step_name, PipelineStep.model, PipelineStep.status)
+                .group_by(PipelineStep.step_name, PipelineStep.model, PipelineStep.provider, PipelineStep.status)
             )
         )
         step_status_rows = rows.all()
@@ -2510,7 +2530,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
         rows = await session.execute(
             _production_only(
                 select(
-                    PipelineStep.executed_at, PipelineStep.model,
+                    PipelineStep.executed_at, PipelineStep.model, PipelineStep.provider,
                     PipelineStep.input_tokens, PipelineStep.output_tokens,
                 )
                 .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
@@ -2523,7 +2543,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
             _production_only(
                 select(
                     PipelineStep.run_id, PipelineStep.step_name, PipelineStep.model,
-                    PipelineStep.status, PipelineStep.effective_confidence,
+                    PipelineStep.provider, PipelineStep.status, PipelineStep.effective_confidence,
                     PipelineStep.duration_ms, PipelineStep.input_tokens,
                     PipelineStep.output_tokens, PipelineStep.executed_at,
                 )
@@ -2538,7 +2558,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
     # ── By-model breakdown — runs, success rate, avg duration, avg tokens ────
     model_stats: dict[str, dict] = {}
     for row in model_status_rows:
-        m = row.model or "unknown"
+        m = _qualified_model(row.provider, row.model)
         s = model_stats.setdefault(m, {
             "succeeded": 0, "failed": 0, "total": 0, "last_run": None,
             "input_tokens": 0, "output_tokens": 0, "duration_sum_ms": 0.0, "duration_n": 0,
@@ -2566,7 +2586,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
     # ── By-step breakdown — which pipeline steps this agent runs, per model ──
     step_combo: dict[tuple[str, str], dict] = {}
     for row in step_status_rows:
-        key = (row.step_name, row.model or "unknown")
+        key = (row.step_name, _qualified_model(row.provider, row.model))
         c = step_combo.setdefault(key, {
             "total": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0, "last_run": None,
         })
@@ -2595,13 +2615,14 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
     # ── Usage over time — run count and token volume, split by model ────────
     now = utc_now()
     runs_ts = _build_ts(
-        [(r.executed_at, r.model) for r in ts_rows], now, None, "all",
-        dim_fn=lambda r: r[1] or "unknown",
+        [(r.executed_at, _qualified_model(r.provider, r.model)) for r in ts_rows], now, None, "all",
+        dim_fn=lambda r: r[1],
     )
     tokens_ts = _build_ts(
-        [(r.executed_at, r.model, (r.input_tokens or 0) + (r.output_tokens or 0)) for r in ts_rows],
+        [(r.executed_at, _qualified_model(r.provider, r.model),
+          (r.input_tokens or 0) + (r.output_tokens or 0)) for r in ts_rows],
         now, None, "all",
-        dim_fn=lambda r: r[1] or "unknown",
+        dim_fn=lambda r: r[1],
         val_fn=lambda r: r[2],
     )
 
@@ -2609,7 +2630,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
     recent_activity = [{
         "run_id": r.run_id,
         "step_name": r.step_name,
-        "model": r.model,
+        "model": _qualified_model(r.provider, r.model),
         "status": r.status,
         "confidence": r.effective_confidence,
         "duration_secs": (r.duration_ms / 1000) if r.duration_ms is not None else None,
