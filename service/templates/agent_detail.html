@@ -235,6 +235,7 @@
       <table class="w-full text-sm">
         <thead>
           <tr class="border-b border-zinc-800">
+            <th class="text-left px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Pipeline</th>
             <th class="text-left px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Step</th>
             <th class="text-left px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Model</th>
             <th class="text-right px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Runs</th>
@@ -246,6 +247,9 @@
         <tbody class="divide-y divide-zinc-800">
           {% for row in step_stats %}
           <tr class="hover:bg-zinc-800/50 transition-colors">
+            <td class="px-5 py-3.5 text-xs">
+              <a href="/ui/pipelines/{{ row.pipeline_name }}" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">{{ row.pipeline_name }}</a>
+            </td>
             <td class="px-5 py-3.5 font-mono text-zinc-300 text-xs">{{ row.step_name }}</td>
             <td class="px-5 py-3.5 font-mono text-zinc-500 text-xs">{{ row.model }}</td>
             <td class="px-5 py-3.5 text-right text-zinc-300">{{ row.total }}</td>

@@ -2525,6 +2525,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
             _production_only(
                 select(
                     PipelineStep.step_name,
+                    PipelineRun.pipeline_name,
                     PipelineStep.model,
                     PipelineStep.provider,
                     PipelineStep.status,
@@ -2535,7 +2536,10 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
                 )
                 .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
                 .where(PipelineStep.agent == prefixed_key)
-                .group_by(PipelineStep.step_name, PipelineStep.model, PipelineStep.provider, PipelineStep.status)
+                .group_by(
+                    PipelineStep.step_name, PipelineRun.pipeline_name,
+                    PipelineStep.model, PipelineStep.provider, PipelineStep.status,
+                )
             )
         )
         step_status_rows = rows.all()
@@ -2597,10 +2601,12 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
         s["avg_output_tokens"] = round(s["output_tokens"] / total) if total and s["output_tokens"] else None
         s["avg_duration_secs"] = (s["duration_sum_ms"] / s["duration_n"] / 1000) if s["duration_n"] else None
 
-    # ── By-step breakdown — which pipeline steps this agent runs, per model ──
-    step_combo: dict[tuple[str, str], dict] = {}
+    # ── By-step breakdown — which pipeline steps this agent runs, per pipeline/model ──
+    # Keyed by (step_name, pipeline_name, model) — the same step name can be wired to a
+    # different model in different pipelines, so folding pipelines together would hide that.
+    step_combo: dict[tuple[str, str, str], dict] = {}
     for row in step_status_rows:
-        key = (row.step_name, _qualified_model(row.provider, row.model))
+        key = (row.step_name, row.pipeline_name, _qualified_model(row.provider, row.model))
         c = step_combo.setdefault(key, {
             "total": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0, "last_run": None,
         })
@@ -2613,10 +2619,11 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
             c["last_run"] = row.last_run
 
     step_stats = []
-    for (step_name, model), c in step_combo.items():
+    for (step_name, pipeline_name, model), c in step_combo.items():
         total = c["total"]
         step_stats.append({
             "step_name": step_name,
+            "pipeline_name": pipeline_name,
             "model": model,
             "total": total,
             "success_rate": round((total - c["failed"]) / total * 100) if total else None,
