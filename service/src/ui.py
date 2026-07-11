@@ -189,16 +189,23 @@ def _provider_from_model(model: str | None) -> str:
 def _qualified_model(provider: str | None, model: str | None) -> str:
     """Prefix a bare model string with its provider, e.g. "claude-sonnet-5" ->
     "anthropic/claude-sonnet-5", so two agents/steps using the same model name
-    through different providers aren't conflated. Falls back to _provider_from_model
-    when the provider column isn't populated (pre-migration rows). Avoids
-    double-prefixing when the model string already carries the same prefix (e.g.
-    Azure deployments, which come back as "azure/<deployment>" already)."""
+    through different providers aren't conflated.
+
+    Only uses a real `provider` column value — deliberately does NOT fall back to
+    guessing from the model string (see _provider_from_model). `provider` is only
+    ever populated for `executor: gateway` steps; OpenClaw-executed steps (and any
+    other executor) never set it, so guessing would confidently mislabel every one
+    of those as a specific provider with zero actual evidence. No signal beats a
+    wrong signal here. Avoids double-prefixing when the model string already
+    carries the same prefix (e.g. Azure deployments, which come back as
+    "azure/<deployment>" already)."""
     if not model:
         return "—"
-    effective_provider = provider or _provider_from_model(model)
-    if model.startswith(effective_provider + "/"):
+    if not provider:
         return model
-    return f"{effective_provider}/{model}"
+    if model.startswith(provider + "/"):
+        return model
+    return f"{provider}/{model}"
 
 
 _TIME_RANGES = {
@@ -2546,6 +2553,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
                     PipelineStep.provider, PipelineStep.status, PipelineStep.effective_confidence,
                     PipelineStep.duration_ms, PipelineStep.input_tokens,
                     PipelineStep.output_tokens, PipelineStep.executed_at,
+                    PipelineRun.pipeline_name,
                 )
                 .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
                 .where(PipelineStep.agent == prefixed_key)
@@ -2629,6 +2637,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
     # ── Recent activity — last 15 steps this agent ran, across any pipeline ──
     recent_activity = [{
         "run_id": r.run_id,
+        "pipeline_name": r.pipeline_name,
         "step_name": r.step_name,
         "model": _qualified_model(r.provider, r.model),
         "status": r.status,

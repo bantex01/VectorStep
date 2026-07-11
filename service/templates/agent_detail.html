@@ -200,6 +200,9 @@
             <td class="px-5 py-2.5">
               <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(a.status) }}">{{ a.status }}</span>
             </td>
+            <td class="px-5 py-2.5">
+              <a href="/ui/pipelines/{{ a.pipeline_name }}" class="text-xs text-indigo-400 hover:text-indigo-300 underline underline-offset-2">{{ a.pipeline_name }}</a>
+            </td>
             <td class="px-5 py-2.5 font-mono text-xs text-zinc-300">{{ a.step_name }}</td>
             <td class="px-5 py-2.5 font-mono text-xs text-zinc-500">{{ a.model or "—" }}</td>
             <td class="px-5 py-2.5 text-xs text-zinc-400 text-right">
