@@ -96,6 +96,51 @@
             {% endfor %}
           </div>
           {% endif %}
+
+          <!-- Per-agent/model run history -->
+          {% set stats = step_model_stats.get(step.name) %}
+          {% if stats %}
+          <div class="mt-3 overflow-x-auto">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="text-zinc-500 border-b border-zinc-800">
+                  <th class="text-left font-medium pb-1.5 pr-4">Agent</th>
+                  <th class="text-left font-medium pb-1.5 pr-4">Model</th>
+                  <th class="text-right font-medium pb-1.5 pr-4">Runs</th>
+                  <th class="text-right font-medium pb-1.5 pr-4">Success rate</th>
+                  <th class="text-right font-medium pb-1.5 pr-4">Avg tokens (in/out)</th>
+                  <th class="text-right font-medium pb-1.5">Last run</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in stats %}
+                <tr class="border-b border-zinc-800/60 last:border-0">
+                  <td class="py-1.5 pr-4 text-zinc-300 font-mono">{{ row.agent or "—" }}</td>
+                  <td class="py-1.5 pr-4 text-zinc-400 font-mono">{{ row.model or "—" }}</td>
+                  <td class="py-1.5 pr-4 text-right text-zinc-400">{{ row.total }}</td>
+                  <td class="py-1.5 pr-4 text-right">
+                    {% if row.success_rate is not none %}
+                      <span class="{% if row.success_rate >= 90 %}text-green-400{% elif row.success_rate >= 70 %}text-amber-400{% else %}text-red-400{% endif %}">
+                        {{ row.success_rate }}%
+                      </span>
+                    {% else %}
+                      <span class="text-zinc-600">—</span>
+                    {% endif %}
+                  </td>
+                  <td class="py-1.5 pr-4 text-right text-zinc-400">
+                    {% if row.avg_input_tokens is not none %}
+                      {{ row.avg_input_tokens | format_number }} / {{ row.avg_output_tokens | format_number }}
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
+                  <td class="py-1.5 text-right text-zinc-500">{{ row.last_run.strftime("%Y-%m-%d") if row.last_run else "—" }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% endif %}
         </div>
 
         <!-- Right: copy ref + expand -->
