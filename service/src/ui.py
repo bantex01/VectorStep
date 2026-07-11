@@ -1682,7 +1682,10 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         avg_duration_by_step = {name: ms / 1000 for name, ms in rows.all() if ms is not None}
 
-        q = _production_only(select(func.avg(PipelineStep.duration_ms)))
+        q = _production_only(
+            select(func.avg(PipelineStep.duration_ms))
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+        )
         if cutoff:
             q = q.where(PipelineRun.triggered_at >= cutoff)
         overall_avg_duration_ms = (await session.execute(q)).scalar()
