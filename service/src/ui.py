@@ -1934,10 +1934,13 @@ def _compute_step_runtime_names(pipeline_dir: str, library: dict) -> dict[str, s
 async def _fetch_step_model_stats(
     runtime_names: dict[str, set[str]],
 ) -> dict[str, list[dict]]:
-    """Per-library-step breakdown of run history by (agent, model): success rate and
-    average token usage, aggregated across every runtime step_name the library step is
+    """Per-library-step breakdown of run history by (pipeline, agent, model): success rate
+    and average token usage, aggregated across every runtime step_name the library step is
     known to execute under (see _compute_step_runtime_names). Scoped to production runs
-    only, matching the rest of the app's rollup surfaces (see _production_only)."""
+    only, matching the rest of the app's rollup surfaces (see _production_only).
+
+    Grouped by pipeline as well as agent/model — a step used by several pipelines can be
+    wired to a different agent/model in each, and folding them together would hide that."""
     all_names = {n for names in runtime_names.values() for n in names}
     if not all_names:
         return {}
@@ -1948,6 +1951,7 @@ async def _fetch_step_model_stats(
             _production_only(
                 select(
                     PipelineStep.step_name,
+                    PipelineRun.pipeline_name,
                     PipelineStep.agent,
                     PipelineStep.model,
                     PipelineStep.provider,
@@ -1960,19 +1964,19 @@ async def _fetch_step_model_stats(
                 .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
                 .where(PipelineStep.step_name.in_(all_names))
                 .group_by(
-                    PipelineStep.step_name, PipelineStep.agent,
+                    PipelineStep.step_name, PipelineRun.pipeline_name, PipelineStep.agent,
                     PipelineStep.model, PipelineStep.provider, PipelineStep.status,
                 )
             )
         )
         db_rows = rows.all()
 
-    # (step_name, agent, qualified_model) -> aggregated counters. Qualifying the model
-    # with its provider (see _qualified_model) up front means two providers that happen
-    # to report the same bare model string aren't silently merged together.
-    combo_stats: dict[tuple[str, str | None, str], dict] = {}
-    for step_name, agent, model, provider, status, n, in_tok, out_tok, last_run in db_rows:
-        key = (step_name, agent, _qualified_model(provider, model))
+    # (step_name, pipeline_name, agent, qualified_model) -> aggregated counters. Qualifying
+    # the model with its provider (see _qualified_model) up front means two providers that
+    # happen to report the same bare model string aren't silently merged together.
+    combo_stats: dict[tuple[str, str, str | None, str], dict] = {}
+    for step_name, pipeline_name, agent, model, provider, status, n, in_tok, out_tok, last_run in db_rows:
+        key = (step_name, pipeline_name, agent, _qualified_model(provider, model))
         c = combo_stats.setdefault(key, {
             "total": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0, "last_run": None,
         })
@@ -1986,13 +1990,14 @@ async def _fetch_step_model_stats(
 
     result: dict[str, list[dict]] = {}
     for lib_name, names in runtime_names.items():
-        # Re-aggregate by (agent, model) across every runtime name for this library step.
-        by_agent_model: dict[tuple[str | None, str], dict] = {}
-        for (step_name, agent, model), c in combo_stats.items():
+        # Re-aggregate by (pipeline, agent, model) across every runtime name for this
+        # library step.
+        by_pipeline_agent_model: dict[tuple[str, str | None, str], dict] = {}
+        for (step_name, pipeline_name, agent, model), c in combo_stats.items():
             if step_name not in names:
                 continue
-            row = by_agent_model.setdefault(
-                (agent, model),
+            row = by_pipeline_agent_model.setdefault(
+                (pipeline_name, agent, model),
                 {"total": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0, "last_run": None},
             )
             row["total"] += c["total"]
@@ -2002,13 +2007,14 @@ async def _fetch_step_model_stats(
             if c["last_run"] and (row["last_run"] is None or c["last_run"] > row["last_run"]):
                 row["last_run"] = c["last_run"]
 
-        if not by_agent_model:
+        if not by_pipeline_agent_model:
             continue
 
         rows_out = []
-        for (agent, model), row in by_agent_model.items():
+        for (pipeline_name, agent, model), row in by_pipeline_agent_model.items():
             total = row["total"]
             rows_out.append({
+                "pipeline_name": pipeline_name,
                 "agent": agent,
                 "model": model,
                 "total": total,

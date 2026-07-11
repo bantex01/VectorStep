@@ -104,6 +104,7 @@
             <table class="w-full text-xs">
               <thead>
                 <tr class="text-zinc-500 border-b border-zinc-800">
+                  <th class="text-left font-medium pb-1.5 pr-4">Pipeline</th>
                   <th class="text-left font-medium pb-1.5 pr-4">Agent</th>
                   <th class="text-left font-medium pb-1.5 pr-4">Model</th>
                   <th class="text-right font-medium pb-1.5 pr-4">Runs</th>
@@ -115,6 +116,9 @@
               <tbody>
                 {% for row in stats %}
                 <tr class="border-b border-zinc-800/60 last:border-0">
+                  <td class="py-1.5 pr-4">
+                    <a href="/ui/pipelines/{{ row.pipeline_name }}" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">{{ row.pipeline_name }}</a>
+                  </td>
                   <td class="py-1.5 pr-4 text-zinc-300 font-mono">{{ row.agent or "—" }}</td>
                   <td class="py-1.5 pr-4 text-zinc-400 font-mono">{{ row.model or "—" }}</td>
                   <td class="py-1.5 pr-4 text-right text-zinc-400">{{ row.total }}</td>
