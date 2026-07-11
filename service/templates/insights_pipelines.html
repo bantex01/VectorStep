@@ -193,11 +193,32 @@
     </div>
 
     <!-- Recent runs -->
-    <div>
+    <div class="mb-5">
       <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-2">Recent runs</p>
       <table class="w-full">
         <tbody id="dd-recent-runs" class="divide-y divide-zinc-800 text-sm"></tbody>
       </table>
+    </div>
+
+    <!-- Step breakdown — agents/models/tokens involved -->
+    <div>
+      <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-2">Steps in this pipeline</p>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-xs text-zinc-500 border-b border-zinc-800">
+              <th class="text-left font-medium pb-1.5 pr-4">Step</th>
+              <th class="text-left font-medium pb-1.5 pr-4">Agent</th>
+              <th class="text-left font-medium pb-1.5 pr-4">Model</th>
+              <th class="text-right font-medium pb-1.5 pr-4">Runs</th>
+              <th class="text-right font-medium pb-1.5 pr-4">Success rate</th>
+              <th class="text-right font-medium pb-1.5 pr-4">Avg tokens (in/out)</th>
+              <th class="text-right font-medium pb-1.5">Avg duration</th>
+            </tr>
+          </thead>
+          <tbody id="dd-step-breakdown" class="divide-y divide-zinc-800"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 </div>
@@ -448,6 +469,28 @@
           </tr>`;
         }).join('')
       : '<tr><td class="py-4 text-xs text-zinc-500">No runs in range</td></tr>';
+
+    // Step breakdown — agents/models/tokens involved
+    const stepBody = document.getElementById('dd-step-breakdown');
+    if (stepBody) {
+      stepBody.innerHTML = (d.step_breakdown && d.step_breakdown.length)
+        ? d.step_breakdown.map(s => {
+            const rate = s.success_rate;
+            const rateCls = rate == null ? 'text-zinc-600' : rate >= 90 ? 'text-green-400' : rate >= 70 ? 'text-amber-400' : 'text-red-400';
+            const rateStr = rate != null ? rate + '%' : '—';
+            const tokStr = s.avg_input_tokens != null ? `${s.avg_input_tokens.toLocaleString()} / ${s.avg_output_tokens.toLocaleString()}` : '—';
+            return `<tr class="hover:bg-zinc-800/50 transition-colors">
+              <td class="py-1.5 pr-4 font-mono text-xs text-zinc-300">${s.step_name}</td>
+              <td class="py-1.5 pr-4 font-mono text-xs text-zinc-400">${s.agent || '—'}</td>
+              <td class="py-1.5 pr-4 font-mono text-xs text-zinc-500">${s.model || '—'}</td>
+              <td class="py-1.5 pr-4 text-right text-xs text-zinc-400">${s.total}</td>
+              <td class="py-1.5 pr-4 text-right text-xs font-semibold ${rateCls}">${rateStr}</td>
+              <td class="py-1.5 pr-4 text-right text-xs text-zinc-400">${tokStr}</td>
+              <td class="py-1.5 text-right text-xs text-zinc-500">${s.avg_duration || '—'}</td>
+            </tr>`;
+          }).join('')
+        : '<tr><td class="py-4 text-xs text-zinc-500">No step data in range</td></tr>';
+    }
   }
 
   const pipelineSel = document.getElementById('pipeline-select');

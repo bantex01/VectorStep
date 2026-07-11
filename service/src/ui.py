@@ -1398,6 +1398,31 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
                 feedback_raw[name] = {"correct": 0, "partial": 0, "incorrect": 0}
             feedback_raw[name][outcome] = n
 
+        # Per-step breakdown (agents/models/tokens involved) for the drilldown panel
+        q = _production_only(
+            select(
+                PipelineRun.pipeline_name,
+                PipelineStep.step_name,
+                PipelineStep.agent,
+                PipelineStep.model,
+                PipelineStep.provider,
+                PipelineStep.status,
+                func.count().label("n"),
+                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
+                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+                func.avg(PipelineStep.duration_ms),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .group_by(
+                PipelineRun.pipeline_name, PipelineStep.step_name, PipelineStep.agent,
+                PipelineStep.model, PipelineStep.provider, PipelineStep.status,
+            )
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        step_breakdown_raw = rows.all()
+
     # ── Per-pipeline aggregates ───────────────────────────────────────────────
 
     avg_duration_by_pipeline = {
@@ -1426,6 +1451,43 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
                 durations_by_bucket_pipeline[row.pipeline_name][bucket].append(secs)
         if len(recent_by_pipeline[row.pipeline_name]) < 5:
             recent_by_pipeline[row.pipeline_name].append(row)
+
+    # ── Per-pipeline step breakdown (agents/models/tokens involved) ───────────
+    # Keyed by (pipeline_name, step_name, agent, qualified_model) — qualifying the model
+    # with its provider up front (see _qualified_model) keeps two providers reporting the
+    # same bare model string from being conflated.
+    step_combo: dict[tuple[str, str, str | None, str], dict] = {}
+    for pipeline_name, step_name, agent, model, provider, status, n, in_tok, out_tok, avg_dur_ms in step_breakdown_raw:
+        key = (pipeline_name, step_name, agent, _qualified_model(provider, model))
+        c = step_combo.setdefault(key, {
+            "total": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0,
+            "duration_sum_ms": 0.0, "duration_n": 0,
+        })
+        c["total"] += n
+        if status == "failed":
+            c["failed"] += n
+        c["input_tokens"] += in_tok
+        c["output_tokens"] += out_tok
+        if avg_dur_ms is not None:
+            c["duration_sum_ms"] += avg_dur_ms * n
+            c["duration_n"] += n
+
+    step_breakdown_by_pipeline: dict[str, list[dict]] = defaultdict(list)
+    for (pipeline_name, step_name, agent, model), c in step_combo.items():
+        total = c["total"]
+        avg_duration_secs = (c["duration_sum_ms"] / c["duration_n"] / 1000) if c["duration_n"] else None
+        step_breakdown_by_pipeline[pipeline_name].append({
+            "step_name": step_name,
+            "agent": agent,
+            "model": model,
+            "total": total,
+            "success_rate": round((total - c["failed"]) / total * 100) if total else None,
+            "avg_input_tokens": round(c["input_tokens"] / total) if total else None,
+            "avg_output_tokens": round(c["output_tokens"] / total) if total else None,
+            "avg_duration": _format_seconds(avg_duration_secs),
+        })
+    for rows_ in step_breakdown_by_pipeline.values():
+        rows_.sort(key=lambda r: r["total"], reverse=True)
 
     # ── Drilldown payload (serialised to JSON for JS) ─────────────────────────
 
@@ -1477,6 +1539,7 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
             "runs_ts": {"labels": bucket_labels, "data": runs_ts_data},
             "duration_ts": {"labels": bucket_labels, "data": duration_ts_data},
             "recent_runs": recent,
+            "step_breakdown": step_breakdown_by_pipeline.get(name, []),
             "feedback_total": fb_total,
             "feedback_correct": fb_correct,
             "feedback_partial": fb_partial,
