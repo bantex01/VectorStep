@@ -3,6 +3,7 @@
 
 {% block extra_head %}
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
   .md-content h1 { font-size: 1.2rem; font-weight: 600; color: #f4f4f5; margin: 1.25rem 0 0.5rem; }
   .md-content h2 { font-size: 1.05rem; font-weight: 600; color: #e4e4e7; margin: 1rem 0 0.4rem; }
@@ -82,6 +83,13 @@
       class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px">
       Overview
     </button>
+    {% if step_stats %}
+    <button @click="tab='steps'"
+      :class="tab==='steps' ? 'border-indigo-500 text-indigo-400' : 'border-transparent text-zinc-400 hover:text-zinc-100 hover:border-zinc-600'"
+      class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px">
+      Steps
+    </button>
+    {% endif %}
     {% if soul %}
     <button @click="tab='soul'"
       :class="tab==='soul' ? 'border-indigo-500 text-indigo-400' : 'border-transparent text-zinc-400 hover:text-zinc-100 hover:border-zinc-600'"
@@ -115,7 +123,7 @@
   <!-- Overview -->
   <div x-show="tab==='overview'">
     {% if model_stats %}
-    <div class="bg-zinc-900 rounded-lg border border-zinc-800 overflow-hidden">
+    <div class="bg-zinc-900 rounded-lg border border-zinc-800 overflow-hidden mb-6">
       <table class="w-full text-sm">
         <thead>
           <tr class="border-b border-zinc-800">
@@ -124,6 +132,8 @@
             <th class="text-right px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Succeeded</th>
             <th class="text-right px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Failed</th>
             <th class="text-right px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Success Rate</th>
+            <th class="text-right px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Avg Duration</th>
+            <th class="text-right px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Avg Tokens (in/out)</th>
             <th class="text-right px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Last Run</th>
           </tr>
         </thead>
@@ -142,6 +152,12 @@
               {% else %}text-zinc-600{% endif %}">
               {% if s.get('success_rate') is not none %}{{ s.get('success_rate') }}%{% else %}—{% endif %}
             </td>
+            <td class="px-5 py-3.5 text-right text-zinc-400 text-xs">
+              {% if s.get('avg_duration_secs') is not none %}{{ format_seconds(s.get('avg_duration_secs')) }}{% else %}—{% endif %}
+            </td>
+            <td class="px-5 py-3.5 text-right text-zinc-400 text-xs">
+              {% if s.get('avg_input_tokens') is not none %}{{ s.avg_input_tokens | format_number }} / {{ s.avg_output_tokens | format_number }}{% else %}—{% endif %}
+            </td>
             <td class="px-5 py-3.5 text-right text-zinc-500 text-xs">
               {% if s.get('last_run') %}{{ format_ago(s.get('last_run')) }}{% else %}—{% endif %}
             </td>
@@ -150,12 +166,107 @@
         </tbody>
       </table>
     </div>
+
+    <!-- Usage over time, split by model -->
+    <div class="grid grid-cols-2 gap-4 mb-6">
+      <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+        <h2 class="text-sm font-semibold text-zinc-200 mb-3">Runs over time</h2>
+        {% if runs_ts.datasets %}
+          <div class="h-48"><canvas id="chart-runs-ts"></canvas></div>
+        {% else %}
+          <p class="text-sm text-zinc-500">No run history yet.</p>
+        {% endif %}
+      </div>
+      <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+        <h2 class="text-sm font-semibold text-zinc-200 mb-3">Tokens over time</h2>
+        {% if tokens_ts.datasets %}
+          <div class="h-48"><canvas id="chart-tokens-ts"></canvas></div>
+        {% else %}
+          <p class="text-sm text-zinc-500">No token usage recorded yet.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Recent activity -->
+    {% if recent_activity %}
+    <div class="bg-zinc-900 rounded-lg border border-zinc-800 overflow-hidden">
+      <div class="px-5 py-3 border-b border-zinc-800">
+        <h2 class="text-sm font-semibold text-zinc-200">Recent activity</h2>
+      </div>
+      <table class="w-full text-sm">
+        <tbody class="divide-y divide-zinc-800">
+          {% for a in recent_activity %}
+          <tr class="hover:bg-zinc-800/50 transition-colors">
+            <td class="px-5 py-2.5">
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ status_classes(a.status) }}">{{ a.status }}</span>
+            </td>
+            <td class="px-5 py-2.5 font-mono text-xs text-zinc-300">{{ a.step_name }}</td>
+            <td class="px-5 py-2.5 font-mono text-xs text-zinc-500">{{ a.model or "—" }}</td>
+            <td class="px-5 py-2.5 text-xs text-zinc-400 text-right">
+              {% if a.confidence is not none %}{{ (a.confidence * 100) | round | int }}%{% else %}—{% endif %}
+            </td>
+            <td class="px-5 py-2.5 text-xs text-zinc-400 text-right">
+              {% if a.input_tokens or a.output_tokens %}{{ (a.input_tokens or 0) | format_number }} / {{ (a.output_tokens or 0) | format_number }}{% else %}—{% endif %}
+            </td>
+            <td class="px-5 py-2.5 text-xs text-zinc-500 text-right">{{ a.ago }}</td>
+            <td class="px-5 py-2.5 text-right">
+              <a href="/ui/runs/{{ a.run_id }}" class="text-xs text-indigo-400 hover:text-indigo-300 underline underline-offset-2">view run</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
     {% else %}
     <div class="bg-zinc-900 rounded-lg border border-zinc-800 px-5 py-12 text-center text-sm text-zinc-500">
       No run history for this agent yet.
     </div>
     {% endif %}
   </div>
+
+  <!-- Steps -->
+  {% if step_stats %}
+  <div x-show="tab==='steps'" x-cloak>
+    <div class="bg-zinc-900 rounded-lg border border-zinc-800 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-zinc-800">
+            <th class="text-left px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Step</th>
+            <th class="text-left px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Model</th>
+            <th class="text-right px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Runs</th>
+            <th class="text-right px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Success Rate</th>
+            <th class="text-right px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Avg Tokens (in/out)</th>
+            <th class="text-right px-5 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">Last Run</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-zinc-800">
+          {% for row in step_stats %}
+          <tr class="hover:bg-zinc-800/50 transition-colors">
+            <td class="px-5 py-3.5 font-mono text-zinc-300 text-xs">{{ row.step_name }}</td>
+            <td class="px-5 py-3.5 font-mono text-zinc-500 text-xs">{{ row.model }}</td>
+            <td class="px-5 py-3.5 text-right text-zinc-300">{{ row.total }}</td>
+            <td class="px-5 py-3.5 text-right font-semibold
+              {% if row.success_rate is not none %}
+                {% if row.success_rate >= 90 %}text-green-400
+                {% elif row.success_rate >= 70 %}text-amber-400
+                {% else %}text-red-400{% endif %}
+              {% else %}text-zinc-600{% endif %}">
+              {% if row.success_rate is not none %}{{ row.success_rate }}%{% else %}—{% endif %}
+            </td>
+            <td class="px-5 py-3.5 text-right text-zinc-400 text-xs">
+              {% if row.avg_input_tokens is not none %}{{ row.avg_input_tokens | format_number }} / {{ row.avg_output_tokens | format_number }}{% else %}—{% endif %}
+            </td>
+            <td class="px-5 py-3.5 text-right text-zinc-500 text-xs">
+              {% if row.last_run %}{{ format_ago(row.last_run) }}{% else %}—{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
 
   <!-- SOUL -->
   {% if soul %}
@@ -201,5 +312,42 @@
   document.querySelectorAll('.md-content[data-md]').forEach(el => {
     el.innerHTML = marked.parse(el.getAttribute('data-md'));
   });
+
+  Chart.defaults.color = '#a1a1aa';
+  Chart.defaults.borderColor = '#27272a';
+  Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
+
+  function mkLine(id, ts) {
+    const el = document.getElementById(id);
+    if (!el || !ts.datasets.length) return;
+    new Chart(el, {
+      type: 'line',
+      data: {
+        labels: ts.labels,
+        datasets: ts.datasets.map(d => ({
+          label: d.label,
+          data: d.data,
+          borderColor: d.color,
+          backgroundColor: d.color + '22',
+          fill: false,
+          tension: 0.35,
+          pointRadius: ts.labels.length < 10 ? 4 : 2,
+          borderWidth: 2,
+        })),
+      },
+      options: {
+        maintainAspectRatio: false,
+        scales: {
+          x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+          y: { grid: { color: '#27272a' }, beginAtZero: true, ticks: { maxTicksLimit: 5 } },
+        },
+        plugins: { legend: { display: ts.datasets.length > 1, labels: { boxWidth: 10, font: { size: 10 } } } },
+        interaction: { mode: 'index', intersect: false },
+      },
+    });
+  }
+
+  mkLine('chart-runs-ts', {{ runs_ts | tojson | safe }});
+  mkLine('chart-tokens-ts', {{ tokens_ts | tojson | safe }});
 </script>
 {% endblock %}

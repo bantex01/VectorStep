@@ -149,6 +149,12 @@
             <p class="text-lg font-semibold text-zinc-200">{{ stats.get('total', 0) }}</p>
             <p class="text-xs text-zinc-500">runs</p>
           </div>
+          {% if stats.get('avg_duration_secs') is not none %}
+            <div class="text-right">
+              <p class="text-sm text-zinc-300">{{ format_seconds(stats.get('avg_duration_secs')) }}</p>
+              <p class="text-xs text-zinc-500">avg duration</p>
+            </div>
+          {% endif %}
           {% if stats.get('avg_input_tokens') is not none %}
             <div class="text-right">
               <p class="text-sm text-zinc-300">{{ stats.avg_input_tokens | format_number }} / {{ stats.avg_output_tokens | format_number }}</p>
