@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 import httpx
 import yaml
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -305,23 +305,28 @@ def _build_ts(
 
 async def _fetch_step_agent_model_combo(
     cutoff: datetime | None,
-) -> dict[tuple[str, str, str | None, str], dict]:
-    """Raw (pipeline_name, step_name, agent, qualified_model) -> counters (total, failed,
-    tokens, duration), scoped to production and an optional time cutoff.
+) -> dict[tuple[str | None, str, str, str | None, str | None, str | None], dict]:
+    """Raw (team, pipeline_name, step_name, agent, provider, model) -> counters (total,
+    failed, tokens, duration), scoped to production and an optional time cutoff.
+    provider/model are kept unqualified (raw DB values) so callers can group by real
+    provider or real model directly (Providers/Models Insights) as well as by
+    pipeline/step/agent/team (Pipelines/Steps/Agents/Teams Insights) — each computes its
+    own display-qualified model label at aggregation time via _qualified_model(provider,
+    model) rather than baking it into the cache key.
 
-    Shared by the Pipelines and Steps Insights drilldowns — each re-aggregates this same
-    data along a different axis (by pipeline, or by step) rather than re-querying it twice.
-    Qualifying the model with its provider up front (see _qualified_model) keeps two
-    providers reporting the same bare model string from being conflated."""
+    Shared by every Insights drilldown that breaks down by (team, pipeline, step, agent,
+    model) — each re-aggregates this same data along a different axis rather than
+    re-querying it."""
     sf = get_session_factory()
     async with sf() as session:
         q = _production_only(
             select(
+                PipelineRun.team,
                 PipelineRun.pipeline_name,
                 PipelineStep.step_name,
                 PipelineStep.agent,
-                PipelineStep.model,
                 PipelineStep.provider,
+                PipelineStep.model,
                 PipelineStep.status,
                 func.count().label("n"),
                 func.coalesce(func.sum(PipelineStep.input_tokens), 0),
@@ -330,8 +335,8 @@ async def _fetch_step_agent_model_combo(
             )
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .group_by(
-                PipelineRun.pipeline_name, PipelineStep.step_name, PipelineStep.agent,
-                PipelineStep.model, PipelineStep.provider, PipelineStep.status,
+                PipelineRun.team, PipelineRun.pipeline_name, PipelineStep.step_name,
+                PipelineStep.agent, PipelineStep.provider, PipelineStep.model, PipelineStep.status,
             )
         )
         if cutoff:
@@ -339,9 +344,9 @@ async def _fetch_step_agent_model_combo(
         rows = await session.execute(q)
         raw = rows.all()
 
-    combo: dict[tuple[str, str, str | None, str], dict] = {}
-    for pipeline_name, step_name, agent, model, provider, status, n, in_tok, out_tok, avg_dur_ms in raw:
-        key = (pipeline_name, step_name, agent, _qualified_model(provider, model))
+    combo: dict[tuple[str | None, str, str, str | None, str | None, str | None], dict] = {}
+    for team, pipeline_name, step_name, agent, provider, model, status, n, in_tok, out_tok, avg_dur_ms in raw:
+        key = (team, pipeline_name, step_name, agent, provider, model)
         c = combo.setdefault(key, {
             "total": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0,
             "duration_sum_ms": 0.0, "duration_n": 0,
@@ -1484,17 +1489,17 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
             recent_by_pipeline[row.pipeline_name].append(row)
 
     # ── Per-pipeline step breakdown (agents/models/tokens involved) ───────────
-    # step_combo (fetched above) is keyed by (pipeline_name, step_name, agent,
-    # qualified_model) — re-aggregate it here indexed by pipeline for this page's
-    # drilldown. The Steps insights page reuses the same combo, indexed by step instead.
+    # step_combo (fetched above) is keyed by (pipeline_name, step_name, agent, provider,
+    # model) — re-aggregate it here indexed by pipeline for this page's drilldown. The
+    # Steps/Models/Providers insights pages reuse the same combo, indexed differently.
     step_breakdown_by_pipeline: dict[str, list[dict]] = defaultdict(list)
-    for (pipeline_name, step_name, agent, model), c in step_combo.items():
+    for (_team, pipeline_name, step_name, agent, provider, model), c in step_combo.items():
         total = c["total"]
         avg_duration_secs = (c["duration_sum_ms"] / c["duration_n"] / 1000) if c["duration_n"] else None
         step_breakdown_by_pipeline[pipeline_name].append({
             "step_name": step_name,
             "agent": agent,
-            "model": model,
+            "model": _qualified_model(provider, model),
             "total": total,
             "success_rate": round((total - c["failed"]) / total * 100) if total else None,
             "avg_input_tokens": round(c["input_tokens"] / total) if total else None,
@@ -1750,14 +1755,14 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
     # ui_insights_pipelines's step_breakdown_by_pipeline, built from the same combo).
     pipeline_breakdown_by_step: dict[str, list[dict]] = defaultdict(list)
     distinct_pipelines_by_step: dict[str, set[str]] = defaultdict(set)
-    for (pipeline_name, step_name, agent, model), c in step_combo.items():
+    for (_team, pipeline_name, step_name, agent, provider, model), c in step_combo.items():
         distinct_pipelines_by_step[step_name].add(pipeline_name)
         total = c["total"]
         avg_duration_secs = (c["duration_sum_ms"] / c["duration_n"] / 1000) if c["duration_n"] else None
         pipeline_breakdown_by_step[step_name].append({
             "pipeline_name": pipeline_name,
             "agent": agent,
-            "model": model,
+            "model": _qualified_model(provider, model),
             "total": total,
             "success_rate": round((total - c["failed"]) / total * 100) if total else None,
             "avg_input_tokens": round(c["input_tokens"] / total) if total else None,
@@ -1996,16 +2001,17 @@ async def ui_insights_agents(request: Request, time_range: str = "7d"):
     # (compare ui_insights_pipelines / ui_insights_steps, built from the same combo).
     step_breakdown_by_agent: dict[str, list[dict]] = defaultdict(list)
     models_by_agent: dict[str, set[str]] = defaultdict(set)
-    for (pipeline_name, step_name, agent, model), c in step_combo.items():
+    for (_team, pipeline_name, step_name, agent, provider, model), c in step_combo.items():
         if not agent:
             continue
-        models_by_agent[agent].add(model)
+        qualified_model = _qualified_model(provider, model)
+        models_by_agent[agent].add(qualified_model)
         total = c["total"]
         avg_duration_secs = (c["duration_sum_ms"] / c["duration_n"] / 1000) if c["duration_n"] else None
         step_breakdown_by_agent[agent].append({
             "pipeline_name": pipeline_name,
             "step_name": step_name,
-            "model": model,
+            "model": qualified_model,
             "total": total,
             "success_rate": round((total - c["failed"]) / total * 100) if total else None,
             "avg_input_tokens": round(c["input_tokens"] / total) if total else None,
@@ -2117,6 +2123,876 @@ async def ui_insights_agents(request: Request, time_range: str = "7d"):
         "total_output_tokens": total_output_tokens,
         "drilldown_data": drilldown_data,
         "active_page": "insights_agents",
+    })
+
+
+@router.get("/insights/providers", response_class=HTMLResponse)
+async def ui_insights_providers(request: Request, time_range: str = "7d"):
+    """Token/call spend grouped by LLM provider (gateway executor only). Unlike every
+    other Insights page, this one falls back to a best-effort provider guess from the
+    model string (see _provider_from_model) when the `provider` column is NULL — this
+    page's entire purpose is grouping by provider, so a best-effort bucket for
+    pre-migration rows beats losing that history from the page entirely. Contrast with
+    _qualified_model (used for per-row display elsewhere), which never guesses."""
+    cutoff, range_label = _time_range_cutoff(time_range)
+    sf = get_session_factory()
+
+    async with sf() as session:
+        q = _production_only(
+            select(
+                PipelineRun.pipeline_name, PipelineStep.step_name, PipelineStep.agent,
+                PipelineStep.provider, PipelineStep.model, PipelineStep.status,
+                PipelineStep.run_id, PipelineStep.executed_at, PipelineStep.duration_ms,
+                PipelineStep.input_tokens, PipelineStep.output_tokens,
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.executor == "gateway", PipelineStep.model.is_not(None))
+            .order_by(PipelineStep.executed_at.desc())
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        all_rows = rows.all()
+
+    def eff_provider(provider: str | None, model: str | None) -> str:
+        return provider or _provider_from_model(model)
+
+    run_counts: dict[str, int] = defaultdict(int)
+    failed_counts: dict[str, int] = defaultdict(int)
+    token_totals: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    duration_sum: dict[str, float] = defaultdict(float)
+    duration_n: dict[str, int] = defaultdict(int)
+    status_counts_by_provider: dict[str, dict[str, int]] = defaultdict(dict)
+    models_by_provider: dict[str, set[str]] = defaultdict(set)
+    breakdown_combo: dict[tuple[str, str, str, str | None, str], dict] = {}
+
+    for r in all_rows:
+        provider = eff_provider(r.provider, r.model)
+        run_counts[provider] += 1
+        if r.status == "failed":
+            failed_counts[provider] += 1
+        token_totals[provider][0] += r.input_tokens or 0
+        token_totals[provider][1] += r.output_tokens or 0
+        if r.duration_ms is not None:
+            duration_sum[provider] += r.duration_ms
+            duration_n[provider] += 1
+        status_counts_by_provider[provider][r.status] = status_counts_by_provider[provider].get(r.status, 0) + 1
+        models_by_provider[provider].add(r.model)
+
+        bkey = (provider, r.pipeline_name, r.step_name, r.agent, r.model)
+        bc = breakdown_combo.setdefault(bkey, {
+            "total": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0,
+            "duration_sum_ms": 0.0, "duration_n": 0,
+        })
+        bc["total"] += 1
+        if r.status == "failed":
+            bc["failed"] += 1
+        bc["input_tokens"] += r.input_tokens or 0
+        bc["output_tokens"] += r.output_tokens or 0
+        if r.duration_ms is not None:
+            bc["duration_sum_ms"] += r.duration_ms
+            bc["duration_n"] += 1
+
+    avg_duration_by_provider = {p: duration_sum[p] / duration_n[p] / 1000 for p in duration_n if duration_n[p]}
+    overall_avg_duration_secs = (
+        sum(duration_sum.values()) / sum(duration_n.values()) / 1000 if sum(duration_n.values()) else None
+    )
+
+    # ── Timeseries + recent-list buckets ───────────────────────────────────────
+    now = utc_now()
+    resolution = _ts_resolution(time_range)
+    if all_rows:
+        oldest = min(r.executed_at.replace(tzinfo=None) for r in all_rows)
+    else:
+        oldest = (cutoff or (now - timedelta(days=7)))
+    ts_start = cutoff or oldest
+    bucket_labels = _ts_all_buckets(ts_start, now, resolution)
+
+    runs_by_bucket_provider: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    durations_by_bucket_provider: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    recent_by_provider: dict[str, list] = defaultdict(list)
+
+    for r in all_rows:
+        provider = eff_provider(r.provider, r.model)
+        bucket = _ts_bucket(r.executed_at, resolution)
+        runs_by_bucket_provider[provider][bucket] += 1
+        if r.duration_ms is not None:
+            durations_by_bucket_provider[provider][bucket].append(r.duration_ms / 1000)
+        if len(recent_by_provider[provider]) < 5:
+            recent_by_provider[provider].append(r)
+
+    # ── Per-provider pipeline/step/agent/model breakdown ───────────────────────
+    breakdown_by_provider: dict[str, list[dict]] = defaultdict(list)
+    for (provider, pipeline_name, step_name, agent, model), c in breakdown_combo.items():
+        total = c["total"]
+        avg_duration_secs = (c["duration_sum_ms"] / c["duration_n"] / 1000) if c["duration_n"] else None
+        breakdown_by_provider[provider].append({
+            "pipeline_name": pipeline_name,
+            "step_name": step_name,
+            "agent": agent,
+            "model": model,
+            "total": total,
+            "success_rate": round((total - c["failed"]) / total * 100) if total else None,
+            "avg_input_tokens": round(c["input_tokens"] / total) if total else None,
+            "avg_output_tokens": round(c["output_tokens"] / total) if total else None,
+            "avg_duration": _format_seconds(avg_duration_secs),
+        })
+    for rows_ in breakdown_by_provider.values():
+        rows_.sort(key=lambda r: r["total"], reverse=True)
+
+    # ── Drilldown payload (serialised to JSON for JS) ─────────────────────────
+    drilldown_data: dict[str, dict] = {}
+    for name, n in run_counts.items():
+        sc = status_counts_by_provider.get(name, {})
+        failed = failed_counts.get(name, 0)
+        escalated = sc.get("escalated", 0)
+        success_rate = round((n - failed) / n * 100) if n else None
+        escalation_rate = round(escalated / n * 100) if n else None
+        avg_dur = avg_duration_by_provider.get(name)
+        inp, out = token_totals.get(name, [0, 0])
+
+        runs_ts_data = [runs_by_bucket_provider[name].get(b, 0) for b in bucket_labels]
+        duration_ts_data = [
+            round(sum(durations_by_bucket_provider[name][b]) / len(durations_by_bucket_provider[name][b]))
+            if durations_by_bucket_provider[name].get(b) else None
+            for b in bucket_labels
+        ]
+
+        recent = []
+        for r in recent_by_provider.get(name, []):
+            recent.append({
+                "id": str(r.run_id),
+                "pipeline_name": r.pipeline_name,
+                "step_name": r.step_name,
+                "status": r.status,
+                "ago": _format_ago(r.executed_at),
+                "duration": _format_seconds(r.duration_ms / 1000) if r.duration_ms is not None else None,
+            })
+
+        drilldown_data[name] = {
+            "run_count": n,
+            "failed_count": failed,
+            "success_rate": success_rate,
+            "escalation_rate": escalation_rate,
+            "avg_duration": _format_seconds(avg_dur),
+            "input_tokens": inp,
+            "output_tokens": out,
+            "status_breakdown": sc,
+            "runs_ts": {"labels": bucket_labels, "data": runs_ts_data},
+            "duration_ts": {"labels": bucket_labels, "data": duration_ts_data},
+            "recent_runs": recent,
+            "step_breakdown": breakdown_by_provider.get(name, []),
+        }
+
+    # ── Headline stats ────────────────────────────────────────────────────────
+    total_step_executions = sum(run_counts.values())
+    total_failed = sum(failed_counts.values())
+    overall_success_rate = round((total_step_executions - total_failed) / total_step_executions * 100) if total_step_executions else None
+    total_input_tokens = sum(v[0] for v in token_totals.values())
+    total_output_tokens = sum(v[1] for v in token_totals.values())
+
+    # ── Chart data ────────────────────────────────────────────────────────────
+    provider_rows = []
+    for name, n in sorted(run_counts.items(), key=lambda t: t[1], reverse=True):
+        provider_rows.append({
+            "name": name,
+            "run_count": n,
+            "failed_count": failed_counts.get(name, 0),
+            "avg_duration_secs": avg_duration_by_provider.get(name),
+            "input_tokens": token_totals.get(name, [0, 0])[0],
+            "output_tokens": token_totals.get(name, [0, 0])[1],
+            "models": sorted(models_by_provider.get(name, [])),
+        })
+
+    duration_chart_rows = sorted(avg_duration_by_provider.items(), key=lambda t: t[1], reverse=True)
+    duration_chart = {
+        "labels": [name for name, _ in duration_chart_rows],
+        "data": [round(secs) for _, secs in duration_chart_rows],
+    }
+
+    steps_ts = _build_ts(
+        [(r.executed_at, eff_provider(r.provider, r.model)) for r in all_rows], now, cutoff, time_range,
+        dim_fn=lambda r: r[1],
+    )
+    tokens_ts = _build_ts(
+        [(r.executed_at, eff_provider(r.provider, r.model), (r.input_tokens or 0) + (r.output_tokens or 0))
+         for r in all_rows],
+        now, cutoff, time_range,
+        dim_fn=lambda r: r[1],
+        val_fn=lambda r: r[2],
+    )
+
+    return templates.TemplateResponse(request, "insights_providers.html", {
+        "time_range": time_range,
+        "range_label": range_label,
+        "provider_rows": provider_rows,
+        "duration_chart": duration_chart,
+        "steps_ts": steps_ts,
+        "tokens_ts": tokens_ts,
+        "total_provider_count": len(run_counts),
+        "total_step_executions": total_step_executions,
+        "overall_success_rate": overall_success_rate,
+        "overall_avg_duration_secs": overall_avg_duration_secs,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "drilldown_data": drilldown_data,
+        "active_page": "insights_providers",
+    })
+
+
+@router.get("/insights/models", response_class=HTMLResponse)
+async def ui_insights_models(request: Request, time_range: str = "7d"):
+    """Success rate/duration/tokens grouped by model (gateway executor only).
+
+    Grouped by the display-qualified model identity (see _qualified_model) rather than the
+    bare model string — deliberately does NOT guess a provider for rows missing one (unlike
+    Insights > Providers, whose whole point is provider bucketing). A bare pre-migration
+    "claude-sonnet-5" and a qualified "anthropic/claude-sonnet-5" are kept as distinct rows
+    here rather than merged on a guess — same reasoning as _qualified_model everywhere else.
+    """
+    cutoff, range_label = _time_range_cutoff(time_range)
+    sf = get_session_factory()
+
+    async with sf() as session:
+        q = _production_only(
+            select(
+                PipelineRun.pipeline_name, PipelineStep.step_name, PipelineStep.agent,
+                PipelineStep.provider, PipelineStep.model, PipelineStep.status,
+                PipelineStep.run_id, PipelineStep.executed_at, PipelineStep.duration_ms,
+                PipelineStep.input_tokens, PipelineStep.output_tokens,
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.executor == "gateway", PipelineStep.model.is_not(None))
+            .order_by(PipelineStep.executed_at.desc())
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        all_rows = rows.all()
+
+    run_counts: dict[str, int] = defaultdict(int)
+    failed_counts: dict[str, int] = defaultdict(int)
+    token_totals: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    duration_sum: dict[str, float] = defaultdict(float)
+    duration_n: dict[str, int] = defaultdict(int)
+    status_counts_by_model: dict[str, dict[str, int]] = defaultdict(dict)
+    agents_by_model: dict[str, set[str]] = defaultdict(set)
+    breakdown_combo: dict[tuple[str, str, str, str | None], dict] = {}
+
+    for r in all_rows:
+        model = _qualified_model(r.provider, r.model)
+        run_counts[model] += 1
+        if r.status == "failed":
+            failed_counts[model] += 1
+        token_totals[model][0] += r.input_tokens or 0
+        token_totals[model][1] += r.output_tokens or 0
+        if r.duration_ms is not None:
+            duration_sum[model] += r.duration_ms
+            duration_n[model] += 1
+        status_counts_by_model[model][r.status] = status_counts_by_model[model].get(r.status, 0) + 1
+        if r.agent:
+            agents_by_model[model].add(r.agent)
+
+        bkey = (model, r.pipeline_name, r.step_name, r.agent)
+        bc = breakdown_combo.setdefault(bkey, {
+            "total": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0,
+            "duration_sum_ms": 0.0, "duration_n": 0,
+        })
+        bc["total"] += 1
+        if r.status == "failed":
+            bc["failed"] += 1
+        bc["input_tokens"] += r.input_tokens or 0
+        bc["output_tokens"] += r.output_tokens or 0
+        if r.duration_ms is not None:
+            bc["duration_sum_ms"] += r.duration_ms
+            bc["duration_n"] += 1
+
+    avg_duration_by_model = {m: duration_sum[m] / duration_n[m] / 1000 for m in duration_n if duration_n[m]}
+    overall_avg_duration_secs = (
+        sum(duration_sum.values()) / sum(duration_n.values()) / 1000 if sum(duration_n.values()) else None
+    )
+
+    # ── Timeseries + recent-list buckets ───────────────────────────────────────
+    now = utc_now()
+    resolution = _ts_resolution(time_range)
+    if all_rows:
+        oldest = min(r.executed_at.replace(tzinfo=None) for r in all_rows)
+    else:
+        oldest = (cutoff or (now - timedelta(days=7)))
+    ts_start = cutoff or oldest
+    bucket_labels = _ts_all_buckets(ts_start, now, resolution)
+
+    runs_by_bucket_model: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    durations_by_bucket_model: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    recent_by_model: dict[str, list] = defaultdict(list)
+
+    for r in all_rows:
+        model = _qualified_model(r.provider, r.model)
+        bucket = _ts_bucket(r.executed_at, resolution)
+        runs_by_bucket_model[model][bucket] += 1
+        if r.duration_ms is not None:
+            durations_by_bucket_model[model][bucket].append(r.duration_ms / 1000)
+        if len(recent_by_model[model]) < 5:
+            recent_by_model[model].append(r)
+
+    # ── Per-model pipeline/step/agent breakdown ────────────────────────────────
+    breakdown_by_model: dict[str, list[dict]] = defaultdict(list)
+    for (model, pipeline_name, step_name, agent), c in breakdown_combo.items():
+        total = c["total"]
+        avg_duration_secs = (c["duration_sum_ms"] / c["duration_n"] / 1000) if c["duration_n"] else None
+        breakdown_by_model[model].append({
+            "pipeline_name": pipeline_name,
+            "step_name": step_name,
+            "agent": agent,
+            "total": total,
+            "success_rate": round((total - c["failed"]) / total * 100) if total else None,
+            "avg_input_tokens": round(c["input_tokens"] / total) if total else None,
+            "avg_output_tokens": round(c["output_tokens"] / total) if total else None,
+            "avg_duration": _format_seconds(avg_duration_secs),
+        })
+    for rows_ in breakdown_by_model.values():
+        rows_.sort(key=lambda r: r["total"], reverse=True)
+
+    # ── Drilldown payload (serialised to JSON for JS) ─────────────────────────
+    drilldown_data: dict[str, dict] = {}
+    for name, n in run_counts.items():
+        sc = status_counts_by_model.get(name, {})
+        failed = failed_counts.get(name, 0)
+        escalated = sc.get("escalated", 0)
+        success_rate = round((n - failed) / n * 100) if n else None
+        escalation_rate = round(escalated / n * 100) if n else None
+        avg_dur = avg_duration_by_model.get(name)
+        inp, out = token_totals.get(name, [0, 0])
+
+        runs_ts_data = [runs_by_bucket_model[name].get(b, 0) for b in bucket_labels]
+        duration_ts_data = [
+            round(sum(durations_by_bucket_model[name][b]) / len(durations_by_bucket_model[name][b]))
+            if durations_by_bucket_model[name].get(b) else None
+            for b in bucket_labels
+        ]
+
+        recent = []
+        for r in recent_by_model.get(name, []):
+            recent.append({
+                "id": str(r.run_id),
+                "pipeline_name": r.pipeline_name,
+                "step_name": r.step_name,
+                "status": r.status,
+                "ago": _format_ago(r.executed_at),
+                "duration": _format_seconds(r.duration_ms / 1000) if r.duration_ms is not None else None,
+            })
+
+        drilldown_data[name] = {
+            "run_count": n,
+            "failed_count": failed,
+            "success_rate": success_rate,
+            "escalation_rate": escalation_rate,
+            "avg_duration": _format_seconds(avg_dur),
+            "input_tokens": inp,
+            "output_tokens": out,
+            "status_breakdown": sc,
+            "runs_ts": {"labels": bucket_labels, "data": runs_ts_data},
+            "duration_ts": {"labels": bucket_labels, "data": duration_ts_data},
+            "recent_runs": recent,
+            "step_breakdown": breakdown_by_model.get(name, []),
+        }
+
+    # ── Headline stats ────────────────────────────────────────────────────────
+    total_step_executions = sum(run_counts.values())
+    total_failed = sum(failed_counts.values())
+    overall_success_rate = round((total_step_executions - total_failed) / total_step_executions * 100) if total_step_executions else None
+    total_input_tokens = sum(v[0] for v in token_totals.values())
+    total_output_tokens = sum(v[1] for v in token_totals.values())
+
+    # ── Chart data ────────────────────────────────────────────────────────────
+    model_rows = []
+    for name, n in sorted(run_counts.items(), key=lambda t: t[1], reverse=True):
+        model_rows.append({
+            "name": name,
+            "run_count": n,
+            "failed_count": failed_counts.get(name, 0),
+            "avg_duration_secs": avg_duration_by_model.get(name),
+            "input_tokens": token_totals.get(name, [0, 0])[0],
+            "output_tokens": token_totals.get(name, [0, 0])[1],
+            "agents": sorted(agents_by_model.get(name, [])),
+        })
+
+    duration_chart_rows = sorted(avg_duration_by_model.items(), key=lambda t: t[1], reverse=True)
+    duration_chart = {
+        "labels": [name for name, _ in duration_chart_rows],
+        "data": [round(secs) for _, secs in duration_chart_rows],
+    }
+
+    steps_ts = _build_ts(
+        [(r.executed_at, _qualified_model(r.provider, r.model)) for r in all_rows], now, cutoff, time_range,
+        dim_fn=lambda r: r[1],
+    )
+    tokens_ts = _build_ts(
+        [(r.executed_at, _qualified_model(r.provider, r.model), (r.input_tokens or 0) + (r.output_tokens or 0))
+         for r in all_rows],
+        now, cutoff, time_range,
+        dim_fn=lambda r: r[1],
+        val_fn=lambda r: r[2],
+    )
+
+    return templates.TemplateResponse(request, "insights_models.html", {
+        "time_range": time_range,
+        "range_label": range_label,
+        "model_rows": model_rows,
+        "duration_chart": duration_chart,
+        "steps_ts": steps_ts,
+        "tokens_ts": tokens_ts,
+        "total_model_count": len(run_counts),
+        "total_step_executions": total_step_executions,
+        "overall_success_rate": overall_success_rate,
+        "overall_avg_duration_secs": overall_avg_duration_secs,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "drilldown_data": drilldown_data,
+        "active_page": "insights_models",
+    })
+
+
+@router.get("/insights/mcp", response_class=HTMLResponse)
+async def ui_insights_mcp(request: Request, time_range: str = "7d"):
+    """MCP tool call usage — extracted from PipelineStep.agent_trace (gateway executor
+    only; OpenClaw doesn't expose intermediate events, so agent_trace is always NULL for
+    those steps and they're naturally excluded). Tool names are namespaced by the Gateway
+    as "{server}__{tool}" (see MCPManager) — split on that to group by server too.
+
+    Unlike every other Insights page, tool calls have no token/duration concept of their
+    own (those belong to the step/LLM call as a whole) — "errors" (tool_result.is_error)
+    takes the place of "failures" as the reliability signal.
+    """
+    cutoff, range_label = _time_range_cutoff(time_range)
+    sf = get_session_factory()
+
+    async with sf() as session:
+        q = _production_only(
+            select(
+                PipelineRun.pipeline_name, PipelineStep.step_name, PipelineStep.agent,
+                PipelineStep.run_id, PipelineStep.executed_at, PipelineStep.agent_trace,
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.agent_trace.is_not(None))
+            .order_by(PipelineStep.executed_at.desc())
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        all_rows = rows.all()
+
+    # Per-row tool usage: {tool_name: {"calls": n, "errors": n}} extracted from that
+    # step's trace. A single step can call several tools, each several times.
+    row_tool_usage: list[tuple] = []
+    for r in all_rows:
+        try:
+            events = json.loads(r.agent_trace)
+        except (TypeError, ValueError):
+            continue
+        usage: dict[str, dict] = {}
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            name = event.get("name")
+            if not name:
+                continue
+            t = event.get("type")
+            if t == "tool_call":
+                usage.setdefault(name, {"calls": 0, "errors": 0})["calls"] += 1
+            elif t == "tool_result":
+                u = usage.setdefault(name, {"calls": 0, "errors": 0})
+                if event.get("is_error"):
+                    u["errors"] += 1
+        if usage:
+            row_tool_usage.append((r, usage))
+
+    now = utc_now()
+    resolution = _ts_resolution(time_range)
+    if all_rows:
+        oldest = min(r.executed_at.replace(tzinfo=None) for r in all_rows)
+    else:
+        oldest = (cutoff or (now - timedelta(days=7)))
+    ts_start = cutoff or oldest
+    bucket_labels = _ts_all_buckets(ts_start, now, resolution)
+
+    call_counts: dict[str, int] = defaultdict(int)
+    error_counts: dict[str, int] = defaultdict(int)
+    pipelines_by_tool: dict[str, set[str]] = defaultdict(set)
+    calls_by_bucket_tool: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    errors_by_bucket_tool: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    recent_by_tool: dict[str, list] = defaultdict(list)
+    breakdown_combo: dict[tuple[str, str, str, str | None], dict] = {}
+
+    for r, usage in row_tool_usage:
+        bucket = _ts_bucket(r.executed_at, resolution)
+        for tool, u in usage.items():
+            call_counts[tool] += u["calls"]
+            error_counts[tool] += u["errors"]
+            pipelines_by_tool[tool].add(r.pipeline_name)
+            calls_by_bucket_tool[tool][bucket] += u["calls"]
+            errors_by_bucket_tool[tool][bucket] += u["errors"]
+            if len(recent_by_tool[tool]) < 5:
+                recent_by_tool[tool].append({
+                    "id": str(r.run_id),
+                    "pipeline_name": r.pipeline_name,
+                    "step_name": r.step_name,
+                    "calls": u["calls"],
+                    "errors": u["errors"],
+                    "ago": _format_ago(r.executed_at),
+                })
+            bkey = (tool, r.pipeline_name, r.step_name, r.agent)
+            bc = breakdown_combo.setdefault(bkey, {"calls": 0, "errors": 0})
+            bc["calls"] += u["calls"]
+            bc["errors"] += u["errors"]
+
+    # ── Per-tool pipeline/step/agent breakdown ─────────────────────────────────
+    breakdown_by_tool: dict[str, list[dict]] = defaultdict(list)
+    for (tool, pipeline_name, step_name, agent), c in breakdown_combo.items():
+        calls = c["calls"]
+        breakdown_by_tool[tool].append({
+            "pipeline_name": pipeline_name,
+            "step_name": step_name,
+            "agent": agent,
+            "calls": calls,
+            "errors": c["errors"],
+            "success_rate": round((calls - c["errors"]) / calls * 100) if calls else None,
+        })
+    for rows_ in breakdown_by_tool.values():
+        rows_.sort(key=lambda r: r["calls"], reverse=True)
+
+    # ── Drilldown payload (serialised to JSON for JS) ─────────────────────────
+    drilldown_data: dict[str, dict] = {}
+    for tool, calls in call_counts.items():
+        errors = error_counts.get(tool, 0)
+        success_rate = round((calls - errors) / calls * 100) if calls else None
+        drilldown_data[tool] = {
+            "calls": calls,
+            "errors": errors,
+            "success_rate": success_rate,
+            "calls_ts": {"labels": bucket_labels, "data": [calls_by_bucket_tool[tool].get(b, 0) for b in bucket_labels]},
+            "errors_ts": {"labels": bucket_labels, "data": [errors_by_bucket_tool[tool].get(b, 0) for b in bucket_labels]},
+            "recent": recent_by_tool.get(tool, []),
+            "breakdown": breakdown_by_tool.get(tool, []),
+        }
+
+    # ── Headline stats ────────────────────────────────────────────────────────
+    total_calls = sum(call_counts.values())
+    total_errors = sum(error_counts.values())
+    overall_success_rate = round((total_calls - total_errors) / total_calls * 100) if total_calls else None
+    distinct_servers = len({tool.partition("__")[0] for tool in call_counts})
+
+    # ── Chart data ────────────────────────────────────────────────────────────
+    tool_rows = []
+    for tool, calls in sorted(call_counts.items(), key=lambda t: t[1], reverse=True):
+        server, _, bare_tool = tool.partition("__")
+        errors = error_counts.get(tool, 0)
+        tool_rows.append({
+            "name": tool,
+            "server": server,
+            "tool": bare_tool or tool,
+            "calls": calls,
+            "errors": errors,
+            "success_rate": round((calls - errors) / calls * 100) if calls else None,
+            "pipelines": sorted(pipelines_by_tool.get(tool, [])),
+        })
+
+    calls_by_server: dict[str, int] = defaultdict(int)
+    for tool, calls in call_counts.items():
+        calls_by_server[tool.partition("__")[0]] += calls
+    server_chart_rows = sorted(calls_by_server.items(), key=lambda t: t[1], reverse=True)
+    server_chart = {
+        "labels": [name for name, _ in server_chart_rows],
+        "data": [n for _, n in server_chart_rows],
+    }
+
+    calls_ts_rows = [(r.executed_at, tool, u["calls"]) for r, usage in row_tool_usage for tool, u in usage.items()]
+    errors_ts_rows = [(r.executed_at, tool, u["errors"]) for r, usage in row_tool_usage for tool, u in usage.items()]
+    calls_ts = _build_ts(calls_ts_rows, now, cutoff, time_range, dim_fn=lambda r: r[1], val_fn=lambda r: r[2])
+    errors_ts = _build_ts(errors_ts_rows, now, cutoff, time_range, dim_fn=lambda r: r[1], val_fn=lambda r: r[2])
+
+    return templates.TemplateResponse(request, "insights_mcp.html", {
+        "time_range": time_range,
+        "range_label": range_label,
+        "tool_rows": tool_rows,
+        "server_chart": server_chart,
+        "calls_ts": calls_ts,
+        "errors_ts": errors_ts,
+        "total_tool_count": len(call_counts),
+        "total_calls": total_calls,
+        "total_errors": total_errors,
+        "overall_success_rate": overall_success_rate,
+        "distinct_servers": distinct_servers,
+        "drilldown_data": drilldown_data,
+        "active_page": "insights_mcp",
+    })
+
+
+@router.get("/insights/teams", response_class=HTMLResponse)
+async def ui_insights_teams(request: Request, time_range: str = "7d"):
+    """Per-team rollup — which pipelines/steps/agents/models a team uses, and its token
+    spend, so a team can see a complete picture of what they're running and make informed
+    cost decisions. `team` is a PipelineRun attribute (resolved from the webhook auth
+    token — see README §3b); NULL is bucketed as "Unattributed" rather than dropped, since
+    unattributed spend is exactly the kind of thing this page exists to surface.
+
+    Run counts/success-rate/duration come from PipelineRun directly (a "run" is a run,
+    not a step); tokens and the "what they're using" breakdown come from the shared
+    per-step combo (see _fetch_step_agent_model_combo), which also carries `team`.
+    """
+    cutoff, range_label = _time_range_cutoff(time_range)
+    sf = get_session_factory()
+
+    def norm_team(t: str | None) -> str:
+        return t or "Unattributed"
+
+    async with sf() as session:
+        q = _production_only(select(PipelineRun.team, func.count().label("n")).group_by(PipelineRun.team))
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        run_counts_raw = rows.all()
+
+        q = _production_only(
+            select(PipelineRun.team, func.count().label("n"))
+            .where(PipelineRun.status == "failed")
+            .group_by(PipelineRun.team)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        failed_counts_raw = rows.all()
+
+        q = _production_only(
+            select(PipelineRun.team, PipelineRun.status, func.count().label("n"))
+            .group_by(PipelineRun.team, PipelineRun.status)
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        status_counts_raw = rows.all()
+
+        q = _production_only(select(PipelineRun.team, PipelineRun.pipeline_name).distinct())
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        pipelines_by_team_raw = rows.all()
+
+        # No duration column on pipeline_runs — compute from timestamps, same approach as
+        # ui_insights_pipelines. Only terminal runs (completed_at set) count.
+        q = _production_only(
+            select(PipelineRun.team, PipelineRun.triggered_at, PipelineRun.completed_at)
+            .where(PipelineRun.completed_at.is_not(None))
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        duration_rows_raw = rows.all()
+
+        # All runs in range — used for per-team timeseries and recent-runs list
+        q = _production_only(
+            select(
+                PipelineRun.id, PipelineRun.team, PipelineRun.pipeline_name,
+                PipelineRun.status, PipelineRun.triggered_at, PipelineRun.completed_at,
+            )
+            .order_by(PipelineRun.triggered_at.desc())
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        all_runs_raw = rows.all()
+
+        # Per-step token usage with timestamps — for the tokens-over-time chart (tokens
+        # live on PipelineStep, not PipelineRun, so this needs its own query).
+        q = _production_only(
+            select(PipelineRun.team, PipelineStep.executed_at, PipelineStep.input_tokens, PipelineStep.output_tokens)
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.input_tokens.is_not(None))
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        rows = await session.execute(q)
+        token_ts_raw = rows.all()
+
+    # step_combo (shared with Pipelines/Steps/Agents Insights) now also carries team —
+    # re-aggregated here indexed by team for tokens and the "what they're using" breakdown.
+    step_combo = await _fetch_step_agent_model_combo(cutoff)
+
+    run_counts: dict[str, int] = defaultdict(int)
+    for team, n in run_counts_raw:
+        run_counts[norm_team(team)] += n
+
+    failed_counts: dict[str, int] = defaultdict(int)
+    for team, n in failed_counts_raw:
+        failed_counts[norm_team(team)] += n
+
+    status_counts_by_team: dict[str, dict[str, int]] = defaultdict(dict)
+    for team, status, n in status_counts_raw:
+        tk = norm_team(team)
+        status_counts_by_team[tk][status] = status_counts_by_team[tk].get(status, 0) + n
+
+    pipelines_by_team: dict[str, set[str]] = defaultdict(set)
+    for team, pipeline_name in pipelines_by_team_raw:
+        pipelines_by_team[norm_team(team)].add(pipeline_name)
+
+    durations_by_team: dict[str, list[float]] = defaultdict(list)
+    for team, triggered_at, completed_at in duration_rows_raw:
+        secs = (completed_at.replace(tzinfo=None) - triggered_at.replace(tzinfo=None)).total_seconds()
+        if secs >= 0:
+            durations_by_team[norm_team(team)].append(secs)
+    avg_duration_by_team = {t: sum(v) / len(v) for t, v in durations_by_team.items() if v}
+
+    token_totals: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    breakdown_combo_by_team: dict[str, list] = defaultdict(list)
+    for (team, pipeline_name, step_name, agent, provider, model), c in step_combo.items():
+        tk = norm_team(team)
+        token_totals[tk][0] += c["input_tokens"]
+        token_totals[tk][1] += c["output_tokens"]
+        breakdown_combo_by_team[tk].append((pipeline_name, step_name, agent, provider, model, c))
+
+    breakdown_by_team: dict[str, list[dict]] = defaultdict(list)
+    for tk, entries in breakdown_combo_by_team.items():
+        for pipeline_name, step_name, agent, provider, model, c in entries:
+            total = c["total"]
+            avg_duration_secs = (c["duration_sum_ms"] / c["duration_n"] / 1000) if c["duration_n"] else None
+            breakdown_by_team[tk].append({
+                "pipeline_name": pipeline_name,
+                "step_name": step_name,
+                "agent": agent,
+                "model": _qualified_model(provider, model),
+                "total": total,
+                "success_rate": round((total - c["failed"]) / total * 100) if total else None,
+                "avg_input_tokens": round(c["input_tokens"] / total) if total else None,
+                "avg_output_tokens": round(c["output_tokens"] / total) if total else None,
+                "avg_duration": _format_seconds(avg_duration_secs),
+            })
+    for rows_ in breakdown_by_team.values():
+        rows_.sort(key=lambda r: r["total"], reverse=True)
+
+    # ── Timeseries + recent-list buckets ───────────────────────────────────────
+    now = utc_now()
+    resolution = _ts_resolution(time_range)
+    if all_runs_raw:
+        oldest = min(r.triggered_at.replace(tzinfo=None) for r in all_runs_raw)
+    else:
+        oldest = (cutoff or (now - timedelta(days=7)))
+    ts_start = cutoff or oldest
+    bucket_labels = _ts_all_buckets(ts_start, now, resolution)
+
+    runs_by_bucket_team: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    durations_by_bucket_team: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    recent_by_team: dict[str, list] = defaultdict(list)
+
+    for r in all_runs_raw:
+        tk = norm_team(r.team)
+        bucket = _ts_bucket(r.triggered_at, resolution)
+        runs_by_bucket_team[tk][bucket] += 1
+        if r.completed_at:
+            secs = (r.completed_at.replace(tzinfo=None) - r.triggered_at.replace(tzinfo=None)).total_seconds()
+            if secs >= 0:
+                durations_by_bucket_team[tk][bucket].append(secs)
+        if len(recent_by_team[tk]) < 5:
+            dur_str = None
+            if r.completed_at:
+                secs = (r.completed_at.replace(tzinfo=None) - r.triggered_at.replace(tzinfo=None)).total_seconds()
+                dur_str = _format_seconds(secs)
+            recent_by_team[tk].append({
+                "id": str(r.id), "pipeline_name": r.pipeline_name, "status": r.status,
+                "ago": _format_ago(r.triggered_at), "duration": dur_str,
+            })
+
+    # ── Drilldown payload (serialised to JSON for JS) ─────────────────────────
+    drilldown_data: dict[str, dict] = {}
+    for name, n in run_counts.items():
+        sc = status_counts_by_team.get(name, {})
+        failed = failed_counts.get(name, 0)
+        escalated = sc.get("escalated", 0)
+        success_rate = round((n - failed) / n * 100) if n else None
+        escalation_rate = round(escalated / n * 100) if n else None
+        avg_dur = avg_duration_by_team.get(name)
+        inp, out = token_totals.get(name, [0, 0])
+
+        runs_ts_data = [runs_by_bucket_team[name].get(b, 0) for b in bucket_labels]
+        duration_ts_data = [
+            round(sum(durations_by_bucket_team[name][b]) / len(durations_by_bucket_team[name][b]))
+            if durations_by_bucket_team[name].get(b) else None
+            for b in bucket_labels
+        ]
+
+        drilldown_data[name] = {
+            "run_count": n,
+            "failed_count": failed,
+            "success_rate": success_rate,
+            "escalation_rate": escalation_rate,
+            "avg_duration": _format_seconds(avg_dur),
+            "input_tokens": inp,
+            "output_tokens": out,
+            "status_breakdown": sc,
+            "runs_ts": {"labels": bucket_labels, "data": runs_ts_data},
+            "duration_ts": {"labels": bucket_labels, "data": duration_ts_data},
+            "recent_runs": recent_by_team.get(name, []),
+            "step_breakdown": breakdown_by_team.get(name, []),
+            "pipelines": sorted(pipelines_by_team.get(name, [])),
+        }
+
+    # ── Headline stats ────────────────────────────────────────────────────────
+    total_runs = sum(run_counts.values())
+    total_failed = sum(failed_counts.values())
+    overall_success_rate = round((total_runs - total_failed) / total_runs * 100) if total_runs else None
+    total_input_tokens = sum(v[0] for v in token_totals.values())
+    total_output_tokens = sum(v[1] for v in token_totals.values())
+    total_pipelines_used = len({p for pset in pipelines_by_team.values() for p in pset})
+
+    # ── Chart data ────────────────────────────────────────────────────────────
+    team_rows = []
+    for name, n in sorted(run_counts.items(), key=lambda t: t[1], reverse=True):
+        inp, out = token_totals.get(name, [0, 0])
+        team_rows.append({
+            "name": name,
+            "run_count": n,
+            "failed_count": failed_counts.get(name, 0),
+            "avg_duration_secs": avg_duration_by_team.get(name),
+            "input_tokens": inp,
+            "output_tokens": out,
+            "pipelines": sorted(pipelines_by_team.get(name, [])),
+        })
+
+    token_chart_rows = sorted(
+        (r for r in team_rows if r["input_tokens"] or r["output_tokens"]),
+        key=lambda r: r["input_tokens"] + r["output_tokens"], reverse=True,
+    )
+    token_chart = {
+        "labels": [r["name"] for r in token_chart_rows],
+        "input": [r["input_tokens"] for r in token_chart_rows],
+        "output": [r["output_tokens"] for r in token_chart_rows],
+    }
+
+    runs_ts = _build_ts(
+        [(r.triggered_at, norm_team(r.team)) for r in all_runs_raw], now, cutoff, time_range,
+        dim_fn=lambda r: r[1],
+    )
+    tokens_ts = _build_ts(
+        [(r.executed_at, norm_team(r.team), (r.input_tokens or 0) + (r.output_tokens or 0)) for r in token_ts_raw],
+        now, cutoff, time_range,
+        dim_fn=lambda r: r[1],
+        val_fn=lambda r: r[2],
+    )
+
+    return templates.TemplateResponse(request, "insights_teams.html", {
+        "time_range": time_range,
+        "range_label": range_label,
+        "team_rows": team_rows,
+        "token_chart": token_chart,
+        "runs_ts": runs_ts,
+        "tokens_ts": tokens_ts,
+        "total_team_count": len(run_counts),
+        "total_runs": total_runs,
+        "overall_success_rate": overall_success_rate,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_pipelines_used": total_pipelines_used,
+        "drilldown_data": drilldown_data,
+        "active_page": "insights_teams",
     })
 
 
@@ -2833,129 +3709,11 @@ async def ui_agents(request: Request, executor: str | None = None, model: str | 
     })
 
 
-@router.get("/providers", response_class=HTMLResponse)
-async def ui_providers(request: Request, time_range: str = "7d"):
-    """Token/call spend grouped by LLM provider (gateway executor only — see
-    _provider_from_model). A lightweight built-in alternative to standing up
-    Grafana dashboards for "how much are we spending on provider X".
-    """
-    cutoff, range_label = _time_range_cutoff(time_range)
-    sf = get_session_factory()
-
-    async with sf() as session:
-        q = (
-            select(
-                PipelineStep.provider, PipelineStep.model, func.count().label("n"),
-                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
-                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
-                func.avg(PipelineStep.duration_ms),
-            )
-            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-            .where(PipelineStep.executor == "gateway", PipelineStep.model.is_not(None))
-            .group_by(PipelineStep.provider, PipelineStep.model)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        model_totals = rows.all()
-
-        q = (
-            select(PipelineStep.provider, PipelineStep.model, func.count().label("n"))
-            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-            .where(
-                PipelineStep.executor == "gateway",
-                PipelineStep.model.is_not(None),
-                PipelineStep.status == "failed",
-            )
-            .group_by(PipelineStep.provider, PipelineStep.model)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        failed_by_model: dict[tuple[str | None, str], int] = {
-            (provider, model): n for provider, model, n in rows.all()
-        }
-
-    # Aggregate per-model rows into provider buckets. `provider` is populated
-    # directly by the Gateway (agentMeta.provider) for steps run after this
-    # column was added; older rows fall back to a best-effort guess from the
-    # model string prefix (unreliable for OpenRouter, whose reported model is
-    # "vendor/model", not "openrouter/vendor/model" — see _provider_from_model).
-    provider_agg: dict[str, dict] = {}
-    for provider, model, step_count, input_tokens, output_tokens, avg_duration_ms in model_totals:
-        effective_provider = provider or _provider_from_model(model)
-        p = provider_agg.setdefault(effective_provider, {
-            "step_count": 0, "failed_count": 0,
-            "input_tokens": 0, "output_tokens": 0,
-            "duration_weighted": 0.0, "duration_n": 0,
-            "models": Counter(),
-        })
-        p["step_count"] += step_count
-        p["failed_count"] += failed_by_model.get((provider, model), 0)
-        p["input_tokens"] += input_tokens
-        p["output_tokens"] += output_tokens
-        if avg_duration_ms is not None:
-            p["duration_weighted"] += avg_duration_ms * step_count
-            p["duration_n"] += step_count
-        p["models"][model] += step_count
-
-    provider_rows = []
-    for provider, p in provider_agg.items():
-        success_rate = (
-            round((p["step_count"] - p["failed_count"]) / p["step_count"] * 100)
-            if p["step_count"] else None
-        )
-        avg_duration_secs = (
-            (p["duration_weighted"] / p["duration_n"]) / 1000
-            if p["duration_n"] else None
-        )
-        provider_rows.append({
-            "provider": provider,
-            "step_count": p["step_count"],
-            "failed_count": p["failed_count"],
-            "success_rate": success_rate,
-            "avg_duration_secs": avg_duration_secs,
-            "input_tokens": p["input_tokens"],
-            "output_tokens": p["output_tokens"],
-            "models": [m for m, _ in p["models"].most_common()],
-        })
-    provider_rows.sort(key=lambda r: r["step_count"], reverse=True)
-
-    total_steps = sum(r["step_count"] for r in provider_rows)
-    total_failed = sum(r["failed_count"] for r in provider_rows)
-    overall_success_rate = round((total_steps - total_failed) / total_steps * 100) if total_steps else None
-    total_input_tokens = sum(r["input_tokens"] for r in provider_rows)
-    total_output_tokens = sum(r["output_tokens"] for r in provider_rows)
-
-    token_chart_rows = sorted(
-        (r for r in provider_rows if r["input_tokens"] or r["output_tokens"]),
-        key=lambda r: r["input_tokens"] + r["output_tokens"], reverse=True,
-    )
-    token_chart = {
-        "labels": [r["provider"] for r in token_chart_rows],
-        "input": [r["input_tokens"] for r in token_chart_rows],
-        "output": [r["output_tokens"] for r in token_chart_rows],
-    }
-
-    calls_chart_rows = sorted(provider_rows, key=lambda r: r["step_count"], reverse=True)
-    calls_chart = {
-        "labels": [r["provider"] for r in calls_chart_rows],
-        "data": [r["step_count"] for r in calls_chart_rows],
-    }
-
-    return templates.TemplateResponse(request, "providers.html", {
-        "time_range": time_range,
-        "range_label": range_label,
-        "provider_rows": provider_rows,
-        "provider_count": len(provider_rows),
-        "total_steps": total_steps,
-        "overall_success_rate": overall_success_rate,
-        "total_input_tokens": total_input_tokens,
-        "total_output_tokens": total_output_tokens,
-        "token_chart": token_chart,
-        "calls_chart": calls_chart,
-        "active_page": "providers",
-    })
+@router.get("/providers", response_class=RedirectResponse)
+async def ui_providers(time_range: str = "7d"):
+    """Folded into Insights — /ui/providers now redirects there. Kept as a route (rather
+    than removed outright) so old bookmarks/links keep working."""
+    return RedirectResponse(url=f"/ui/insights/providers?time_range={time_range}", status_code=307)
 
 
 @router.get("/agents/{executor}/{agent_id}", response_class=HTMLResponse)

@@ -7,11 +7,15 @@
 {% block content %}
 
 <div class="flex items-center justify-between mb-6">
-  <div class="flex gap-1 border-b border-zinc-800">
+  <div class="flex gap-1 border-b border-zinc-800 flex-wrap">
     <a href="/ui/insights?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_overview' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Overview</a>
     <a href="/ui/insights/pipelines?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_pipelines' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Pipelines</a>
     <a href="/ui/insights/steps?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_steps' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Steps</a>
     <a href="/ui/insights/agents?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_agents' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Agents</a>
+    <a href="/ui/insights/models?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_models' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Models</a>
+    <a href="/ui/insights/providers?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_providers' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Providers</a>
+    <a href="/ui/insights/mcp?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_mcp' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">MCP</a>
+    <a href="/ui/insights/teams?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_teams' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Teams</a>
   </div>
   <form method="get" action="/ui/insights/steps">
     <select name="time_range" onchange="this.form.submit()" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">

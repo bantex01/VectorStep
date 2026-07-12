@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Insights — Agents — P-Ork{% endblock %}
+{% block title %}Insights — Models — P-Ork{% endblock %}
 {% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Insights</h1>{% endblock %}
 {% block extra_head %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
@@ -17,7 +17,7 @@
     <a href="/ui/insights/mcp?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_mcp' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">MCP</a>
     <a href="/ui/insights/teams?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_teams' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Teams</a>
   </div>
-  <form method="get" action="/ui/insights/agents">
+  <form method="get" action="/ui/insights/models">
     <select name="time_range" onchange="this.form.submit()" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
       <option value="24h" {% if time_range == "24h" %}selected{% endif %}>Last 24 hours</option>
       <option value="7d" {% if time_range == "7d" %}selected{% endif %}>Last 7 days</option>
@@ -30,12 +30,12 @@
 <!-- Headline cards -->
 <div class="grid grid-cols-5 gap-4 mb-6">
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Agents</p>
-    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_agent_count }}</p>
-    <p class="mt-1 text-xs text-zinc-500">with runs in range</p>
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Models</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_model_count }}</p>
+    <p class="mt-1 text-xs text-zinc-500">with calls in range</p>
   </div>
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Steps run</p>
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Calls</p>
     <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_step_executions | format_number }}</p>
     <p class="mt-1 text-xs text-zinc-500">{{ range_label }}</p>
   </div>
@@ -48,16 +48,16 @@
     {% else %}
       <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
     {% endif %}
-    <p class="mt-1 text-xs text-zinc-500">non-failure steps</p>
+    <p class="mt-1 text-xs text-zinc-500">non-failure calls</p>
   </div>
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Avg duration</p>
     {% if overall_avg_duration_secs is not none %}
       <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ format_seconds(overall_avg_duration_secs) }}</p>
-      <p class="mt-1 text-xs text-zinc-500">across all agents</p>
+      <p class="mt-1 text-xs text-zinc-500">across all models</p>
     {% else %}
       <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
-      <p class="mt-1 text-xs text-zinc-500">no completed steps</p>
+      <p class="mt-1 text-xs text-zinc-500">no completed calls</p>
     {% endif %}
   </div>
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
@@ -67,7 +67,7 @@
       <p class="mt-1 text-xs text-zinc-500">↑{{ total_input_tokens | format_number }} ↓{{ total_output_tokens | format_number }}</p>
     {% else %}
       <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
-      <p class="mt-1 text-xs text-zinc-500">no gateway steps in range</p>
+      <p class="mt-1 text-xs text-zinc-500">no gateway calls in range</p>
     {% endif %}
   </div>
 </div>
@@ -76,11 +76,11 @@
 <div class="grid grid-cols-2 gap-6 mb-6">
 
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
-    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Steps over time</h2>
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Calls over time</h2>
     {% if steps_ts.datasets %}
       <div class="h-64"><canvas id="chart-steps-ts"></canvas></div>
     {% else %}
-      <p class="text-sm text-zinc-500">No steps in range</p>
+      <p class="text-sm text-zinc-500">No calls in range</p>
     {% endif %}
   </div>
 
@@ -89,7 +89,7 @@
     {% if tokens_ts.datasets %}
       <div class="h-64"><canvas id="chart-tokens-ts"></canvas></div>
     {% else %}
-      <p class="text-sm text-zinc-500">No gateway steps in range</p>
+      <p class="text-sm text-zinc-500">No gateway calls in range</p>
     {% endif %}
   </div>
 
@@ -97,51 +97,51 @@
 
 <!-- Avg duration bar chart -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5 mb-6">
-  <h2 class="text-sm font-semibold text-zinc-200 mb-4">Avg duration by agent</h2>
+  <h2 class="text-sm font-semibold text-zinc-200 mb-4">Avg duration by model</h2>
   {% if duration_chart.labels %}
     <div class="h-64"><canvas id="chart-duration"></canvas></div>
   {% else %}
-    <p class="text-sm text-zinc-500">No completed steps in range</p>
+    <p class="text-sm text-zinc-500">No completed calls in range</p>
   {% endif %}
 </div>
 
-<!-- Top agents table -->
+<!-- Top models table -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6">
   <div class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
-    <h2 class="text-sm font-semibold text-zinc-200">Top agents</h2>
-    <select id="top-agents-sort" class="text-sm border border-zinc-700 rounded-md px-3 py-1 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
-      <option value="runs">By steps</option>
+    <h2 class="text-sm font-semibold text-zinc-200">Top models</h2>
+    <select id="top-models-sort" class="text-sm border border-zinc-700 rounded-md px-3 py-1 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="runs">By calls</option>
       <option value="failures">By failures</option>
       <option value="duration">By avg duration</option>
       <option value="tokens">By tokens</option>
     </select>
   </div>
-  {% if agent_rows %}
+  {% if model_rows %}
   <table class="w-full">
     <thead>
       <tr class="text-xs text-zinc-500 uppercase tracking-wide border-b border-zinc-800">
-        <th class="text-left px-5 py-3 font-medium">Agent</th>
-        <th class="text-left px-5 py-3 font-medium">Steps</th>
+        <th class="text-left px-5 py-3 font-medium">Model</th>
+        <th class="text-left px-5 py-3 font-medium">Calls</th>
         <th class="text-left px-5 py-3 font-medium">Failures</th>
         <th class="text-left px-5 py-3 font-medium">Avg duration</th>
         <th class="text-left px-5 py-3 font-medium">Tokens</th>
-        <th class="text-left px-5 py-3 font-medium">Models</th>
+        <th class="text-left px-5 py-3 font-medium">Agents</th>
       </tr>
     </thead>
-    <tbody id="top-agents-tbody" class="divide-y divide-zinc-800"></tbody>
+    <tbody id="top-models-tbody" class="divide-y divide-zinc-800"></tbody>
   </table>
   {% else %}
-  <div class="px-5 py-10 text-center text-sm text-zinc-500">No agents in range.</div>
+  <div class="px-5 py-10 text-center text-sm text-zinc-500">No gateway calls in range.</div>
   {% endif %}
 </div>
 
-<!-- Agent drilldown -->
-{% if agent_rows %}
+<!-- Model drilldown -->
+{% if model_rows %}
 <div class="bg-zinc-900 rounded-lg border border-zinc-800">
   <div class="flex items-center gap-4 px-5 py-3 border-b border-zinc-800">
-    <h2 class="text-sm font-semibold text-zinc-200 shrink-0">Agent detail</h2>
-    <select id="agent-select" class="text-sm border border-zinc-700 rounded-md px-3 py-1 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
-      {% for row in agent_rows %}
+    <h2 class="text-sm font-semibold text-zinc-200 shrink-0">Model detail</h2>
+    <select id="model-select" class="text-sm border border-zinc-700 rounded-md px-3 py-1 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      {% for row in model_rows %}
       <option value="{{ row.name }}">{{ row.name }}</option>
       {% endfor %}
     </select>
@@ -151,7 +151,7 @@
     <!-- Mini cards -->
     <div class="grid grid-cols-4 gap-4 mb-5">
       <div class="bg-zinc-800/60 rounded-lg p-4">
-        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Steps</p>
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Calls</p>
         <p id="dd-runs" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
       </div>
       <div class="bg-zinc-800/60 rounded-lg p-4">
@@ -178,7 +178,7 @@
     <!-- Timeseries charts -->
     <div class="grid grid-cols-2 gap-6 mb-5">
       <div>
-        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-3">Steps over time</p>
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-3">Calls over time</p>
         <div class="h-40"><canvas id="dd-chart-runs"></canvas></div>
       </div>
       <div>
@@ -187,25 +187,25 @@
       </div>
     </div>
 
-    <!-- Recent executions -->
+    <!-- Recent calls -->
     <div class="mb-5">
-      <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-2">Recent executions</p>
+      <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-2">Recent calls</p>
       <table class="w-full">
         <tbody id="dd-recent-runs" class="divide-y divide-zinc-800 text-sm"></tbody>
       </table>
     </div>
 
-    <!-- Step/pipeline/model breakdown -->
+    <!-- Pipeline/step/agent breakdown -->
     <div>
-      <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-2">Steps run by this agent</p>
+      <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-2">Where this model is used</p>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead>
             <tr class="text-xs text-zinc-500 border-b border-zinc-800">
               <th class="text-left font-medium pb-1.5 pr-4">Pipeline</th>
               <th class="text-left font-medium pb-1.5 pr-4">Step</th>
-              <th class="text-left font-medium pb-1.5 pr-4">Model</th>
-              <th class="text-right font-medium pb-1.5 pr-4">Runs</th>
+              <th class="text-left font-medium pb-1.5 pr-4">Agent</th>
+              <th class="text-right font-medium pb-1.5 pr-4">Calls</th>
               <th class="text-right font-medium pb-1.5 pr-4">Success rate</th>
               <th class="text-right font-medium pb-1.5 pr-4">Avg tokens (in/out)</th>
               <th class="text-right font-medium pb-1.5">Avg duration</th>
@@ -243,7 +243,7 @@
     return h + 'h ' + rm + 'm';
   }
 
-  // ── Steps / tokens over time ─────────────────────────────────────────────────
+  // ── Calls / tokens over time ─────────────────────────────────────────────────
 
   function mkLine(id, ts) {
     const el = document.getElementById(id);
@@ -290,18 +290,18 @@
     });
   }
 
-  // ── Top agents table ─────────────────────────────────────────────────────────
+  // ── Top models table ──────────────────────────────────────────────────────────
 
-  const agentRows = {{ agent_rows | tojson | safe }};
+  const modelRows = {{ model_rows | tojson | safe }};
 
-  function renderTopAgents(sortBy) {
-    let sorted = [...agentRows];
+  function renderTopModels(sortBy) {
+    let sorted = [...modelRows];
     if (sortBy === 'runs')     sorted.sort((a, b) => b.run_count - a.run_count);
     if (sortBy === 'failures') sorted.sort((a, b) => b.failed_count - a.failed_count);
     if (sortBy === 'duration') sorted.sort((a, b) => (b.avg_duration_secs || 0) - (a.avg_duration_secs || 0));
     if (sortBy === 'tokens')   sorted.sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens));
 
-    const tbody = document.getElementById('top-agents-tbody');
+    const tbody = document.getElementById('top-models-tbody');
     if (!tbody) return;
     tbody.innerHTML = sorted.map(r => {
       const total = r.input_tokens + r.output_tokens;
@@ -309,28 +309,25 @@
       const tokTitle = total > 0 ? `↑${r.input_tokens.toLocaleString()} ↓${r.output_tokens.toLocaleString()}` : '';
       const durStr = r.avg_duration_secs != null ? fmtSecs(r.avg_duration_secs) : '—';
       const failCls = r.failed_count > 0 ? 'text-red-400' : 'text-zinc-500';
-      const models = r.models.map(m => `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 font-mono">${m}</span>`).join(' ');
+      const agents = r.agents.map(a => `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 font-mono">${a}</span>`).join(' ');
       return `<tr class="hover:bg-zinc-800 transition-colors">
-        <td class="px-5 py-3">
-          <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 mr-2">${r.executor}</span>
-          <span class="text-sm font-medium text-zinc-100">${r.bare_name}</span>
-        </td>
+        <td class="px-5 py-3 text-sm font-mono font-medium text-zinc-100">${r.name}</td>
         <td class="px-5 py-3 text-sm text-zinc-200">${r.run_count.toLocaleString()}</td>
         <td class="px-5 py-3 text-sm ${failCls}">${r.failed_count.toLocaleString()}</td>
         <td class="px-5 py-3 text-sm text-zinc-200">${durStr}</td>
         <td class="px-5 py-3 text-sm text-zinc-200" title="${tokTitle}">${tokStr}</td>
-        <td class="px-5 py-3"><div class="flex gap-1 flex-wrap">${models}</div></td>
+        <td class="px-5 py-3"><div class="flex gap-1 flex-wrap">${agents}</div></td>
       </tr>`;
     }).join('');
   }
 
-  const topAgentsSort = document.getElementById('top-agents-sort');
-  if (topAgentsSort) {
-    topAgentsSort.addEventListener('change', e => renderTopAgents(e.target.value));
-    renderTopAgents('runs');
+  const topModelsSort = document.getElementById('top-models-sort');
+  if (topModelsSort) {
+    topModelsSort.addEventListener('change', e => renderTopModels(e.target.value));
+    renderTopModels('runs');
   }
 
-  // ── Agent drilldown ──────────────────────────────────────────────────────────
+  // ── Model drilldown ──────────────────────────────────────────────────────────
 
   const drilldownData = {{ drilldown_data | tojson | safe }};
   let ddRunsChart = null, ddDurationChart = null;
@@ -378,7 +375,7 @@
         ${s} (${breakdown[s]})
       </span>`).join('');
 
-    // Timeseries — steps
+    // Timeseries — calls
     if (ddRunsChart) ddRunsChart.destroy();
     ddRunsChart = new Chart(document.getElementById('dd-chart-runs'), {
       type: 'line',
@@ -402,7 +399,7 @@
       options: tsLineOpts(fmtSecs),
     });
 
-    // Recent executions
+    // Recent calls
     document.getElementById('dd-recent-runs').innerHTML = d.recent_runs.length
       ? d.recent_runs.map(r => {
           const statusHex = STATUS_HEX[r.status] || '#71717a';
@@ -424,9 +421,9 @@
             </td>
           </tr>`;
         }).join('')
-      : '<tr><td class="py-4 text-xs text-zinc-500">No executions in range</td></tr>';
+      : '<tr><td class="py-4 text-xs text-zinc-500">No calls in range</td></tr>';
 
-    // Step/pipeline/model breakdown
+    // Pipeline/step/agent breakdown
     const sbBody = document.getElementById('dd-step-breakdown');
     if (sbBody) {
       sbBody.innerHTML = (d.step_breakdown && d.step_breakdown.length)
@@ -440,7 +437,7 @@
                 <a href="/ui/pipelines/${s.pipeline_name}" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">${s.pipeline_name}</a>
               </td>
               <td class="py-1.5 pr-4 font-mono text-xs text-zinc-300">${s.step_name}</td>
-              <td class="py-1.5 pr-4 font-mono text-xs text-zinc-500">${s.model || '—'}</td>
+              <td class="py-1.5 pr-4 font-mono text-xs text-zinc-400">${s.agent || '—'}</td>
               <td class="py-1.5 pr-4 text-right text-xs text-zinc-400">${s.total}</td>
               <td class="py-1.5 pr-4 text-right text-xs font-semibold ${rateCls}">${rateStr}</td>
               <td class="py-1.5 pr-4 text-right text-xs text-zinc-400">${tokStr}</td>
@@ -451,10 +448,10 @@
     }
   }
 
-  const agentSel = document.getElementById('agent-select');
-  if (agentSel) {
-    agentSel.addEventListener('change', e => updateDrilldown(e.target.value));
-    if (agentSel.value) updateDrilldown(agentSel.value);
+  const modelSel = document.getElementById('model-select');
+  if (modelSel) {
+    modelSel.addEventListener('change', e => updateDrilldown(e.target.value));
+    if (modelSel.value) updateDrilldown(modelSel.value);
   }
 </script>
 

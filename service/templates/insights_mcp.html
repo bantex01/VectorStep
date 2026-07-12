@@ -1,0 +1,390 @@
+{% extends "base.html" %}
+{% block title %}Insights — MCP — P-Ork{% endblock %}
+{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Insights</h1>{% endblock %}
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between mb-6">
+  <div class="flex gap-1 border-b border-zinc-800 flex-wrap">
+    <a href="/ui/insights?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_overview' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Overview</a>
+    <a href="/ui/insights/pipelines?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_pipelines' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Pipelines</a>
+    <a href="/ui/insights/steps?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_steps' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Steps</a>
+    <a href="/ui/insights/agents?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_agents' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Agents</a>
+    <a href="/ui/insights/models?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_models' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Models</a>
+    <a href="/ui/insights/providers?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_providers' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Providers</a>
+    <a href="/ui/insights/mcp?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_mcp' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">MCP</a>
+    <a href="/ui/insights/teams?time_range={{ time_range }}" class="px-3 py-2 text-sm font-medium border-b-2 {% if active_page == 'insights_teams' %}border-indigo-500 text-indigo-400{% else %}border-transparent text-zinc-400 hover:text-zinc-100{% endif %}">Teams</a>
+  </div>
+  <form method="get" action="/ui/insights/mcp">
+    <select name="time_range" onchange="this.form.submit()" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="24h" {% if time_range == "24h" %}selected{% endif %}>Last 24 hours</option>
+      <option value="7d" {% if time_range == "7d" %}selected{% endif %}>Last 7 days</option>
+      <option value="30d" {% if time_range == "30d" %}selected{% endif %}>Last 30 days</option>
+      <option value="all" {% if time_range == "all" %}selected{% endif %}>All time</option>
+    </select>
+  </form>
+</div>
+
+<p class="text-xs text-zinc-500 mb-4">MCP tool calls, extracted from the agent trace on <code class="font-mono text-zinc-400">executor: gateway</code> steps. OpenClaw steps don't expose intermediate tool events, so they're not included here. See the <a href="/ui/mcp" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">MCP Tools</a> page for the live tool/server registry and schemas.</p>
+
+<!-- Headline cards -->
+<div class="grid grid-cols-5 gap-4 mb-6">
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Tools</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_tool_count }}</p>
+    <p class="mt-1 text-xs text-zinc-500">called in range</p>
+  </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Servers</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ distinct_servers }}</p>
+    <p class="mt-1 text-xs text-zinc-500">MCP servers used</p>
+  </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Calls</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_calls | format_number }}</p>
+    <p class="mt-1 text-xs text-zinc-500">{{ range_label }}</p>
+  </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Success rate</p>
+    {% if overall_success_rate is not none %}
+      <p class="mt-2 text-3xl font-semibold {% if overall_success_rate >= 90 %}text-green-400{% elif overall_success_rate >= 70 %}text-amber-400{% else %}text-red-400{% endif %}">
+        {{ overall_success_rate }}%
+      </p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+    {% endif %}
+    <p class="mt-1 text-xs text-zinc-500">non-error calls</p>
+  </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Errors</p>
+    <p class="mt-2 text-3xl font-semibold {% if total_errors > 0 %}text-red-400{% else %}text-zinc-50{% endif %}">{{ total_errors | format_number }}</p>
+    <p class="mt-1 text-xs text-zinc-500">tool_result is_error=true</p>
+  </div>
+</div>
+
+<!-- Timeseries charts -->
+<div class="grid grid-cols-2 gap-6 mb-6">
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Calls over time</h2>
+    {% if calls_ts.datasets %}
+      <div class="h-64"><canvas id="chart-calls-ts"></canvas></div>
+    {% else %}
+      <p class="text-sm text-zinc-500">No tool calls in range</p>
+    {% endif %}
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Errors over time</h2>
+    {% if errors_ts.datasets %}
+      <div class="h-64"><canvas id="chart-errors-ts"></canvas></div>
+    {% else %}
+      <p class="text-sm text-zinc-500">No tool errors in range</p>
+    {% endif %}
+  </div>
+
+</div>
+
+<!-- Calls by server bar chart -->
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5 mb-6">
+  <h2 class="text-sm font-semibold text-zinc-200 mb-4">Calls by server</h2>
+  {% if server_chart.labels %}
+    <div class="h-64"><canvas id="chart-server"></canvas></div>
+  {% else %}
+    <p class="text-sm text-zinc-500">No tool calls in range</p>
+  {% endif %}
+</div>
+
+<!-- Top tools table -->
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6">
+  <div class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+    <h2 class="text-sm font-semibold text-zinc-200">Top tools</h2>
+    <select id="top-tools-sort" class="text-sm border border-zinc-700 rounded-md px-3 py-1 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="calls">By calls</option>
+      <option value="errors">By errors</option>
+    </select>
+  </div>
+  {% if tool_rows %}
+  <table class="w-full">
+    <thead>
+      <tr class="text-xs text-zinc-500 uppercase tracking-wide border-b border-zinc-800">
+        <th class="text-left px-5 py-3 font-medium">Tool</th>
+        <th class="text-left px-5 py-3 font-medium">Server</th>
+        <th class="text-left px-5 py-3 font-medium">Calls</th>
+        <th class="text-left px-5 py-3 font-medium">Errors</th>
+        <th class="text-left px-5 py-3 font-medium">Success rate</th>
+        <th class="text-left px-5 py-3 font-medium">Pipelines</th>
+      </tr>
+    </thead>
+    <tbody id="top-tools-tbody" class="divide-y divide-zinc-800"></tbody>
+  </table>
+  {% else %}
+  <div class="px-5 py-10 text-center text-sm text-zinc-500">No tool calls in range.</div>
+  {% endif %}
+</div>
+
+<!-- Tool drilldown -->
+{% if tool_rows %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800">
+  <div class="flex items-center gap-4 px-5 py-3 border-b border-zinc-800">
+    <h2 class="text-sm font-semibold text-zinc-200 shrink-0">Tool detail</h2>
+    <select id="tool-select" class="text-sm border border-zinc-700 rounded-md px-3 py-1 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      {% for row in tool_rows %}
+      <option value="{{ row.name }}">{{ row.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="p-5">
+    <!-- Mini cards -->
+    <div class="grid grid-cols-3 gap-4 mb-5">
+      <div class="bg-zinc-800/60 rounded-lg p-4">
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Calls</p>
+        <p id="dd-calls" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
+      </div>
+      <div class="bg-zinc-800/60 rounded-lg p-4">
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Errors</p>
+        <p id="dd-errors" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
+      </div>
+      <div class="bg-zinc-800/60 rounded-lg p-4">
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Success rate</p>
+        <p id="dd-success" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
+      </div>
+    </div>
+
+    <!-- Timeseries charts -->
+    <div class="grid grid-cols-2 gap-6 mb-5">
+      <div>
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-3">Calls over time</p>
+        <div class="h-40"><canvas id="dd-chart-calls"></canvas></div>
+      </div>
+      <div>
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-3">Errors over time</p>
+        <div class="h-40"><canvas id="dd-chart-errors"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Recent calls -->
+    <div class="mb-5">
+      <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-2">Recent steps calling this tool</p>
+      <table class="w-full">
+        <tbody id="dd-recent" class="divide-y divide-zinc-800 text-sm"></tbody>
+      </table>
+    </div>
+
+    <!-- Pipeline/step/agent breakdown -->
+    <div>
+      <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-2">Where this tool is used</p>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-xs text-zinc-500 border-b border-zinc-800">
+              <th class="text-left font-medium pb-1.5 pr-4">Pipeline</th>
+              <th class="text-left font-medium pb-1.5 pr-4">Step</th>
+              <th class="text-left font-medium pb-1.5 pr-4">Agent</th>
+              <th class="text-right font-medium pb-1.5 pr-4">Calls</th>
+              <th class="text-right font-medium pb-1.5 pr-4">Errors</th>
+              <th class="text-right font-medium pb-1.5">Success rate</th>
+            </tr>
+          </thead>
+          <tbody id="dd-breakdown" class="divide-y divide-zinc-800"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<script>
+  const PALETTE = ['#6366f1', '#22d3ee', '#fbbf24', '#34d399', '#fb7185', '#a78bfa', '#71717a'];
+
+  Chart.defaults.color = '#a1a1aa';
+  Chart.defaults.borderColor = '#27272a';
+  Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
+
+  const vertX = { grid: { display: false }, ticks: { maxRotation: 55, minRotation: 0, autoSkip: false } };
+  const vertY = { grid: { color: '#27272a' } };
+
+  // ── Calls / errors over time ─────────────────────────────────────────────────
+
+  function mkLine(id, ts) {
+    const el = document.getElementById(id);
+    if (!el || !ts.datasets.length) return;
+    new Chart(el, {
+      type: 'line',
+      data: {
+        labels: ts.labels,
+        datasets: ts.datasets.map(d => ({
+          label: d.label, data: d.data, borderColor: d.color, backgroundColor: d.color + '22',
+          fill: false, tension: 0.35, pointRadius: ts.labels.length < 10 ? 4 : 2, borderWidth: 2,
+        })),
+      },
+      options: {
+        maintainAspectRatio: false,
+        scales: {
+          x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+          y: { grid: { color: '#27272a' }, beginAtZero: true, ticks: { maxTicksLimit: 5 } },
+        },
+        plugins: { legend: { display: ts.datasets.length > 1, labels: { boxWidth: 10, font: { size: 10 } } } },
+        interaction: { mode: 'index', intersect: false },
+      },
+    });
+  }
+
+  mkLine('chart-calls-ts', {{ calls_ts | tojson | safe }});
+  mkLine('chart-errors-ts', {{ errors_ts | tojson | safe }});
+
+  // ── Calls by server bar chart ────────────────────────────────────────────────
+
+  const serverData = {{ server_chart | tojson | safe }};
+  if (serverData.labels.length) {
+    new Chart(document.getElementById('chart-server'), {
+      type: 'bar',
+      data: { labels: serverData.labels, datasets: [{ label: 'Calls', data: serverData.data, backgroundColor: PALETTE[0] }] },
+      options: {
+        maintainAspectRatio: false,
+        scales: { x: vertX, y: vertY },
+        plugins: { legend: { display: false } },
+      },
+    });
+  }
+
+  // ── Top tools table ──────────────────────────────────────────────────────────
+
+  const toolRows = {{ tool_rows | tojson | safe }};
+
+  function renderTopTools(sortBy) {
+    let sorted = [...toolRows];
+    if (sortBy === 'calls')  sorted.sort((a, b) => b.calls - a.calls);
+    if (sortBy === 'errors') sorted.sort((a, b) => b.errors - a.errors);
+
+    const tbody = document.getElementById('top-tools-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = sorted.map(r => {
+      const rate = r.success_rate;
+      const rateCls = rate == null ? 'text-zinc-600' : rate >= 90 ? 'text-green-400' : rate >= 70 ? 'text-amber-400' : 'text-red-400';
+      const rateStr = rate != null ? rate + '%' : '—';
+      const errCls = r.errors > 0 ? 'text-red-400' : 'text-zinc-500';
+      const pipelines = r.pipelines.map(p => `<a href="/ui/pipelines/${p}" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 hover:text-indigo-400">${p}</a>`).join(' ');
+      return `<tr class="hover:bg-zinc-800 transition-colors">
+        <td class="px-5 py-3 text-sm font-mono font-medium text-zinc-100">${r.tool}</td>
+        <td class="px-5 py-3 text-sm font-mono text-zinc-400">${r.server}</td>
+        <td class="px-5 py-3 text-sm text-zinc-200">${r.calls.toLocaleString()}</td>
+        <td class="px-5 py-3 text-sm ${errCls}">${r.errors.toLocaleString()}</td>
+        <td class="px-5 py-3 text-sm font-semibold ${rateCls}">${rateStr}</td>
+        <td class="px-5 py-3"><div class="flex gap-1 flex-wrap">${pipelines}</div></td>
+      </tr>`;
+    }).join('');
+  }
+
+  const topToolsSort = document.getElementById('top-tools-sort');
+  if (topToolsSort) {
+    topToolsSort.addEventListener('change', e => renderTopTools(e.target.value));
+    renderTopTools('calls');
+  }
+
+  // ── Tool drilldown ───────────────────────────────────────────────────────────
+
+  const drilldownData = {{ drilldown_data | tojson | safe }};
+  let ddCallsChart = null, ddErrorsChart = null;
+
+  const tsLineOpts = () => ({
+    maintainAspectRatio: false,
+    scales: {
+      x: { grid: { display: false }, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 8 } },
+      y: { grid: { color: '#27272a' }, beginAtZero: true },
+    },
+    plugins: { legend: { display: false } },
+    spanGaps: true,
+  });
+
+  function updateDrilldown(name) {
+    const d = drilldownData[name];
+    if (!d) return;
+
+    document.getElementById('dd-calls').textContent = d.calls.toLocaleString();
+    const errEl = document.getElementById('dd-errors');
+    errEl.textContent = d.errors.toLocaleString();
+    errEl.className = 'mt-1 text-2xl font-semibold ' + (d.errors > 0 ? 'text-red-400' : 'text-zinc-50');
+    const succEl = document.getElementById('dd-success');
+    succEl.textContent = d.success_rate != null ? d.success_rate + '%' : '—';
+    succEl.className = 'mt-1 text-2xl font-semibold ' +
+      (d.success_rate == null ? 'text-zinc-50' : d.success_rate >= 90 ? 'text-green-400' : d.success_rate >= 70 ? 'text-amber-400' : 'text-red-400');
+
+    if (ddCallsChart) ddCallsChart.destroy();
+    ddCallsChart = new Chart(document.getElementById('dd-chart-calls'), {
+      type: 'line',
+      data: {
+        labels: d.calls_ts.labels,
+        datasets: [{ data: d.calls_ts.data, borderColor: PALETTE[0], backgroundColor: PALETTE[0] + '22',
+          fill: true, tension: 0.3, pointRadius: 3 }],
+      },
+      options: tsLineOpts(),
+    });
+
+    if (ddErrorsChart) ddErrorsChart.destroy();
+    ddErrorsChart = new Chart(document.getElementById('dd-chart-errors'), {
+      type: 'line',
+      data: {
+        labels: d.errors_ts.labels,
+        datasets: [{ data: d.errors_ts.data, borderColor: '#f87171', backgroundColor: '#f8717122',
+          fill: true, tension: 0.3, pointRadius: 3 }],
+      },
+      options: tsLineOpts(),
+    });
+
+    // Recent steps calling this tool
+    document.getElementById('dd-recent').innerHTML = d.recent.length
+      ? d.recent.map(r => {
+          const errBadge = r.errors > 0
+            ? `<span class="text-red-400">${r.errors} error${r.errors === 1 ? '' : 's'}</span>`
+            : `<span class="text-green-400">ok</span>`;
+          return `<tr class="hover:bg-zinc-800/50 transition-colors">
+            <td class="py-2 pr-4 text-zinc-400 text-xs">
+              <a href="/ui/pipelines/${r.pipeline_name}" class="text-indigo-400 hover:text-indigo-300">${r.pipeline_name}</a>
+            </td>
+            <td class="py-2 pr-4 font-mono text-zinc-400 text-xs">${r.step_name}</td>
+            <td class="py-2 pr-4 text-zinc-400 text-xs">${r.calls} call${r.calls === 1 ? '' : 's'}</td>
+            <td class="py-2 pr-4 text-xs">${errBadge}</td>
+            <td class="py-2 pr-4 text-zinc-400 text-xs">${r.ago}</td>
+            <td class="py-2 text-right">
+              <a href="/ui/runs/${r.id}" class="text-xs text-indigo-400 hover:text-indigo-300">View →</a>
+            </td>
+          </tr>`;
+        }).join('')
+      : '<tr><td class="py-4 text-xs text-zinc-500">No calls in range</td></tr>';
+
+    // Pipeline/step/agent breakdown
+    const bBody = document.getElementById('dd-breakdown');
+    if (bBody) {
+      bBody.innerHTML = (d.breakdown && d.breakdown.length)
+        ? d.breakdown.map(s => {
+            const rate = s.success_rate;
+            const rateCls = rate == null ? 'text-zinc-600' : rate >= 90 ? 'text-green-400' : rate >= 70 ? 'text-amber-400' : 'text-red-400';
+            const rateStr = rate != null ? rate + '%' : '—';
+            const errCls = s.errors > 0 ? 'text-red-400' : 'text-zinc-500';
+            return `<tr class="hover:bg-zinc-800/50 transition-colors">
+              <td class="py-1.5 pr-4 text-xs">
+                <a href="/ui/pipelines/${s.pipeline_name}" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">${s.pipeline_name}</a>
+              </td>
+              <td class="py-1.5 pr-4 font-mono text-xs text-zinc-300">${s.step_name}</td>
+              <td class="py-1.5 pr-4 font-mono text-xs text-zinc-400">${s.agent || '—'}</td>
+              <td class="py-1.5 pr-4 text-right text-xs text-zinc-400">${s.calls}</td>
+              <td class="py-1.5 pr-4 text-right text-xs ${errCls}">${s.errors}</td>
+              <td class="py-1.5 text-right text-xs font-semibold ${rateCls}">${rateStr}</td>
+            </tr>`;
+          }).join('')
+        : '<tr><td class="py-4 text-xs text-zinc-500">No breakdown data in range</td></tr>';
+    }
+  }
+
+  const toolSel = document.getElementById('tool-select');
+  if (toolSel) {
+    toolSel.addEventListener('change', e => updateDrilldown(e.target.value));
+    if (toolSel.value) updateDrilldown(toolSel.value);
+  }
+</script>
+
+{% endblock %}

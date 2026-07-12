@@ -400,7 +400,7 @@ excludes testing approvals from its in-memory gauge the same way the
 DB-backed counters do), the dashboard's stat cards and top-agents/top-tools
 cards, the runs-page stat cards, pipeline success/accuracy bars, the
 config-fingerprint accuracy comparison on `/ui/pipelines/{name}/feedback`, and
-the Insights pages (`/ui/insights/pipelines`, `/ui/insights/steps`, and `/ui/insights/agents`).
+every Insights sub-page (`/ui/insights/pipelines`, `/steps`, `/agents`, `/models`, `/providers`, `/mcp`, `/teams`).
 
 **Browse surfaces are the exception** — the runs list, dashboard's recent-runs
 table, a pipeline's recent-runs table, and the chronological "every marked
@@ -1737,12 +1737,16 @@ The web UI is served under `/ui` and provides the following pages:
 | Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) — summary cards and the config-fingerprint comparison are production only; the chronological "every marked run" table shows all stages, badged |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, a **tag filter** (`?tag=`), and a per-pipeline/agent/model breakdown table (runs, success rate, avg tokens) for steps with run history |
 | Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg duration, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
-| Providers | `/ui/providers` | Calls/success-rate/tokens grouped by LLM provider (`anthropic`, `openrouter`, `azure`, etc. — `executor: gateway` steps only), with a per-provider breakdown of which models were used, over a selectable time range (24h/7d/30d/all-time) |
+| MCP Tools | `/ui/mcp` | Live MCP tool/server registry — every tool's schema, and each server's running/pid/restart_count, fetched from the P-Ork Gateway's `GET /mcp/tools` and `GET /mcp/servers`. Config-and-schema browsing only; see Insights — MCP for call-usage analytics |
 | Schedules | `/ui/schedules` | Active cron schedules with next-run times |
 | Insights — Overview | `/ui/insights` | Run/failure/token/accuracy totals, runs by team, and MCP tool-use counts, over a selectable time range (24h/7d/30d/all-time) — production only |
 | Insights — Pipelines | `/ui/insights/pipelines` | Per-pipeline run/failure/duration/token totals, top-pipelines table, and a per-pipeline drilldown (status/accuracy breakdown, timeseries, recent runs, and a step/agent/model breakdown table) — production only |
 | Insights — Steps | `/ui/insights/steps` | Per-step run/failure/duration/token totals, top-steps table, and a per-step drilldown (status breakdown, timeseries, recent executions, and a pipeline/agent/model breakdown table) — production only |
 | Insights — Agents | `/ui/insights/agents` | Per-agent step/success-rate/duration/token totals, top-agents table, and a per-agent drilldown (status breakdown, timeseries, recent executions, and a pipeline/step/model breakdown table) — production only |
+| Insights — Models | `/ui/insights/models` | Per-model (provider-qualified — see §Agent Library "Model display") success-rate/duration/token totals, top-models table, and a per-model drilldown (status breakdown, timeseries, recent calls, and a pipeline/step/agent breakdown table) — production only, `executor: gateway` steps only |
+| Insights — Providers | `/ui/insights/providers` | Calls/success-rate/duration/token totals grouped by LLM provider (`anthropic`, `openrouter`, `azure`, etc.), top-providers table, and a per-provider drilldown — same drilldown shape as the other Insights pages. Folds in what used to be the standalone `/ui/providers` page (old links redirect here); unlike every other Insights page, this one falls back to a best-effort provider guess from the model string for pre-migration rows with no `provider` value, since the whole point of this page is provider bucketing — production only, `executor: gateway` steps only |
+| Insights — MCP | `/ui/insights/mcp` | Tool call usage extracted from the agent trace on `executor: gateway` steps (OpenClaw steps don't expose intermediate events) — calls/errors by tool and by server, a per-tool drilldown showing which pipelines/steps/agents call it, over a selectable time range — production only |
+| Insights — Teams | `/ui/insights/teams` | Per-team run/success-rate/duration/token totals, top-teams table, and a per-team drilldown giving a complete picture of what a team uses and where (pipelines used, and a pipeline/step/agent/model breakdown table) plus its token spend, for informed cost decisions. NULL team is bucketed as "Unattributed" — production only |
 
 ### Running a pipeline manually
 

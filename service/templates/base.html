@@ -89,13 +89,6 @@
         </svg>
         Agents
       </a>
-      <a href="/ui/providers" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
-        {% if active_page == 'providers' %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12a7 7 0 1114 0 7 7 0 01-14 0zM12 8v4l2.5 2.5M21 21l-4.35-4.35"/>
-        </svg>
-        Providers
-      </a>
       <a href="/ui/mcp" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
         {% if active_page == 'mcp' %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
         <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -112,7 +105,7 @@
         Schedules
       </a>
       <a href="/ui/insights" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
-        {% if active_page in ['insights_overview', 'insights_pipelines', 'insights_steps', 'insights_agents'] %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
+        {% if active_page in ['insights_overview', 'insights_pipelines', 'insights_steps', 'insights_agents', 'insights_models', 'insights_providers', 'insights_mcp', 'insights_teams'] %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
         <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm6 0V9a2 2 0 00-2-2h-2a2 2 0 00-2 2v10a2 2 0 002 2h2a2 2 0 002-2zm6 0V5a2 2 0 00-2-2h-2a2 2 0 00-2 2v14a2 2 0 002 2h2a2 2 0 002-2z"/>
         </svg>
