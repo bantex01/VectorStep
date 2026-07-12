@@ -400,7 +400,7 @@ excludes testing approvals from its in-memory gauge the same way the
 DB-backed counters do), the dashboard's stat cards and top-agents/top-tools
 cards, the runs-page stat cards, pipeline success/accuracy bars, the
 config-fingerprint accuracy comparison on `/ui/pipelines/{name}/feedback`, and
-both Insights pages (`/ui/insights/pipelines` and `/ui/insights/agents`).
+the Insights pages (`/ui/insights/pipelines`, `/ui/insights/steps`, and `/ui/insights/agents`).
 
 **Browse surfaces are the exception** — the runs list, dashboard's recent-runs
 table, a pipeline's recent-runs table, and the chronological "every marked
@@ -602,7 +602,7 @@ steps:
 - `executor_config` only: **deep-merged** — local keys add to or override library keys, rather than replacing the whole block. This lets you add `model` or `thinking_level` without repeating `agent` and `session_key`.
 - `description` and `tags` are library-only metadata and are stripped before the step is passed to the runner.
 
-**Step library UI:** the `/ui/steps` page shows all loaded library steps with their executor/agent, confidence threshold, tags, which pipelines reference each step, and a copy button for the `- use: step-name` snippet.
+**Step library UI:** the `/ui/steps` page shows all loaded library steps with their executor/agent, confidence threshold, tags, which pipelines reference each step, and a copy button for the `- use: step-name` snippet. Each step with run history also gets a **per-pipeline/agent/model breakdown table** — runs, success rate, and avg tokens (in/out) for every distinct (pipeline, agent, model) combination that's executed this step, since the same library step can be wired to a different agent or model in different pipelines. Scoped to `stage=production` runs, same as every other rollup surface (§3c).
 
 **Hot reload:** `POST /reload` and SIGHUP reload the step library first, then re-resolve all pipeline references against the updated library. A **Reload config** button on the `/ui/pipelines` page calls this endpoint directly from the browser.
 
@@ -1637,11 +1637,11 @@ default, see §3c) contributes to none of them, including the metrics that query
 |---|---|---|---|
 | `pork_pipeline_runs_total` | counter | `pipeline`, `status` | Total runs by pipeline and terminal status |
 | `pork_pipeline_runs_in_progress` | gauge | — | Runs currently in `status=running` |
-| `pork_pipeline_steps_total` | counter | `executor`, `agent`, `status` | Total steps by executor, agent, and status |
-| `pork_pipeline_step_duration_seconds` | histogram | `executor`, `agent` | Step execution duration (buckets: 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, +Inf seconds) |
+| `pork_pipeline_steps_total` | counter | `pipeline`, `step_name`, `executor`, `agent`, `model`, `provider`, `status` | Total steps by pipeline, step, executor, agent, model, provider, and status. `pipeline`/`step_name`/`model`/`provider` are what let a Grafana dashboard reconstruct the per-step and per-model success-rate breakdowns the Pipelines/Steps/Agents Insights UI pages (below) compute directly from the DB — the UI is for a quick look, this metric is for a real dashboard or alert. NULL agent/model/provider (non-gateway executors, or a gateway build predating the `provider` field) are bucketed as `""`. |
+| `pork_pipeline_step_duration_seconds` | histogram | `pipeline`, `step_name`, `executor`, `agent`, `model`, `provider` | Step execution duration (buckets: 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, +Inf seconds) |
 | `pork_verifier_runs_total` | counter | `agent` | Steps where a verifier ran, by primary agent |
 | `pork_verifier_overrides_total` | counter | `agent` | Verifier runs where the verifier lowered the primary's effective confidence |
-| `pork_pipeline_tokens_total` | counter | `team`, `pipeline`, `executor`, `agent`, `model`, `direction` | Cumulative input/output tokens consumed, broken down by owning team (§3b) for cost attribution. `direction` is `input`/`output`. NULL team/model are bucketed as `""` rather than dropped, so unattributed spend stays visible. Steps from executors that don't report tokens (`openclaw`, `human`, `webhook`) are excluded rather than padded as zero. |
+| `pork_pipeline_tokens_total` | counter | `team`, `pipeline`, `step_name`, `executor`, `agent`, `model`, `provider`, `direction` | Cumulative input/output tokens consumed, broken down by owning team (§3b) for cost attribution. `direction` is `input`/`output`. NULL team/model/provider are bucketed as `""` rather than dropped, so unattributed spend stays visible. Steps from executors that don't report tokens (`openclaw`, `human`, `webhook`) are excluded rather than padded as zero. |
 | `pork_human_approval_decisions_total` | counter | `team`, `pipeline`, `decision` | Cumulative `human` step (§9 `executor: human`) approve/reject decisions. `decision` is `approved`/`rejected`, derived from `primary_confidence` (1.0/0.0 — see the executor's contract). Timeouts leave `primary_confidence` NULL and are excluded rather than miscounted as either outcome. NULL team is bucketed as `""`. |
 | `pork_pipeline_feedback_total` | counter | `pipeline`, `outcome` | Cumulative human accuracy feedback (§Accuracy feedback — the same data backing `/ui/pipelines/{name}/feedback`). `outcome` is `correct`/`partial`/`incorrect`. |
 | `pork_human_approvals_pending` | gauge | `team` | Currently pending `human` step approvals, awaiting a response on whichever channel (Telegram/Slack/Teams) that team is routed to (§ "human — Human-in-the-Loop"). Unlike every other metric here this isn't derived from the database — pending approvals are in-memory only — so it reflects only this process's current state, not a historical/cumulative total. NULL team is bucketed as `""`. Always emits at least a zero-valued series so the metric doesn't disappear from dashboards when nothing's pending. Excludes `stage=testing` pending approvals, same as every other series on this page — see §3c. |
@@ -1682,12 +1682,12 @@ Grafana Alloy/Tempo).
 
 ```
 pipeline.run: <team>/<pipeline>       (pork.pipeline.name, pork.run.id, pork.source, pork.team, pork.run.status)
-├── <step name>                       (pork.span.kind=step, pork.executor, pork.agent, confidences, pork.model)
+├── <step name>                       (pork.span.kind=step, pork.executor, pork.agent, confidences, pork.model, pork.provider)
 │   ├── gen_ai.<executor>             (pork.span.kind=gen_ai — the LLM call itself)
 │   └── <step>:verifier|:challenger   (pork.span.kind=verifier, pork.verifier.mode, pork.confidence)
 │       └── gen_ai.<executor>
 ├── <group name>                      (pork.span.kind=parallel_group, pork.join_strategy, pork.branch_count)
-│   ├── <branch name>                 (pork.span.kind=branch, pork.executor, pork.agent, pork.confidence)
+│   ├── <branch name>                 (pork.span.kind=branch, pork.executor, pork.agent, pork.confidence, pork.model, pork.provider)
 │   │   └── gen_ai.<executor>
 │   └── ... (concurrent siblings)
 ├── <fan_out name>                    (pork.span.kind=fan_out, pork.join_strategy)
@@ -1735,13 +1735,14 @@ The web UI is served under `/ui` and provides the following pages:
 | Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status, run counts, per-pipeline agent badges (read from config), all-time success rate, avg tokens in/out per run, a **TESTING** badge per pipeline (§3c), and **tag** (`?tag=`) / **agent** (`?agent=`) filters; header stat cards and all per-pipeline rollups are scoped to production |
 | Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, stage badge, **Agents card** (every agent used by the pipeline — including verifiers/challengers — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), accuracy feedback summary bar (production only), recent runs (badged, all stages), YAML viewer, and **Run now** button (always runs regardless of stage) |
 | Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) — summary cards and the config-fingerprint comparison are production only; the chronological "every marked run" table shows all stages, badged |
-| Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, and a **tag filter** (`?tag=`) |
-| Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
+| Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, a **tag filter** (`?tag=`), and a per-pipeline/agent/model breakdown table (runs, success rate, avg tokens) for steps with run history |
+| Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg duration, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
 | Providers | `/ui/providers` | Calls/success-rate/tokens grouped by LLM provider (`anthropic`, `openrouter`, `azure`, etc. — `executor: gateway` steps only), with a per-provider breakdown of which models were used, over a selectable time range (24h/7d/30d/all-time) |
 | Schedules | `/ui/schedules` | Active cron schedules with next-run times |
 | Insights — Overview | `/ui/insights` | Run/failure/token/accuracy totals, runs by team, and MCP tool-use counts, over a selectable time range (24h/7d/30d/all-time) — production only |
-| Insights — By Pipeline | `/ui/insights/pipelines` | Per-pipeline run/failure/token totals and which teams triggered each pipeline in range — production only |
-| Insights — By Agent | `/ui/insights/agents` | Per-agent step/success-rate/token totals and which models each agent used in range — production only |
+| Insights — Pipelines | `/ui/insights/pipelines` | Per-pipeline run/failure/duration/token totals, top-pipelines table, and a per-pipeline drilldown (status/accuracy breakdown, timeseries, recent runs, and a step/agent/model breakdown table) — production only |
+| Insights — Steps | `/ui/insights/steps` | Per-step run/failure/duration/token totals, top-steps table, and a per-step drilldown (status breakdown, timeseries, recent executions, and a pipeline/agent/model breakdown table) — production only |
+| Insights — Agents | `/ui/insights/agents` | Per-agent step/success-rate/duration/token totals, top-agents table, and a per-agent drilldown (status breakdown, timeseries, recent executions, and a pipeline/step/model breakdown table) — production only |
 
 ### Running a pipeline manually
 
@@ -1813,6 +1814,14 @@ Agents are uniquely identified by `executor:name` — e.g. `openclaw:sre-investi
 Both backends are queried concurrently. If one is unreachable, the other's agents still show with a warning banner. If both fail, stub entries from DB run history are surfaced.
 
 The **Config** tab on a gateway agent detail page shows the raw `agent.yaml` — model, `max_tokens`, and the list of MCP tool names the agent has access to.
+
+**Overview tab** — a per-model breakdown table (runs, succeeded, failed, success rate, avg duration, avg tokens in/out, last run), two "usage over time" line charts (runs and tokens, both split by model), and a **recent activity** list of the last 15 steps this agent ran across any pipeline — each row links to its pipeline and its run detail page.
+
+**Steps tab** — which pipeline steps this agent executes, broken down by pipeline and model (runs, success rate, avg tokens, last run). The same step name can be wired to a different model in different pipelines, so pipeline is a first-class column here rather than folded away.
+
+All of the above is scoped to `stage=production` runs (§3c), same as every other rollup surface.
+
+**Model display and the `provider` column:** wherever a model name is shown alongside run history (this page, `/ui/steps`, and the Insights pages), it's prefixed with its provider when the DB actually recorded one — e.g. `anthropic/claude-sonnet-5`, `openrouter/deepseek/deepseek-v4-pro`. `pipeline_steps.provider` is only populated for `executor: gateway` steps (from the Gateway's `agentMeta.provider`); other executors, or steps run on an older Gateway build that predates this field, leave it NULL and the bare model name is shown as-is — the UI does not guess a provider it has no evidence for, since a wrong guess is worse than no answer.
 
 ---
 

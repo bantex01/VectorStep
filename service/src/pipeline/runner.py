@@ -430,6 +430,8 @@ class PipelineRunner:
             span.set_attribute("pork.confidence.primary", result.output.confidence)
             if result.output.model:
                 span.set_attribute("pork.model", result.output.model)
+            if result.output.provider:
+                span.set_attribute("pork.provider", result.output.provider)
         if result.verifier_output:
             span.set_attribute("pork.confidence.verifier", result.verifier_output.confidence)
         if result.status == "failed":
@@ -1122,6 +1124,8 @@ class PipelineRunner:
             span.set_attribute("pork.confidence", output.confidence)
             if output.model:
                 span.set_attribute("pork.model", output.model)
+            if output.provider:
+                span.set_attribute("pork.provider", output.provider)
             if getattr(output, "failed", False):
                 span.set_status(Status(StatusCode.ERROR))
             return output

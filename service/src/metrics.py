@@ -28,11 +28,15 @@ _DURATION_BUCKETS: tuple[float, ...] = (1, 2, 5, 10, 30, 60, 120, 300, 600, 1200
 class MetricsData:
     run_counts: list[tuple[str, str, int]]
     runs_in_progress: int
-    step_counts: list[tuple[str, str | None, str, int]]
-    step_durations: list[tuple[str, str | None, float]]
+    step_counts: list[tuple[str, str, str, str | None, str | None, str | None, str, int]]
+    # (pipeline, step_name, executor, agent, model, provider, status, count) — pipeline/
+    # step_name/model/provider let Grafana reconstruct the per-step and per-model
+    # breakdowns the Steps/Agents/Pipelines Insights UI pages compute from the DB directly.
+    step_durations: list[tuple[str, str, str, str | None, str | None, str | None, float]]
+    # (pipeline, step_name, executor, agent, model, provider, seconds)
     verifier_counts: list[tuple[str | None, int, int]]
-    token_usage: list[tuple[str | None, str, str, str | None, str | None, int, int]]
-    # (team, pipeline, executor, agent, model, input_tokens_sum, output_tokens_sum)
+    token_usage: list[tuple[str | None, str, str, str, str | None, str | None, str | None, int, int]]
+    # (team, pipeline, step_name, executor, agent, model, provider, input_tokens_sum, output_tokens_sum)
     human_decisions: list[tuple[str | None, str, str, int]]
     # (team, pipeline, decision["approved"|"rejected"], count) — human steps only,
     # derived from primary_confidence (1.0 = approved, 0.0 = rejected — see
@@ -60,19 +64,33 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         )
 
         rows = await session.execute(
-            select(PipelineStep.executor, PipelineStep.agent, PipelineStep.status, func.count())
+            select(
+                PipelineRun.pipeline_name, PipelineStep.step_name,
+                PipelineStep.executor, PipelineStep.agent, PipelineStep.model,
+                PipelineStep.provider, PipelineStep.status, func.count(),
+            )
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineRun.stage == "production")
-            .group_by(PipelineStep.executor, PipelineStep.agent, PipelineStep.status)
+            .group_by(
+                PipelineRun.pipeline_name, PipelineStep.step_name, PipelineStep.executor,
+                PipelineStep.agent, PipelineStep.model, PipelineStep.provider, PipelineStep.status,
+            )
         )
         step_counts = rows.all()
 
         rows = await session.execute(
-            select(PipelineStep.executor, PipelineStep.agent, PipelineStep.duration_ms)
+            select(
+                PipelineRun.pipeline_name, PipelineStep.step_name,
+                PipelineStep.executor, PipelineStep.agent, PipelineStep.model,
+                PipelineStep.provider, PipelineStep.duration_ms,
+            )
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineStep.duration_ms.is_not(None), PipelineRun.stage == "production")
         )
-        step_durations = [(executor, agent, ms / 1000.0) for executor, agent, ms in rows.all()]
+        step_durations = [
+            (pipeline, step_name, executor, agent, model, provider, ms / 1000.0)
+            for pipeline, step_name, executor, agent, model, provider, ms in rows.all()
+        ]
 
         rows = await session.execute(
             select(
@@ -96,17 +114,19 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
             select(
                 PipelineRun.team,
                 PipelineRun.pipeline_name,
+                PipelineStep.step_name,
                 PipelineStep.executor,
                 PipelineStep.agent,
                 PipelineStep.model,
+                PipelineStep.provider,
                 func.coalesce(func.sum(PipelineStep.input_tokens), 0),
                 func.coalesce(func.sum(PipelineStep.output_tokens), 0),
             )
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineStep.input_tokens.is_not(None), PipelineRun.stage == "production")
             .group_by(
-                PipelineRun.team, PipelineRun.pipeline_name,
-                PipelineStep.executor, PipelineStep.agent, PipelineStep.model,
+                PipelineRun.team, PipelineRun.pipeline_name, PipelineStep.step_name,
+                PipelineStep.executor, PipelineStep.agent, PipelineStep.model, PipelineStep.provider,
             )
         )
         token_usage = list(rows.all())
@@ -178,11 +198,13 @@ class PorkCollector(Collector):
 
         steps_total = CounterMetricFamily(
             "pork_pipeline_steps_total",
-            "Total pipeline steps by executor, agent, and status",
-            labels=["executor", "agent", "status"],
+            "Total pipeline steps by pipeline, step, executor, agent, model, provider, and status",
+            labels=["pipeline", "step_name", "executor", "agent", "model", "provider", "status"],
         )
-        for executor, agent, status, count in data.step_counts:
-            steps_total.add_metric([executor, agent or "", status], count)
+        for pipeline, step_name, executor, agent, model, provider, status, count in data.step_counts:
+            steps_total.add_metric(
+                [pipeline, step_name, executor, agent or "", model or "", provider or "", status], count,
+            )
         yield steps_total
 
         yield self._duration_histogram(data.step_durations)
@@ -205,11 +227,11 @@ class PorkCollector(Collector):
 
         token_totals = CounterMetricFamily(
             "pork_pipeline_tokens_total",
-            "Cumulative LLM tokens consumed, by team, pipeline, executor, agent, model, and direction",
-            labels=["team", "pipeline", "executor", "agent", "model", "direction"],
+            "Cumulative LLM tokens consumed, by team, pipeline, step, executor, agent, model, provider, and direction",
+            labels=["team", "pipeline", "step_name", "executor", "agent", "model", "provider", "direction"],
         )
-        for team, pipeline, executor, agent, model, input_sum, output_sum in data.token_usage:
-            base = [team or "", pipeline, executor, agent or "", model or ""]
+        for team, pipeline, step_name, executor, agent, model, provider, input_sum, output_sum in data.token_usage:
+            base = [team or "", pipeline, step_name, executor, agent or "", model or "", provider or ""]
             token_totals.add_metric([*base, "input"], input_sum)
             token_totals.add_metric([*base, "output"], output_sum)
         yield token_totals
@@ -259,20 +281,24 @@ class PorkCollector(Collector):
         return gauge
 
     @staticmethod
-    def _duration_histogram(durations: list[tuple[str, str | None, float]]) -> HistogramMetricFamily:
-        grouped: dict[tuple[str, str], list[float]] = defaultdict(list)
-        for executor, agent, seconds in durations:
-            grouped[(executor, agent or "")].append(seconds)
+    def _duration_histogram(
+        durations: list[tuple[str, str, str, str | None, str | None, str | None, float]],
+    ) -> HistogramMetricFamily:
+        grouped: dict[tuple[str, str, str, str, str, str], list[float]] = defaultdict(list)
+        for pipeline, step_name, executor, agent, model, provider, seconds in durations:
+            grouped[(pipeline, step_name, executor, agent or "", model or "", provider or "")].append(seconds)
 
         hist = HistogramMetricFamily(
             "pork_pipeline_step_duration_seconds",
-            "Pipeline step execution duration in seconds",
-            labels=["executor", "agent"],
+            "Pipeline step execution duration in seconds, by pipeline, step, executor, agent, model, and provider",
+            labels=["pipeline", "step_name", "executor", "agent", "model", "provider"],
         )
-        for (executor, agent), values in grouped.items():
+        for (pipeline, step_name, executor, agent, model, provider), values in grouped.items():
             buckets = [
                 (floatToGoString(le), sum(1 for v in values if v <= le))
                 for le in _DURATION_BUCKETS
             ]
-            hist.add_metric([executor, agent], buckets, sum_value=sum(values))
+            hist.add_metric(
+                [pipeline, step_name, executor, agent, model, provider], buckets, sum_value=sum(values),
+            )
         return hist

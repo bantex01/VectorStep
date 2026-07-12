@@ -27,14 +27,14 @@ def _find_family(families, sample_name):
 
 def test_collect_emits_pork_pipeline_tokens_total_with_expected_labels():
     data = _empty_metrics_data([
-        ("payments", "alert-triage", "gateway", "sre-triage", "anthropic/claude-sonnet-4-6", 100, 50),
+        ("payments", "alert-triage", "triage", "gateway", "sre-triage", "claude-sonnet-4-6", "anthropic", 100, 50),
     ])
     families = list(PorkCollector(data).collect())
     family = _find_family(families, "pork_pipeline_tokens_total")
 
     assert family.samples[0].labels == {
-        "team": "payments", "pipeline": "alert-triage", "executor": "gateway",
-        "agent": "sre-triage", "model": "anthropic/claude-sonnet-4-6", "direction": "input",
+        "team": "payments", "pipeline": "alert-triage", "step_name": "triage", "executor": "gateway",
+        "agent": "sre-triage", "model": "claude-sonnet-4-6", "provider": "anthropic", "direction": "input",
     }
     assert family.samples[0].value == 100
     assert family.samples[1].labels["direction"] == "output"
@@ -43,13 +43,14 @@ def test_collect_emits_pork_pipeline_tokens_total_with_expected_labels():
 
 def test_collect_buckets_null_team_and_model_as_empty_string():
     data = _empty_metrics_data([
-        (None, "scheduled-pipeline", "gateway", "agent-x", None, 10, 5),
+        (None, "scheduled-pipeline", "triage", "gateway", "agent-x", None, None, 10, 5),
     ])
     families = list(PorkCollector(data).collect())
     family = _find_family(families, "pork_pipeline_tokens_total")
 
     assert family.samples[0].labels["team"] == ""
     assert family.samples[0].labels["model"] == ""
+    assert family.samples[0].labels["provider"] == ""
 
 
 async def test_fetch_metrics_data_excludes_steps_without_tokens(tmp_path):
@@ -77,8 +78,8 @@ async def test_fetch_metrics_data_excludes_steps_without_tokens(tmp_path):
     metrics_data = await fetch_metrics_data(session_factory)
 
     assert len(metrics_data.token_usage) == 1
-    team, pipeline, executor, agent, model, input_sum, output_sum = metrics_data.token_usage[0]
-    assert (team, pipeline, executor, agent, model) == ("payments", "p", "gateway", "a", "m")
+    team, pipeline, step_name, executor, agent, model, provider, input_sum, output_sum = metrics_data.token_usage[0]
+    assert (team, pipeline, step_name, executor, agent, model) == ("payments", "p", "s1", "gateway", "a", "m")
     assert (input_sum, output_sum) == (100, 50)
 
 
@@ -94,7 +95,7 @@ async def test_fetch_metrics_data_sums_across_steps(tmp_path):
         ))
         for i in range(2):
             session.add(PipelineStep(
-                id=f"step-{i}", run_id="run-1", step_name=f"s{i}", step_index=i,
+                id=f"step-{i}", run_id="run-1", step_name="s", step_index=i,
                 executor="gateway", agent="a", model="m", prompt="", status="completed",
                 executed_at=datetime(2026, 1, 1), input_tokens=10, output_tokens=5,
             ))
@@ -103,7 +104,7 @@ async def test_fetch_metrics_data_sums_across_steps(tmp_path):
     metrics_data = await fetch_metrics_data(session_factory)
 
     assert len(metrics_data.token_usage) == 1
-    _, _, _, _, _, input_sum, output_sum = metrics_data.token_usage[0]
+    _, _, _, _, _, _, _, input_sum, output_sum = metrics_data.token_usage[0]
     assert (input_sum, output_sum) == (20, 10)
 
 
@@ -253,7 +254,7 @@ async def test_fetch_metrics_data_excludes_testing_runs(tmp_path):
     assert metrics_data.human_decisions[0][:2] == ("payments", "p")
     assert metrics_data.feedback_counts == [("p", "correct", 1)]
     # Step-only aggregates (no independent stage awareness pre-join) also exclude testing.
-    assert sum(n for _, _, _, n in metrics_data.step_counts) == 2  # gateway + human, prod run only
+    assert sum(row[-1] for row in metrics_data.step_counts) == 2  # gateway + human, prod run only
     assert len(metrics_data.step_durations) == 1
     assert len(metrics_data.verifier_counts) == 1
     assert metrics_data.verifier_counts[0][1] == 1  # one verified step, from the prod run only
