@@ -1,0 +1,102 @@
+# Weekly Jira problem review.
+#
+# problem-manager reviews the board and writes a report (as an artifact —
+# requires config.yaml artifacts: block, see README §5a). engineering-manager
+# reads that report and decides, pattern by pattern, whether it warrants a
+# new Jira epic, a new ticket, or no action — and creates the issue if so.
+#
+# NOTE: stage: testing below does NOT sandbox this pipeline's real side
+# effect. Testing mode only mutes notifications/executor:notify/failure
+# webhooks/executor:human — it does not stop an agent's own MCP tool calls.
+# engineering-manager will create real Jira issues in whatever jira_project
+# is set below on every run, testing stage or not. Point jira_project at a
+# sandbox project for the first few runs before trusting it against the
+# real board.
+#
+# Requires: `atlassian` MCP server configured in P-Ork-Gateway's config.yaml
+# (not present yet as of writing) and `executors.gateway` configured in this
+# service's config.yaml (also not present yet — see README §"gateway").
+
+name: jira-problem-review
+description: Weekly Jira board review — problem-manager identifies recurring patterns and writes a report; engineering-manager decides which patterns warrant a new ticket or epic.
+version: 1
+stage: testing        # promote to production once validated — see README §3c
+
+trigger:
+  match: {}   # unused — this pipeline is schedule-only, never fires from webhook traffic
+
+schedule:
+  cron: "0 9 * * 1"     # every Monday at 09:00
+  summary: "Weekly Jira problem review"
+  severity: info
+  team: platform
+  labels:
+    review: jira-problem-review
+
+vars:
+  jira_project: PORK
+  jira_project_url: https://alexfdalton.atlassian.net/jira/software/projects/PORK/
+  review_window_days: "7"
+  label_filter: ""
+
+steps:
+  - name: problem-manager
+    executor: gateway
+    timeout_seconds: 1200
+    executor_config:
+      agent: problem-manager
+      session_key: "agent:problem-manager:{{pipeline_run_id}}"
+    confidence_threshold: 0.60
+    on_low_confidence: escalate
+    on_abort: notify
+    prompt_template: |
+      Run this week's problem review for the {{jira_project}} Jira project.
+
+      Jira project: {{jira_project}} ({{jira_project_url}})
+      Review window: last {{review_window_days}} days
+      Additional label/component filters: {{label_filter | default('none')}}
+
+      Follow your standard workflow — search the board, analyse the full
+      ticket set for recurring issues, concentrations, reopens, stale/blocked
+      tickets, and emerging trends — then return your report exactly as
+      described in your instructions.
+
+  - name: engineering-manager
+    executor: gateway
+    timeout_seconds: 1200
+    executor_config:
+      agent: engineering-manager
+      session_key: "agent:engineering-manager:{{pipeline_run_id}}"
+    confidence_threshold: 0.60
+    on_low_confidence: escalate
+    on_abort: notify
+    prompt_template: |
+      Review this week's problem report for {{jira_project}} and decide what
+      Jira action, if any, each pattern warrants.
+
+      Problem manager summary: {{steps.problem_manager.summary}}
+      Total tickets reviewed: {{steps.problem_manager.total_tickets_reviewed}}
+      {% if steps.problem_manager.no_findings_note %}No-findings note: {{steps.problem_manager.no_findings_note}}{% endif %}
+
+      Full report:
+      {{ artifacts.problem_manager.report_markdown }}
+
+      Jira project: {{jira_project}} ({{jira_project_url}})
+
+      Follow your standard workflow — check for existing duplicate coverage
+      before creating anything, then act per your criteria, then return your
+      decision report exactly as described in your instructions.
+
+notifications:
+  escalate:
+    channel: telegram
+    template: |
+      ⚠️ Jira problem review escalated: {{pipeline_name}}
+      Step: {{current_step}}
+      Reason: {{escalation_reason}}
+      Summary: {{step_summary}}
+  notify:
+    channel: telegram
+    template: |
+      Jira problem review aborted: {{pipeline_name}}
+      Step: {{current_step}}
