@@ -17,7 +17,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from .db.database import create_tables, get_session_factory, init_db, mark_interrupted_runs
-from .db.models import PipelineRun, PipelineStep, RunFeedback
+from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 import functools
 
 from .executors import EXECUTORS
@@ -1075,6 +1075,84 @@ async def get_run_feedback(run_id: str):
     return {
         "feedback": {
             "run_id": feedback.run_id,
+            "outcome": feedback.outcome,
+            "notes": feedback.notes,
+            "submitted_at": feedback.submitted_at.isoformat(),
+        }
+    }
+
+
+@app.post("/runs/{run_id}/steps/{step_name:path}/feedback")
+async def submit_step_feedback(run_id: str, step_name: str, request: Request):
+    """Submit or update human accuracy feedback for a single step execution."""
+    body = await request.json()
+    outcome = (body.get("outcome") or "").strip()
+    if outcome not in ("correct", "partial", "incorrect"):
+        raise HTTPException(status_code=400, detail="outcome must be 'correct', 'partial', or 'incorrect'")
+    notes = (body.get("notes") or "").strip() or None
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        result = await session.execute(
+            select(PipelineStep).where(
+                PipelineStep.run_id == run_id, PipelineStep.step_name == step_name
+            )
+        )
+        step = result.scalar_one_or_none()
+        if not step:
+            raise HTTPException(
+                status_code=404, detail=f"Step '{step_name}' not found in run '{run_id}'"
+            )
+        run = await session.get(PipelineRun, run_id)  # for pipeline_name denormalisation
+
+        result = await session.execute(
+            select(StepFeedback).where(StepFeedback.step_id == step.id)
+        )
+        feedback = result.scalar_one_or_none()
+
+        if feedback:
+            feedback.outcome = outcome
+            feedback.notes = notes
+            feedback.submitted_at = utc_now()
+        else:
+            feedback = StepFeedback(
+                step_id=step.id,
+                run_id=run_id,
+                pipeline_name=run.pipeline_name,
+                step_name=step_name,
+                outcome=outcome,
+                notes=notes,
+            )
+            session.add(feedback)
+        await session.commit()
+
+    return {
+        "run_id": run_id,
+        "step_name": step_name,
+        "outcome": feedback.outcome,
+        "notes": feedback.notes,
+        "submitted_at": feedback.submitted_at.isoformat(),
+    }
+
+
+@app.get("/runs/{run_id}/steps/{step_name:path}/feedback")
+async def get_step_feedback(run_id: str, step_name: str):
+    """Get human accuracy feedback for a single step execution, if any."""
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        result = await session.execute(
+            select(StepFeedback)
+            .join(PipelineStep, StepFeedback.step_id == PipelineStep.id)
+            .where(PipelineStep.run_id == run_id, PipelineStep.step_name == step_name)
+        )
+        feedback = result.scalar_one_or_none()
+
+    if not feedback:
+        return {"feedback": None}
+    return {
+        "feedback": {
+            "run_id": feedback.run_id,
+            "step_name": feedback.step_name,
             "outcome": feedback.outcome,
             "notes": feedback.notes,
             "submitted_at": feedback.submitted_at.isoformat(),

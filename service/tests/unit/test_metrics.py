@@ -8,7 +8,12 @@ from src.executors import human
 from src.metrics import MetricsData, PorkCollector, fetch_metrics_data
 
 
-def _empty_metrics_data(token_usage: list[tuple] | None = None, human_decisions=None, feedback_counts=None) -> MetricsData:
+def _empty_metrics_data(
+    token_usage: list[tuple] | None = None,
+    human_decisions=None,
+    feedback_counts=None,
+    step_feedback_counts=None,
+) -> MetricsData:
     return MetricsData(
         run_counts=[],
         runs_in_progress=0,
@@ -18,6 +23,7 @@ def _empty_metrics_data(token_usage: list[tuple] | None = None, human_decisions=
         token_usage=token_usage or [],
         human_decisions=human_decisions or [],
         feedback_counts=feedback_counts or [],
+        step_feedback_counts=step_feedback_counts or [],
     )
 
 

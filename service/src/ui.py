@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from .db.database import get_session_factory
-from .db.models import PipelineRun, PipelineStep, RunFeedback
+from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 from .executors.human import pending_count as _pending_approval_count
 from .gateway import gateway_call_safe
 from .models.pipeline import FanOutGroupConfig, ParallelGroupConfig, PipelineConfig
@@ -860,6 +860,15 @@ async def ui_run_detail(request: Request, run_id: str):
         result = await session.execute(select(RunFeedback).where(RunFeedback.run_id == run_id))
         feedback = result.scalar_one_or_none()
 
+    step_feedback_by_name: dict[str, dict] = {}
+    async with sf() as session:
+        result = await session.execute(
+            select(StepFeedback.step_name, StepFeedback.outcome, StepFeedback.notes)
+            .where(StepFeedback.run_id == run_id)
+        )
+        for name, outcome, notes in result.all():
+            step_feedback_by_name[name] = {"outcome": outcome, "notes": notes or ""}
+
     from .executors.human import get_pending_for_run
     pending_approvals = get_pending_for_run(run_id) if run.status == "running" else []
 
@@ -874,6 +883,7 @@ async def ui_run_detail(request: Request, run_id: str):
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
         "feedback": feedback,
+        "step_feedback_by_name": step_feedback_by_name,
         "pending_approvals": pending_approvals,
         "active_page": "runs",
     })
@@ -1723,9 +1733,40 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         all_steps_raw = rows.all()
 
+        q = _production_only(
+            select(
+                PipelineStep.step_name, PipelineStep.agent,
+                PipelineStep.model, PipelineStep.provider,
+                StepFeedback.outcome, func.count().label("n"),
+            )
+            .join(PipelineStep, StepFeedback.step_id == PipelineStep.id)
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .group_by(
+                PipelineStep.step_name, PipelineStep.agent,
+                PipelineStep.model, PipelineStep.provider, StepFeedback.outcome,
+            )
+        )
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        step_feedback_rows = (await session.execute(q)).all()
+
     # step_combo: (pipeline_name, step_name, agent, qualified_model) -> counters, shared
     # with the Pipelines Insights drilldown (see _fetch_step_agent_model_combo).
     step_combo = await _fetch_step_agent_model_combo(cutoff)
+
+    feedback_by_step: dict[str, dict] = defaultdict(lambda: {"correct": 0, "partial": 0, "incorrect": 0})
+    feedback_by_combo: dict[tuple, dict] = defaultdict(lambda: {"correct": 0, "partial": 0, "incorrect": 0})
+    for step_name, agent, model, provider, outcome, n in step_feedback_rows:
+        feedback_by_step[step_name][outcome] += n
+        feedback_by_combo[(step_name, agent, _qualified_model(provider, model))][outcome] += n
+
+    def _acc(d: dict) -> dict:
+        total = d["correct"] + d["partial"] + d["incorrect"]
+        return {**d, "total": total,
+                "accuracy_pct": round(d["correct"] / total * 100) if total else None}
+
+    feedback_by_step = {k: _acc(v) for k, v in feedback_by_step.items()}
+    feedback_by_combo = {k: _acc(v) for k, v in feedback_by_combo.items()}
 
     # ── Per-step aggregates ────────────────────────────────────────────────────
 
@@ -1759,6 +1800,7 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
         distinct_pipelines_by_step[step_name].add(pipeline_name)
         total = c["total"]
         avg_duration_secs = (c["duration_sum_ms"] / c["duration_n"] / 1000) if c["duration_n"] else None
+        fb = feedback_by_combo.get((step_name, agent, _qualified_model(provider, model)))
         pipeline_breakdown_by_step[step_name].append({
             "pipeline_name": pipeline_name,
             "agent": agent,
@@ -1768,6 +1810,8 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
             "avg_input_tokens": round(c["input_tokens"] / total) if total else None,
             "avg_output_tokens": round(c["output_tokens"] / total) if total else None,
             "avg_duration": _format_seconds(avg_duration_secs),
+            "accuracy_pct": fb["accuracy_pct"] if fb else None,
+            "marked_total": fb["total"] if fb else 0,
         })
     for rows_ in pipeline_breakdown_by_step.values():
         rows_.sort(key=lambda r: r["total"], reverse=True)
@@ -1814,6 +1858,12 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
             "duration_ts": {"labels": bucket_labels, "data": duration_ts_data},
             "recent_runs": recent,
             "pipeline_breakdown": pipeline_breakdown_by_step.get(name, []),
+            "accuracy_pct": feedback_by_step.get(name, {}).get("accuracy_pct"),
+            "marked_total": feedback_by_step.get(name, {}).get("total", 0),
+            "feedback_breakdown": {
+                k: feedback_by_step.get(name, {}).get(k, 0)
+                for k in ("correct", "partial", "incorrect")
+            },
         }
 
     # ── Headline stats ────────────────────────────────────────────────────────

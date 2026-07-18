@@ -16,7 +16,7 @@ from prometheus_client.utils import floatToGoString
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .db.models import PipelineRun, PipelineStep, RunFeedback
+from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 from .executors.human import list_pending as _list_pending_approvals
 
 # Bucket upper bounds in seconds — spans a quick webhook call up to the default
@@ -43,6 +43,8 @@ class MetricsData:
     # executors/human.py). Timeouts leave primary_confidence NULL and are excluded.
     feedback_counts: list[tuple[str, str, int]]
     # (pipeline, outcome["correct"|"partial"|"incorrect"], count) — from RunFeedback
+    step_feedback_counts: list[tuple[str, str, str | None, str | None, str | None, str, int]]
+    # (pipeline, step_name, agent, model, provider, outcome, count) — from StepFeedback
 
 
 async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData:
@@ -160,6 +162,23 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         )
         feedback_counts = list(rows.all())
 
+        rows = await session.execute(
+            select(
+                PipelineRun.pipeline_name, PipelineStep.step_name,
+                PipelineStep.agent, PipelineStep.model, PipelineStep.provider,
+                StepFeedback.outcome, func.count(),
+            )
+            .join(PipelineStep, StepFeedback.step_id == PipelineStep.id)
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineRun.stage == "production")
+            .group_by(
+                PipelineRun.pipeline_name, PipelineStep.step_name,
+                PipelineStep.agent, PipelineStep.model, PipelineStep.provider,
+                StepFeedback.outcome,
+            )
+        )
+        step_feedback_counts = list(rows.all())
+
     return MetricsData(
         run_counts=list(run_counts),
         runs_in_progress=runs_in_progress or 0,
@@ -169,6 +188,7 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         token_usage=token_usage,
         human_decisions=human_decisions,
         feedback_counts=list(feedback_counts),
+        step_feedback_counts=step_feedback_counts,
     )
 
 
@@ -253,6 +273,17 @@ class PorkCollector(Collector):
         for pipeline, outcome, count in data.feedback_counts:
             feedback_total.add_metric([pipeline, outcome], count)
         yield feedback_total
+
+        step_feedback_total = CounterMetricFamily(
+            "pork_step_feedback_total",
+            "Total human accuracy feedback submissions per step, by pipeline, step, agent, model, provider, and outcome",
+            labels=["pipeline", "step_name", "agent", "model", "provider", "outcome"],
+        )
+        for pipeline, step_name, agent, model, provider, outcome, count in data.step_feedback_counts:
+            step_feedback_total.add_metric(
+                [pipeline, step_name, agent or "", model or "", provider or "", outcome], count
+            )
+        yield step_feedback_total
 
         yield self._pending_approvals_gauge()
 

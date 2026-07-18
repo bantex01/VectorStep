@@ -72,3 +72,18 @@ class RunFeedback(Base):
     outcome: Mapped[str] = mapped_column(String, nullable=False)  # "correct" | "partial" | "incorrect"
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     submitted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
+
+
+class StepFeedback(Base):
+    __tablename__ = "step_feedback"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    step_id: Mapped[str] = mapped_column(
+        String, ForeignKey("pipeline_steps.id"), nullable=False, unique=True, index=True
+    )  # the specific step EXECUTION this feedback is for — one row per step, upserted
+    run_id: Mapped[str] = mapped_column(String, nullable=False, index=True)      # denormalised for lookup
+    pipeline_name: Mapped[str] = mapped_column(String, nullable=False, index=True)  # denormalised
+    step_name: Mapped[str] = mapped_column(String, nullable=False)               # denormalised (may contain "/" for fan-out)
+    outcome: Mapped[str] = mapped_column(String, nullable=False)  # "correct" | "partial" | "incorrect"
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)

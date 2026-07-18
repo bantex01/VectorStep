@@ -1558,6 +1558,19 @@ retry:
 | `notes` | text, nullable | Optional free-text context. |
 | `submitted_at` | datetime | Created or last updated. |
 
+**step_feedback**
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | uuid, pk | |
+| `step_id` | str, unique, indexed | The specific step execution (`pipeline_steps.id`) this feedback is for. One row per step, upserted. |
+| `run_id` | str, indexed | Denormalised for lookup. |
+| `pipeline_name` | str, indexed | Denormalised. |
+| `step_name` | str | Denormalised — may contain `/` for fan-out branches (e.g. `triage/0`). |
+| `outcome` | str | `correct` / `partial` / `incorrect` — human judgement of that step's result. |
+| `notes` | text, nullable | Optional free-text context. |
+| `submitted_at` | datetime | Created or last updated. |
+
 ### 15. Management Endpoints
 
 ```bash
@@ -1599,6 +1612,18 @@ POST /runs/{run_id}/feedback
 # Get current feedback for a run
 GET /runs/{run_id}/feedback
 # → {"feedback": {run_id, outcome, notes, submitted_at}} or {"feedback": null}
+
+# Submit or update human accuracy feedback for a single step execution
+# (outcome: correct|partial|incorrect). step_name may contain "/" for fan-out
+# branches (e.g. triage/0) — the route uses a path converter to match it.
+POST /runs/{run_id}/steps/{step_name}/feedback
+# body: {"outcome": "correct", "notes": "..."}
+# → {"run_id": "...", "step_name": "...", "outcome": "correct", "notes": "...", "submitted_at": "..."}
+# Upserts — submitting again overwrites the previous outcome and notes.
+
+# Get current feedback for a single step execution
+GET /runs/{run_id}/steps/{step_name}/feedback
+# → {"feedback": {run_id, step_name, outcome, notes, submitted_at}} or {"feedback": null}
 
 # Re-run a pipeline from a specific step
 POST /runs/{run_id}/rerun
@@ -1644,6 +1669,7 @@ default, see §3c) contributes to none of them, including the metrics that query
 | `pork_pipeline_tokens_total` | counter | `team`, `pipeline`, `step_name`, `executor`, `agent`, `model`, `provider`, `direction` | Cumulative input/output tokens consumed, broken down by owning team (§3b) for cost attribution. `direction` is `input`/`output`. NULL team/model/provider are bucketed as `""` rather than dropped, so unattributed spend stays visible. Steps from executors that don't report tokens (`openclaw`, `human`, `webhook`) are excluded rather than padded as zero. |
 | `pork_human_approval_decisions_total` | counter | `team`, `pipeline`, `decision` | Cumulative `human` step (§9 `executor: human`) approve/reject decisions. `decision` is `approved`/`rejected`, derived from `primary_confidence` (1.0/0.0 — see the executor's contract). Timeouts leave `primary_confidence` NULL and are excluded rather than miscounted as either outcome. NULL team is bucketed as `""`. |
 | `pork_pipeline_feedback_total` | counter | `pipeline`, `outcome` | Cumulative human accuracy feedback (§Accuracy feedback — the same data backing `/ui/pipelines/{name}/feedback`). `outcome` is `correct`/`partial`/`incorrect`. |
+| `pork_step_feedback_total` | counter | `pipeline`, `step_name`, `agent`, `model`, `provider`, `outcome` | Cumulative per-step human accuracy feedback (§Accuracy feedback), production-scoped. `outcome` is `correct`/`partial`/`incorrect`. |
 | `pork_human_approvals_pending` | gauge | `team` | Currently pending `human` step approvals, awaiting a response on whichever channel (Telegram/Slack/Teams) that team is routed to (§ "human — Human-in-the-Loop"). Unlike every other metric here this isn't derived from the database — pending approvals are in-memory only — so it reflects only this process's current state, not a historical/cumulative total. NULL team is bucketed as `""`. Always emits at least a zero-valued series so the metric doesn't disappear from dashboards when nothing's pending. Excludes `stage=testing` pending approvals, same as every other series on this page — see §3c. |
 
 Dollar-cost conversion is intentionally not provided — there's no per-model
@@ -1805,6 +1831,13 @@ An optional notes field lets you record why — useful context when reviewing pa
   - Overall accuracy distribution bar
   - **Accuracy by configuration table** — runs are grouped by a fingerprint of the exact (step sequence × agents × models) combination. When you change a model, add a step, or swap an agent, the new runs fall into a new group automatically, so you can directly compare accuracy before and after any pipeline change without manually tagging versions.
   - Chronological table of every marked run with its outcome, run status, config fingerprint, and notes.
+
+**Per-step feedback.** In addition to run-level feedback, you can mark an individual step *execution* correct/partial/incorrect. The control appears inside each finished step's expanded detail panel (same collapsible body as the parsed output and agent trace), so marking is optional and sparse — mark only the step(s) you have an opinion on. Fan-out branches (`triage/0`, `triage/1`, ...) are marked independently, since each is its own step execution.
+
+- **Steps Insights** (`/ui/insights/steps`) — the pipeline/agent/model breakdown table has an **Accuracy** column, and the per-step drilldown has an **Accuracy** mini-card, both computed as `correct / total_marked` over the selected time range, production-scoped.
+- `pork_step_feedback_total` (see §Metrics) exposes the same counts for Grafana/alerting.
+
+Per-step feedback is currently pure data collection — it does not affect gating or flow control. It's a building block for future work on calibrating trust scores against real outcomes.
 
 ### Agent Library
 

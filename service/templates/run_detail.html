@@ -257,6 +257,8 @@
 
   {% elif item.type == 'branch' %}
   <!-- Branch step (indented) -->
+  {% set sname = item.group ~ '/' ~ item.name %}
+  {% set sfb = step_feedback_by_name.get(sname, {}) %}
   <div x-data="{ open: false }" class="ml-6 bg-zinc-900 rounded-lg border border-zinc-800">
     <div class="flex items-center gap-3 px-4 py-3">
       <div class="w-1 h-1 rounded-full bg-zinc-600 shrink-0"></div>
@@ -293,6 +295,9 @@
         <pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.pretty }}</pre>
       </div>
       {% endif %}
+      {% if run.status not in ('running', 'interrupted') and item.step.status != 'running' %}
+      {% include "_step_feedback_widget.html" %}
+      {% endif %}
       {% if item.trace %}
       {{ _render_trace(item.trace) }}
       {% endif %}
@@ -302,6 +307,8 @@
 
   {% elif item.type == 'step' %}
   <!-- Sequential step -->
+  {% set sname = item.name %}
+  {% set sfb = step_feedback_by_name.get(sname, {}) %}
   <div x-data="{ open: false, rerun_open: false }" class="bg-zinc-900 rounded-lg border border-zinc-800">
     <div class="flex items-center gap-3 px-4 py-3.5">
       <span class="text-sm font-medium text-zinc-100 w-44 shrink-0 truncate" title="{{ item.name }}">{{ item.name }}</span>
@@ -413,6 +420,9 @@
         <p class="text-xs text-zinc-500 uppercase tracking-wide mb-2">{{ item.verifier_label }}</p>
         <pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.verifier_pretty }}</pre>
       </div>
+      {% endif %}
+      {% if run.status not in ('running', 'interrupted') and item.step.status != 'running' %}
+      {% include "_step_feedback_widget.html" %}
       {% endif %}
       {% if item.trace %}
       {{ _render_trace(item.trace) }}
@@ -714,6 +724,31 @@ function feedbackWidget(runId, initialOutcome, initialNotes) {
       } finally {
         this.submitting = false;
       }
+    },
+  };
+}
+
+function stepFeedbackWidget(runId, stepName, initialOutcome, initialNotes) {
+  return {
+    outcome: initialOutcome || '',
+    notes: initialNotes || '',
+    submitting: false,
+    saved: !!initialOutcome,
+    error: '',
+    select(val) { this.outcome = val; this.saved = false; },
+    async submit() {
+      if (!this.outcome) return;
+      this.submitting = true; this.error = '';
+      try {
+        const resp = await fetch(`/runs/${runId}/steps/${stepName.split('/').map(encodeURIComponent).join('/')}/feedback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ outcome: this.outcome, notes: this.notes }),
+        });
+        if (resp.ok) { this.saved = true; }
+        else { const d = await resp.json().catch(() => ({})); this.error = d.detail || `Error ${resp.status}`; }
+      } catch (e) { this.error = 'Request failed: ' + e.message; }
+      finally { this.submitting = false; }
     },
   };
 }

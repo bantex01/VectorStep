@@ -149,7 +149,7 @@
 
   <div class="p-5">
     <!-- Mini cards -->
-    <div class="grid grid-cols-4 gap-4 mb-5">
+    <div class="grid grid-cols-5 gap-4 mb-5">
       <div class="bg-zinc-800/60 rounded-lg p-4">
         <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Runs</p>
         <p id="dd-runs" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
@@ -165,6 +165,10 @@
       <div class="bg-zinc-800/60 rounded-lg p-4">
         <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Escalation rate</p>
         <p id="dd-escalation" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
+      </div>
+      <div class="bg-zinc-800/60 rounded-lg p-4">
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Accuracy</p>
+        <p id="dd-accuracy" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
       </div>
     </div>
 
@@ -207,6 +211,7 @@
               <th class="text-left font-medium pb-1.5 pr-4">Model</th>
               <th class="text-right font-medium pb-1.5 pr-4">Runs</th>
               <th class="text-right font-medium pb-1.5 pr-4">Success rate</th>
+              <th class="text-right font-medium pb-1.5 pr-4">Accuracy</th>
               <th class="text-right font-medium pb-1.5 pr-4">Avg tokens (in/out)</th>
               <th class="text-right font-medium pb-1.5">Avg duration</th>
             </tr>
@@ -355,6 +360,8 @@
     const escEl = document.getElementById('dd-escalation');
     escEl.textContent = d.escalation_rate != null ? d.escalation_rate + '%' : '—';
     escEl.className = 'mt-1 text-2xl font-semibold ' + (d.escalation_rate > 0 ? 'text-amber-400' : 'text-zinc-50');
+    document.getElementById('dd-accuracy').textContent =
+      d.accuracy_pct != null ? d.accuracy_pct + '% (' + d.marked_total + ')' : '—';
 
     // Status breakdown bar + legend
     const breakdown = d.status_breakdown;
@@ -430,6 +437,8 @@
             const rate = s.success_rate;
             const rateCls = rate == null ? 'text-zinc-600' : rate >= 90 ? 'text-green-400' : rate >= 70 ? 'text-amber-400' : 'text-red-400';
             const rateStr = rate != null ? rate + '%' : '—';
+            const accStr = s.accuracy_pct != null ? `${s.accuracy_pct}% (${s.marked_total})` : '—';
+            const accCls = s.accuracy_pct == null ? 'text-zinc-600' : s.accuracy_pct >= 90 ? 'text-green-400' : s.accuracy_pct >= 70 ? 'text-amber-400' : 'text-red-400';
             const tokStr = s.avg_input_tokens != null ? `${s.avg_input_tokens.toLocaleString()} / ${s.avg_output_tokens.toLocaleString()}` : '—';
             return `<tr class="hover:bg-zinc-800/50 transition-colors">
               <td class="py-1.5 pr-4 text-xs">
@@ -439,6 +448,7 @@
               <td class="py-1.5 pr-4 font-mono text-xs text-zinc-500">${s.model || '—'}</td>
               <td class="py-1.5 pr-4 text-right text-xs text-zinc-400">${s.total}</td>
               <td class="py-1.5 pr-4 text-right text-xs font-semibold ${rateCls}">${rateStr}</td>
+              <td class="py-1.5 pr-4 text-right text-xs font-semibold ${accCls}">${accStr}</td>
               <td class="py-1.5 pr-4 text-right text-xs text-zinc-400">${tokStr}</td>
               <td class="py-1.5 text-right text-xs text-zinc-500">${s.avg_duration || '—'}</td>
             </tr>`;
