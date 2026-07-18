@@ -1458,8 +1458,13 @@ class PipelineRunner:
 
         grounding_ctx = {
             **ctx,
+            # `artifacts` is presentation content (e.g. a full markdown report), not a
+            # claim itself — the load-bearing claims live in the structured fields
+            # (summary, reasoning, and whatever extra fields the agent returns
+            # alongside them, e.g. patterns_found). Excluding it keeps the grounding
+            # call cheap and stops the judge quoting a large blob back at us.
             "primary_response": json.dumps(
-                primary_output.model_dump(exclude={"raw_response"}), indent=2
+                primary_output.model_dump(exclude={"raw_response", "artifacts"}), indent=2
             ),
             "agent_trace": transcript,
         }

@@ -122,6 +122,37 @@ async def test_run_grounding_extracts_score_and_claims():
     assert report["claims"] == [{"claim": "pool exhaustion", "supported": True, "evidence": "pool-wait metric"}]
 
 
+async def test_run_grounding_excludes_artifacts_but_keeps_other_extra_fields():
+    """artifacts (e.g. a full markdown report) is presentation content, not a claim —
+    excluding it keeps the grounding call cheap and stops the judge quoting a large
+    blob back. Other extra fields (where claims actually live, e.g. patterns_found)
+    must still reach the judge."""
+    captured_ctx = {}
+
+    class _CapturingExecutor:
+        async def execute(self, step, ctx):
+            captured_ctx.update(ctx)
+            return LLMOutput(confidence=0.5, summary="x", next_step_context="", raw_response={})
+
+    runner = _runner(executors={"grounding_stub": lambda: _CapturingExecutor()})
+    step = StepConfig(
+        name="investigate", executor="gateway", prompt_template="",
+        grounding=GroundingConfig(executor="grounding_stub"),
+    )
+    primary = LLMOutput(
+        confidence=0.9, summary="ok", next_step_context="",
+        raw_response={"trace": _TOOL_TRACE},
+        artifacts={"report_markdown": "# huge report\n" + ("x" * 5000)},
+        patterns_found=[{"title": "recurring 500s", "ticket_keys": ["OC-1", "OC-2"]}],
+    )
+
+    await runner._run_grounding(step=step, ctx={}, primary_output=primary, run_log=[])
+
+    assert "report_markdown" not in captured_ctx["primary_response"]
+    assert "patterns_found" in captured_ctx["primary_response"]
+    assert "recurring 500s" in captured_ctx["primary_response"]
+
+
 async def test_run_grounding_clamps_score_to_unit_interval():
     judge_output = LLMOutput(confidence=1.4, summary="x", next_step_context="", raw_response={})
     runner = _runner(executors={"grounding_stub": lambda: _StubExecutor(judge_output)})
