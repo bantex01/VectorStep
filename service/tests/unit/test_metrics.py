@@ -13,6 +13,7 @@ def _empty_metrics_data(
     human_decisions=None,
     feedback_counts=None,
     step_feedback_counts=None,
+    grounding_scores=None,
 ) -> MetricsData:
     return MetricsData(
         run_counts=[],
@@ -24,6 +25,7 @@ def _empty_metrics_data(
         human_decisions=human_decisions or [],
         feedback_counts=feedback_counts or [],
         step_feedback_counts=step_feedback_counts or [],
+        grounding_scores=grounding_scores or [],
     )
 
 

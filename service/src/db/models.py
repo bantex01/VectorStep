@@ -53,6 +53,8 @@ class PipelineStep(Base):
     primary_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     verifier_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     effective_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    grounding_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # G ∈ [0,1], NULL when not computed
+    trust_report: Mapped[str | None] = mapped_column(Text, nullable=True)         # JSON TrustReport (shadow, per step)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     executed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
     artifacts: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: {key: reference}

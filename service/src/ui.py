@@ -788,6 +788,7 @@ async def ui_run_detail(request: Request, run_id: str):
                 "trace": trace,
             })
         else:
+            trust = json.loads(step.trust_report) if step.trust_report else None
             display_items.append({
                 "type": "step",
                 "name": step.step_name,
@@ -797,6 +798,7 @@ async def ui_run_detail(request: Request, run_id: str):
                 "verifier_pretty": verifier_pretty,
                 "verifier_label": verifier_label,
                 "trace": trace,
+                "trust": trust,
             })
 
     normalised = json.loads(run.normalised_context) if run.normalised_context else {}

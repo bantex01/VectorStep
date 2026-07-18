@@ -196,6 +196,7 @@ def test_collect_emits_pork_step_feedback_total():
             ("p", "triage", "agent-x", "claude-sonnet-5", "anthropic", "correct", 3),
             ("p", "triage", None, None, None, "incorrect", 1),
         ],
+        grounding_scores=[],
     )
     families = list(PorkCollector(data).collect())
     family = _find_family(families, "pork_step_feedback_total")

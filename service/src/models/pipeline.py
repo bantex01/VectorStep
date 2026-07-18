@@ -33,6 +33,17 @@ class VerifierConfig(BaseModel):
     trigger: VerifierTriggerConfig = Field(default_factory=VerifierTriggerConfig)
 
 
+class GroundingConfig(BaseModel):
+    """Shadow-mode grounding: after the step runs, a blind judge scores how well the
+    agent's load-bearing claims are supported by evidence in its own execution trace.
+    Phase 0 — recorded only, never gates. (Gating knobs like require_grounding arrive
+    in Phase 1; do not add them here.)"""
+    agent: str = "grounding-judge"   # gateway agent that performs the constrained cross-reference
+    executor: str = "gateway"        # only gateway steps produce a trace to ground against
+    executor_config: dict = Field(default_factory=dict)  # extra keys merged into the grounding call (e.g. model)
+    timeout_seconds: int = 120       # keep the shadow pass cheap; never block the run for long
+
+
 ParallelStepConfig.model_rebuild()
 
 
@@ -88,6 +99,7 @@ class StepConfig(BaseModel):
     verifier: VerifierConfig | None = None
     retry: RetryConfig | None = None
     loop_until: LoopConfig | None = None
+    grounding: GroundingConfig | None = None
 
     @field_validator("on_failure", mode="before")
     @classmethod
@@ -191,6 +203,7 @@ class LibraryStepConfig(BaseModel):
     verifier: VerifierConfig | None = None
     retry: RetryConfig | None = None
     loop_until: LoopConfig | None = None
+    grounding: GroundingConfig | None = None
 
     @field_validator("on_failure", mode="before")
     @classmethod

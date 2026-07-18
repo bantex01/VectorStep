@@ -45,6 +45,8 @@ class MetricsData:
     # (pipeline, outcome["correct"|"partial"|"incorrect"], count) — from RunFeedback
     step_feedback_counts: list[tuple[str, str, str | None, str | None, str | None, str, int]]
     # (pipeline, step_name, agent, model, provider, outcome, count) — from StepFeedback
+    grounding_scores: list[tuple[str, str, str | None, str | None, str | None, float]]
+    # (pipeline, step_name, agent, model, provider, grounding_score) — from pipeline_steps, G non-null
 
 
 async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData:
@@ -179,6 +181,17 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         )
         step_feedback_counts = list(rows.all())
 
+        rows = await session.execute(
+            select(
+                PipelineRun.pipeline_name, PipelineStep.step_name,
+                PipelineStep.agent, PipelineStep.model, PipelineStep.provider,
+                PipelineStep.grounding_score,
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.grounding_score.is_not(None), PipelineRun.stage == "production")
+        )
+        grounding_scores = list(rows.all())
+
     return MetricsData(
         run_counts=list(run_counts),
         runs_in_progress=runs_in_progress or 0,
@@ -189,6 +202,7 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         human_decisions=human_decisions,
         feedback_counts=list(feedback_counts),
         step_feedback_counts=step_feedback_counts,
+        grounding_scores=grounding_scores,
     )
 
 
@@ -228,6 +242,8 @@ class PorkCollector(Collector):
         yield steps_total
 
         yield self._duration_histogram(data.step_durations)
+
+        yield self._grounding_histogram(data.grounding_scores)
 
         verifier_runs = CounterMetricFamily(
             "pork_verifier_runs_total",
@@ -332,4 +348,22 @@ class PorkCollector(Collector):
             hist.add_metric(
                 [pipeline, step_name, executor, agent, model, provider], buckets, sum_value=sum(values),
             )
+        return hist
+
+    @staticmethod
+    def _grounding_histogram(
+        scores: list[tuple[str, str, str | None, str | None, str | None, float]],
+    ) -> HistogramMetricFamily:
+        grouped: dict[tuple[str, str, str, str, str], list[float]] = defaultdict(list)
+        for pipeline, step_name, agent, model, provider, g in scores:
+            grouped[(pipeline, step_name, agent or "", model or "", provider or "")].append(g)
+        _BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, float("inf"))
+        hist = HistogramMetricFamily(
+            "pork_step_grounding_score",
+            "Shadow-mode grounding score (G) distribution per step, by pipeline, step, agent, model, provider",
+            labels=["pipeline", "step_name", "agent", "model", "provider"],
+        )
+        for (pipeline, step_name, agent, model, provider), values in grouped.items():
+            buckets = [(floatToGoString(le), sum(1 for v in values if v <= le)) for le in _BUCKETS]
+            hist.add_metric([pipeline, step_name, agent, model, provider], buckets, sum_value=sum(values))
         return hist

@@ -1540,6 +1540,8 @@ retry:
 | `primary_confidence` | float | Raw confidence from the primary agent |
 | `verifier_confidence` | float, nullable | Verifier agent confidence (if verifier ran) |
 | `effective_confidence` | float | Confidence used for threshold gate (post-combination) |
+| `grounding_score` | float, nullable | Shadow-mode grounding score **G** ∈ [0,1] — the fraction of the step's load-bearing claims a blind grounding judge found supported by evidence in the step's own execution trace. NULL when grounding wasn't configured for the step, or when it had no trace to check against. Never gates — see [§16 Grounding (shadow mode)](#grounding-shadow-mode). |
+| `trust_report` | json, nullable | Per-step TrustReport: the trust vector `{S, S_after_V, V, G, C, D}` and, for grounding, the per-claim support breakdown. Only populated for steps with a `grounding:` block — recorded, never enforced. |
 | `duration_ms` | int | |
 | `executed_at` | datetime | |
 | `artifacts` | json, nullable | `{key: reference}` map — references are opaque strings pointing to artifact files on disk. Content is not stored in the DB. |
@@ -1670,6 +1672,7 @@ default, see §3c) contributes to none of them, including the metrics that query
 | `pork_human_approval_decisions_total` | counter | `team`, `pipeline`, `decision` | Cumulative `human` step (§9 `executor: human`) approve/reject decisions. `decision` is `approved`/`rejected`, derived from `primary_confidence` (1.0/0.0 — see the executor's contract). Timeouts leave `primary_confidence` NULL and are excluded rather than miscounted as either outcome. NULL team is bucketed as `""`. |
 | `pork_pipeline_feedback_total` | counter | `pipeline`, `outcome` | Cumulative human accuracy feedback (§Accuracy feedback — the same data backing `/ui/pipelines/{name}/feedback`). `outcome` is `correct`/`partial`/`incorrect`. |
 | `pork_step_feedback_total` | counter | `pipeline`, `step_name`, `agent`, `model`, `provider`, `outcome` | Cumulative per-step human accuracy feedback (§Accuracy feedback), production-scoped. `outcome` is `correct`/`partial`/`incorrect`. |
+| `pork_step_grounding_score` | histogram | `pipeline`, `step_name`, `agent`, `model`, `provider` | Shadow-mode grounding score (G) distribution per step (§Grounding (shadow mode)), production-scoped (buckets: 0.1, 0.2, ..., 1.0, +Inf). Only steps with a `grounding:` block that produced a score contribute — NULL/not-computed steps are excluded, not padded as zero. |
 | `pork_human_approvals_pending` | gauge | `team` | Currently pending `human` step approvals, awaiting a response on whichever channel (Telegram/Slack/Teams) that team is routed to (§ "human — Human-in-the-Loop"). Unlike every other metric here this isn't derived from the database — pending approvals are in-memory only — so it reflects only this process's current state, not a historical/cumulative total. NULL team is bucketed as `""`. Always emits at least a zero-valued series so the metric doesn't disappear from dashboards when nothing's pending. Excludes `stage=testing` pending approvals, same as every other series on this page — see §3c. |
 
 Dollar-cost conversion is intentionally not provided — there's no per-model
@@ -1838,6 +1841,41 @@ An optional notes field lets you record why — useful context when reviewing pa
 - `pork_step_feedback_total` (see §Metrics) exposes the same counts for Grafana/alerting.
 
 Per-step feedback is currently pure data collection — it does not affect gating or flow control. It's a building block for future work on calibrating trust scores against real outcomes.
+
+### Grounding (shadow mode)
+
+**What it is.** After a step runs, an optional second call — a "grounding judge" — checks how many of the step's *load-bearing claims* (a stated root cause, a metric value, a causal link, a referenced ticket/dashboard id) are actually supported by evidence in that step's own execution trace, rather than just asserted. The result is a **grounding score G ∈ [0,1]** (the fraction of claims that are supported) plus a per-claim breakdown, both persisted as `pipeline_steps.grounding_score` and `pipeline_steps.trust_report`.
+
+**Phase 0 — shadow only.** This is pure observation: G is recorded, never enforced. It never touches `effective_confidence`, the `confidence_threshold` gate, `on_low_confidence`, or any abort/escalate/stop path. The point is to accumulate, on real traffic, a record of how far an agent's self-reported confidence (S) and its actual grounding (G) diverge — near-identical self-reported confidence can hide a well-evidenced conclusion or a confidently-asserted guess, and shadow mode is how you find out which. A later phase may let grounding gate side-effecting steps; that isn't wired up yet.
+
+**Opt-in per step, gateway-only.** Grounding only runs for steps that declare a `grounding:` block, and only for `executor: gateway` steps — only the gateway executor emits the ordered tool-call trace (`agent_trace`) grounding cross-references against. Steps on other executors, or a gateway step whose trace has no tool activity, record `grounding_score = NULL` ("no evidence trail to check"), never `0` ("claims are unsupported"). Grounding is not yet wired into parallel/fan-out branches — sequential steps only.
+
+```yaml
+steps:
+  - name: investigate
+    executor: gateway
+    executor_config: { agent: sre-investigation }
+    grounding:
+      agent: grounding-judge      # gateway agent; must be configured on the gateway
+```
+
+`grounding.agent` (default `grounding-judge`), `grounding.executor` (default `gateway`), `grounding.executor_config`, and `grounding.timeout_seconds` (default 120) are the only knobs — there's no threshold or cap here; that's Phase 1.
+
+**Soft failure.** Like the verifier, a grounding call that errors or times out logs a warning and records `grounding_score = NULL` with the error captured in the report — it never breaks or delays the step.
+
+**The `grounding-judge` agent contract.** Grounding calls a gateway agent (configured on the **P-Ork Gateway**, not in this repo) whose only job is a constrained cross-reference — it cannot browse or add outside knowledge. It receives:
+
+1. the primary agent's structured output (`summary`, `next_step_context`, `reasoning`), and
+2. a formatted transcript of the primary agent's tool calls and results.
+
+...and must return an `LLMOutput`-shaped JSON object where:
+
+- **`confidence`** carries **G** itself — the fraction of load-bearing claims supported by trace evidence, in `[0,1]`. (This reuses the existing `confidence` field as the transport so the ordinary `GatewayExecutor` parse path works unchanged; it is not the judge's confidence in itself.)
+- **`summary`** — one sentence, e.g. *"3 of 4 load-bearing claims are supported by tool results; the root-cause claim is not."*
+- **`reasoning.claims`** — a list of `{ "claim": str, "supported": bool, "evidence": str }`, one per load-bearing claim identified.
+- **`next_step_context`** — unused, `""`.
+
+**Where it surfaces.** Each grounded step's expanded detail panel shows a **"Trust (shadow)"** widget: self-report (S) vs. verifier (V, if any) vs. grounding (G), a divergence flag when `|G − S| ≥ 0.2`, and the per-claim ✓/✗ breakdown with evidence. `pork_step_grounding_score` (see §Metrics) exposes the score distribution for Grafana.
 
 ### Agent Library
 

@@ -110,6 +110,53 @@ Return JSON only, no other text:
 """
 
 
+# Built-in prompt for the shadow-mode grounding pass. Rendered with:
+#   {{primary_response}} — the primary agent's JSON output (no raw_response)
+#   {{agent_trace}}      — a formatted transcript of the primary's tool calls + results
+_GROUNDING_PROMPT_TEMPLATE = """\
+You are a grounding auditor. You are shown another agent's structured output and the \
+execution trace it produced (its tool calls and the results those tools returned). Your \
+ONLY job is to check whether the agent's load-bearing claims are supported by evidence \
+that actually appears in the trace. You cannot add outside knowledge, you cannot browse, \
+and you are NOT assessing whether the conclusion is correct — only whether it is anchored \
+to evidence that the trace actually returned.
+
+A "load-bearing claim" is an assertion the output depends on: a stated root cause, a \
+metric value, a causal link ("X because Y"), a referenced ticket/dashboard/id. Ignore \
+hedging, restatements of the task, and generic advice.
+
+For each load-bearing claim, decide if a tool result in the trace supports it. A claim \
+reached with zero supporting tool results — or whose supporting tool call errored — is \
+NOT supported.
+
+Primary agent's output:
+---
+{{primary_response}}
+---
+
+Execution trace:
+---
+{{agent_trace}}
+---
+
+Return JSON only, no other text:
+{
+  "confidence": 0.0,
+  "summary": "One sentence: how many load-bearing claims are supported, and which key one is not",
+  "next_step_context": "",
+  "reasoning": {
+    "claims": [
+      {"claim": "the exact claim", "supported": true, "evidence": "which tool result supports it, or why it is unsupported"}
+    ]
+  }
+}
+
+Set "confidence" to the FRACTION of load-bearing claims that are supported (supported \
+count / total load-bearing claims), as a number from 0.0 to 1.0. This number is the \
+grounding score — it is about the evidence, not about how sure you feel.
+"""
+
+
 @dataclass
 class StepResult:
     step_name: str
@@ -125,6 +172,8 @@ class StepResult:
     # Token usage from the primary executor (+ verifier for sequential steps;
     # sum of all branches for parallel/fan-out groups). 0 when unavailable.
     total_tokens: int = 0
+    grounding_score: float | None = None       # G ∈ [0,1], or None when not computed
+    trust_report: dict | None = None           # full TrustReport (§5e), or None
 
 
 @dataclass
@@ -161,6 +210,32 @@ class PipelineRunner:
         """Return (input_tokens, output_tokens) from a gateway raw_response, or (0, 0)."""
         usage = ((raw_response or {}).get("meta") or {}).get("agentMeta", {}).get("usage") or {}
         return (int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0))
+
+    @staticmethod
+    def _format_trace_for_grounding(trace: list, max_chars: int = 1500) -> str:
+        """Render tool_call/tool_result/text events as a readable transcript for the
+        grounding judge. Returns '' when the trace has no evidence-bearing events."""
+        lines: list[str] = []
+        for ev in trace or []:
+            if not isinstance(ev, dict):
+                continue
+            t = ev.get("type")
+            if t == "tool_call":
+                args = json.dumps(ev.get("input") or {})
+                if len(args) > 300:
+                    args = args[:300] + "…"
+                lines.append(f"TOOL CALL: {ev.get('name', '')}({args})")
+            elif t == "tool_result":
+                c = str(ev.get("content", ""))
+                if len(c) > max_chars:
+                    c = c[:max_chars] + "…"
+                err = " [ERROR]" if ev.get("is_error") else ""
+                lines.append(f"TOOL RESULT{err} ({ev.get('name', '')}): {c}")
+            elif t == "text":
+                c = str(ev.get("content", ""))
+                if c.strip():
+                    lines.append(f"AGENT TEXT: {c[:max_chars]}")
+        return "\n".join(lines)
 
     async def run(
         self,
@@ -618,12 +693,28 @@ class PipelineRunner:
                            f"after {max_iters} iteration(s)",
                            step=step.name, iterations=max_iters)
 
+        grounding_score: float | None = None
+        grounding_report: dict | None = None
+        grounding_tokens = 0
+        trust_report: dict | None = None
+        if step.grounding is not None:
+            grounding_score, grounding_report, grounding_tokens = await self._run_grounding(
+                step=step, ctx=ctx, primary_output=primary_output, run_log=run_log,
+            )
+            trust_report = self._build_trust_report(
+                primary_confidence=primary_output.confidence,
+                effective_confidence=effective_confidence,
+                verifier_confidence=verifier_output.confidence if verifier_output else None,
+                grounding_score=grounding_score,
+                grounding_report=grounding_report,
+            )
+
         _in_tok, _out_tok = self._extract_usage(primary_output.raw_response)
         if verifier_output:
             _vi, _vo = self._extract_usage(verifier_output.raw_response)
             _in_tok += _vi
             _out_tok += _vo
-        _step_tokens = _in_tok + _out_tok
+        _step_tokens = _in_tok + _out_tok + grounding_tokens
 
         if effective_confidence < step.confidence_threshold:
             action = step.on_low_confidence
@@ -645,6 +736,8 @@ class PipelineRunner:
                     effective_confidence=effective_confidence,
                     duration_ms=int(time.time() * 1000) - start_ms,
                     total_tokens=_step_tokens,
+                    grounding_score=grounding_score,
+                    trust_report=trust_report,
                 )
             if action == "escalate":
                 _log_event(run_log, "warn", "step_escalated",
@@ -658,6 +751,8 @@ class PipelineRunner:
                     effective_confidence=effective_confidence,
                     duration_ms=int(time.time() * 1000) - start_ms,
                     total_tokens=_step_tokens,
+                    grounding_score=grounding_score,
+                    trust_report=trust_report,
                 )
 
         if not primary_output.proceed:
@@ -678,6 +773,8 @@ class PipelineRunner:
                 effective_confidence=effective_confidence,
                 duration_ms=int(time.time() * 1000) - start_ms,
                 total_tokens=_step_tokens,
+                grounding_score=grounding_score,
+                trust_report=trust_report,
             )
 
         duration_ms = int(time.time() * 1000) - start_ms
@@ -694,6 +791,8 @@ class PipelineRunner:
             effective_confidence=effective_confidence,
             duration_ms=duration_ms,
             total_tokens=_step_tokens,
+            grounding_score=grounding_score,
+            trust_report=trust_report,
         )
 
     # ------------------------------------------------------------------
@@ -1111,6 +1210,8 @@ class PipelineRunner:
         run_log: list,
         run_id: str,
     ) -> LLMOutput:
+        # TODO(grounding phase): branches — grounding is not yet wired into fan-out/
+        # parallel branches, only sequential StepConfig steps (see SPEC-grounding-shadow.md).
         agent = branch.executor_config.get("agent", "")
         with tracer.start_as_current_span(
             branch.name,
@@ -1336,6 +1437,98 @@ class PipelineRunner:
 
         return primary_confidence
 
+    async def _run_grounding(
+        self,
+        step: StepConfig,
+        ctx: dict,
+        primary_output: LLMOutput,
+        run_log: list,
+    ) -> tuple[float | None, dict, int]:
+        """Shadow-mode grounding pass. Returns (G_or_None, grounding_report, tokens).
+        Never raises — grounding must not break a run."""
+        grounding = step.grounding
+        assert grounding is not None
+
+        trace = (primary_output.raw_response or {}).get("trace") or []
+        transcript = self._format_trace_for_grounding(trace)
+        if not transcript:
+            # No evidence trail (non-gateway step, or a trace with no tool activity):
+            # "nothing to check" is null, not zero.
+            return None, {"computed": False, "reason": "no_trace", "agent": grounding.agent}, 0
+
+        grounding_ctx = {
+            **ctx,
+            "primary_response": json.dumps(
+                primary_output.model_dump(exclude={"raw_response"}), indent=2
+            ),
+            "agent_trace": transcript,
+        }
+        grounding_step = StepConfig(
+            name=f"{step.name}:grounding",
+            executor=grounding.executor,
+            executor_config={"agent": grounding.agent, **grounding.executor_config},
+            confidence_threshold=0.0,
+            prompt_template=_GROUNDING_PROMPT_TEMPLATE,
+            timeout_seconds=grounding.timeout_seconds,
+        )
+
+        with tracer.start_as_current_span(
+            f"{step.name}:grounding",
+            attributes={"pork.span.kind": "grounding", "pork.agent": grounding.agent},
+        ) as span:
+            try:
+                executor = self._get_executor(grounding.executor)
+                coro = executor.execute(grounding_step, grounding_ctx)
+                out = await asyncio.wait_for(coro, timeout=grounding.timeout_seconds)
+            except Exception as exc:
+                logger.warning(
+                    "Grounding pass for step '%s' failed: %s — recording G=null", step.name, exc
+                )
+                _log_event(run_log, "warn", "grounding_failed",
+                           f"Grounding failed for {step.name}: {exc}", step=step.name)
+                span.set_status(Status(StatusCode.ERROR))
+                return None, {"computed": False, "reason": "error", "error": str(exc),
+                              "agent": grounding.agent}, 0
+
+            g = max(0.0, min(1.0, float(out.confidence)))
+            span.set_attribute("pork.grounding.score", g)
+            claims = (out.reasoning or {}).get("claims") if out.reasoning else None
+            _gi, _go = self._extract_usage(out.raw_response)
+            _log_event(run_log, "info", "grounding_ran",
+                       f"Grounding (shadow): {step.name} — G {g:.0%} vs self-report "
+                       f"{primary_output.confidence:.0%}", step=step.name)
+            report = {
+                "computed": True,
+                "agent": grounding.agent,
+                "score": g,
+                "summary": out.summary,
+                "claims": claims if isinstance(claims, list) else [],
+            }
+            return g, report, _gi + _go
+
+    @staticmethod
+    def _build_trust_report(
+        primary_confidence: float,
+        effective_confidence: float,
+        verifier_confidence: float | None,
+        grounding_score: float | None,
+        grounding_report: dict | None,
+    ) -> dict:
+        return {
+            "version": 0,
+            "mode": "shadow",             # Phase 0: recorded, never enforced
+            "signals": {
+                "S": primary_confidence,            # raw self-report
+                "S_after_V": effective_confidence,  # existing effective_confidence (S combined w/ verifier)
+                "V": verifier_confidence,           # verifier/challenger confidence, or null
+                "G": grounding_score,               # NEW — grounding, or null when not computed
+                "C": None,                          # consistency — later phase
+                "D": None,                          # deterministic checks — later phase
+            },
+            "grounding": grounding_report,          # provenance + per-claim breakdown, or null
+            "gate": {"policy": "legacy_confidence"},  # the live gate is still the old float compare
+        }
+
     # ------------------------------------------------------------------
     # Artifact interception
     # ------------------------------------------------------------------
@@ -1450,6 +1643,8 @@ class PipelineRunner:
                 primary_confidence=result.output.confidence if result.output else None,
                 verifier_confidence=result.verifier_output.confidence if result.verifier_output else None,
                 effective_confidence=result.effective_confidence,
+                grounding_score=result.grounding_score,
+                trust_report=json.dumps(result.trust_report) if result.trust_report else None,
                 duration_ms=result.duration_ms,
                 executed_at=utc_now(),
                 artifacts=_artifact_refs,
