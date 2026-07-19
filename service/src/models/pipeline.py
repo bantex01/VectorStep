@@ -27,10 +27,24 @@ class VerifierTriggerConfig(BaseModel):
 class VerifierConfig(BaseModel):
     executor: str
     executor_config: dict = Field(default_factory=dict)
-    mode: Literal["reviewer", "challenger"] = "reviewer"
+    mode: Literal["critic", "independent"] = "critic"
     combination_strategy: Literal["minimum", "veto"] = "minimum"
     veto_floor: float = 0.60        # only used when combination_strategy is "veto"
     trigger: VerifierTriggerConfig = Field(default_factory=VerifierTriggerConfig)
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _coerce_legacy_mode_names(cls, v: object) -> object:
+        """Permanent aliases (Phase 2, SPEC-verifier-semantics.md): 'reviewer' and
+        'challenger' were the original names. They are renamed to 'critic' and
+        'independent' for clarity, but existing pipeline YAML using the old names must
+        keep parsing identically, forever — never remove this or warn that it's
+        deprecated."""
+        if v == "reviewer":
+            return "critic"
+        if v == "challenger":
+            return "independent"
+        return v
 
 
 class GroundingConfig(BaseModel):
@@ -46,6 +60,21 @@ class GroundingConfig(BaseModel):
                              # byte-identical to before this spec. True = G participates
                              # in the gate as a ceiling on combined_trust (§4). Opt-in,
                              # per step — existing grounding: blocks are unaffected.
+
+
+class CalibrationConfig(BaseModel):
+    """Opt-in per-step calibrated gating (Phase 3, SPEC-calibration.md). Advisory
+    calibration reporting requires no config at all — see the Steps Insights UI. This
+    block only matters for a step that wants its *gate* to use the empirically-calibrated
+    trust instead of the raw self-report/verifier number."""
+    enforce: bool = False
+    on_uncalibrated: Literal["proceed", "escalate"] = "proceed"
+    # "proceed": bucket has < n_min marked outcomes → gate uses raw effective_confidence,
+    #            unchanged, this run (advisory-only for this run; still recorded in the
+    #            TrustReport as "not yet validated").
+    # "escalate": same situation forces combined_trust=0.0, driving the step's EXISTING
+    #             on_low_confidence action — the opt-in "no track record → human checks"
+    #             policy from CONFIDENCE-REDESIGN.md §4.5. Not the default.
 
 
 class ShellCheckConfig(BaseModel):
@@ -152,6 +181,7 @@ class StepConfig(BaseModel):
     loop_until: LoopConfig | None = None
     grounding: GroundingConfig | None = None
     deterministic_checks: list[DeterministicCheckConfig] = Field(default_factory=list)
+    calibration: CalibrationConfig | None = None
 
     @field_validator("on_failure", mode="before")
     @classmethod
@@ -257,6 +287,7 @@ class LibraryStepConfig(BaseModel):
     loop_until: LoopConfig | None = None
     grounding: GroundingConfig | None = None
     deterministic_checks: list[DeterministicCheckConfig] = Field(default_factory=list)
+    calibration: CalibrationConfig | None = None
 
     @field_validator("on_failure", mode="before")
     @classmethod

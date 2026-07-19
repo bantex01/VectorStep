@@ -1,0 +1,225 @@
+# Sample: The Full Trust Vector — verifier modes (critic/independent), enforced
+# grounding (G), deterministic checks (D), and calibration (Phase 3).
+#
+# Scenario: a payments alert fires. First-line triage decides whether it's worth
+# investigating at all (cheap, low-stakes — no verifier needed). The investigation
+# step drafts a root-cause summary and is corroborated by a CHEAP "critic" verifier
+# (sees the primary's answer, catches obvious reasoning errors). The step that can
+# actually DO something — auto-remediate and open a ticket — is a different matter:
+# it's gated by the full trust vector, because a wrong guess there has a real blast
+# radius:
+#
+#   S  — the remediation agent's own self-reported confidence (always present)
+#   V  — an "independent" (blind) verifier: a second agent attempts the SAME
+#        investigation with no sight of the primary's answer. Its agreement is
+#        uncorrelated with the primary's errors, so — unlike "critic" mode above —
+#        its agreement is real evidence, not just an echo. See README
+#        "Verifier Trigger Configuration".
+#   G  — enforced grounding: are the primary's load-bearing claims actually
+#        anchored in tool evidence, or is it confidently making things up? See
+#        README "Deterministic checks & enforced grounding (Phase 1)".
+#   D  — a deterministic check: is the error rate STILL breaching right now,
+#        verified directly against Prometheus, no LLM involved? A failed D check
+#        is dispositive — it forces escalation regardless of how confident
+#        everything else is.
+#   Calibration — once this exact (step × agent × model × provider) combination has
+#        enough marked history, the gate compares the bucket's EMPIRICAL accuracy
+#        instead of the raw self-report/verifier number. Until validated,
+#        on_uncalibrated: escalate means "no track record yet → a human checks",
+#        rather than silently trusting an unproven config with a real side effect.
+#        See README "Calibration (Phase 3)".
+#
+# combined_trust = min(calibrated(S_after_V), G, D-gate) — the weakest link decides,
+# not an average. The `act` step only runs when the gate on `investigate` said
+# proceed (via `when:`).
+#
+# Replace agent names, MCP server names, and URLs with your own values.
+
+name: trust-vector-remediation
+description: Payment-api error-rate triage with the full trust vector (S+V+G+D+calibration) gating an auto-remediation action
+version: 1
+stage: testing   # flip to "production" once you're happy — see README "Pipeline Stages"
+
+trigger:
+  match:
+    alertname: PaymentApiErrorRateHigh
+    environment: prod
+  dedup:
+    window_seconds: 600
+
+vars:
+  jira_project: PAY
+  grafana_dashboard: Payment API
+  grafana_service_labels: "job=payment-api, environment=prod"
+  prometheus_url: http://prometheus.internal:9090
+
+context_template:
+  include:
+    - severity
+    - labels.service
+    - labels.environment
+    - summary
+
+steps:
+  # ── STEP 1 — cheap, low-stakes gate. "Is this real / worth investigating?" ─────
+  # No verifier at all: this step authorises no side effects, so a plain
+  # single-confidence gate (the original, pre-trust-vector mechanism) is enough.
+  - name: first-line-triage
+    executor: gateway
+    executor_config:
+      agent: sre-triage
+    confidence_threshold: 0.60
+    on_low_confidence: escalate
+    on_abort: notify
+    prompt_template: |
+      Alert: {{summary}}
+      Severity: {{severity}}
+      Service: {{labels.service}} ({{labels.environment}})
+
+      Is this worth a full investigation, or likely noise? Respond with ONLY
+      this JSON:
+      {
+        "confidence": 0.0,
+        "summary": "One sentence: what is happening and how serious",
+        "next_step_context": "Focused investigation brief for the next step"
+      }
+
+  # ── STEP 2 — draft investigation, cheap "critic" corroboration ─────────────────
+  # mode: critic (the default — spelled out here for clarity) shares the primary's
+  # own prompt+response with the verifier, so it critiques the REASONING. Its
+  # agreement correlates with the primary's own errors and carries little signal —
+  # good enough for a step that only informs the next step, not worth the cost of
+  # a second blind investigation.
+  - name: investigate
+    executor: gateway
+    executor_config:
+      agent: sre-investigation
+      model: anthropic/claude-sonnet-5
+    confidence_threshold: 0.70
+    on_low_confidence: escalate
+    prompt_template: |
+      A payments alert fired. First-line triage said:
+      {{steps.first_line_triage.summary}}
+      {{steps.first_line_triage.next_step_context}}
+
+      Investigate root cause using Grafana dashboard "{{grafana_dashboard}}"
+      ({{grafana_service_labels}}). Cite the evidence for every claim.
+
+      Respond with ONLY this JSON:
+      {
+        "confidence": 0.0,
+        "summary": "One sentence: what the data shows",
+        "probable_cause": "Most likely explanation based on the data",
+        "next_step_context": "What a remediation agent should do — specific and bounded"
+      }
+    verifier:
+      executor: gateway
+      executor_config:
+        agent: principal-sre
+      mode: critic                # cheap sanity check — this step doesn't act on its own
+      combination_strategy: minimum
+      trigger:
+        confidence_below: 0.90    # only bother verifying when primary isn't already confident
+
+  # ── STEP 3 — the step that can actually DO something. Full trust vector. ───────
+  - name: assess-and-remediate
+    executor: gateway
+    executor_config:
+      agent: incident-remediation
+      model: anthropic/claude-sonnet-5
+    confidence_threshold: 0.75
+    on_low_confidence: escalate       # combined_trust < threshold -> human, not action
+    prompt_template: |
+      Investigation findings: {{steps.investigate.summary}}
+      Probable cause: {{steps.investigate.probable_cause}}
+      Next step brief: {{steps.investigate.next_step_context}}
+
+      Decide the remediation action (e.g. roll back the last deploy, scale up,
+      flush a cache) and draft the incident ticket + Slack summary. Do not take
+      the action yet — a downstream step does that only if this assessment is
+      trusted. Respond with ONLY this JSON:
+      {
+        "confidence": 0.0,
+        "proceed": true,
+        "proceed_reason": "One sentence: why remediation should or shouldn't proceed",
+        "summary": "One sentence: the recommended remediation",
+        "action": "Specific remediation action to take",
+        "ticket_summary": "Draft Jira ticket summary",
+        "slack_summary": "Draft Slack incident summary"
+      }
+
+    # V — independent (blind) verifier. Unlike critic mode above, this agent gets
+    # NO sight of the primary's prompt or answer — it investigates from scratch.
+    # Its agreement is uncorrelated with the primary's errors, so it's the
+    # stronger corroboration signal — exactly what README recommends for a step
+    # that authorises a side effect.
+    verifier:
+      executor: gateway
+      executor_config:
+        agent: principal-sre
+      mode: independent
+      combination_strategy: veto
+      veto_floor: 0.60
+      trigger:
+        always: true
+
+    # G — enforced grounding. Caps combined_trust at how well the agent's claims
+    # are actually anchored in tool evidence from its own execution trace.
+    grounding:
+      agent: grounding-judge
+      enforce: true
+
+    # D — deterministic, external ground truth. A failed check is dispositive:
+    # forces combined_trust to 0.0 regardless of how confident S/V/G are.
+    deterministic_checks:
+      - type: shell
+        name: still_breaching
+        run: "curl -s '{{prometheus_url}}/api/v1/query?query=rate(http_requests_total{job=%22payment-api%22,code=~%225..%22}[5m])' | jq '.data.result[0].value[1]'"
+        expect: "result | float > 0.02"
+        timeout_seconds: 30
+
+    # Calibration — once (assess-and-remediate × incident-remediation × the model
+    # above) has n_min marked outcomes, combined_trust is the bucket's EMPIRICAL
+    # accuracy instead of the raw S/V/G number. Until validated, on_uncalibrated:
+    # escalate means a brand-new config with zero track record gets a human in
+    # the loop before it's trusted to remediate anything — the opt-in
+    # "no track record -> human checks" policy, not the default anywhere else in
+    # this pipeline (see first-line-triage/investigate above, which have no
+    # calibration: block and are unaffected by this at all).
+    calibration:
+      enforce: true
+      on_uncalibrated: escalate
+
+  # ── STEP 4 — the side effect. Only runs if step 3's gate said proceed. ─────────
+  - name: act
+    executor: notify
+    when: "steps.assess_and_remediate.proceed"
+    on_failure: continue          # a failed notification should never mask that remediation was approved
+    executor_config:
+      url: "${SLACK_WEBHOOK_URL}"
+      payload:
+        blocks:
+          - type: section
+            text:
+              type: mrkdwn
+              text: |
+                *Auto-remediation approved:* {{steps.assess_and_remediate.action}}
+                *Ticket:* {{jira_project}}-<pending> — {{steps.assess_and_remediate.ticket_summary}}
+                *Summary:* {{steps.assess_and_remediate.slack_summary}}
+
+notifications:
+  escalate:
+    - channel: telegram
+      template: |
+        ⚠️ Escalated: {{pipeline_name}}
+        Service: {{labels.service}} ({{labels.environment}})
+        Step: {{current_step}}
+        Reason: {{escalation_reason}}{% if confidence is not none %} — trust {{confidence | round(2)}} below threshold {{confidence_threshold}}{% endif %}
+        Summary: {{step_summary}}
+  notify:
+    - channel: telegram
+      template: |
+        Aborted: {{pipeline_name}}
+        Service: {{labels.service}}
+        Step: {{current_step}}
+        Summary: {{step_summary}}

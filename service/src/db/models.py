@@ -48,7 +48,7 @@ class PipelineStep(Base):
     raw_output: Mapped[str | None] = mapped_column(Text, nullable=True)          # JSON
     parsed_output: Mapped[str | None] = mapped_column(Text, nullable=True)       # JSON
     verifier_output: Mapped[str | None] = mapped_column(Text, nullable=True)     # JSON
-    verifier_mode: Mapped[str | None] = mapped_column(String, nullable=True)    # "reviewer" | "challenger"
+    verifier_mode: Mapped[str | None] = mapped_column(String, nullable=True)    # "critic" | "independent" (new rows); "reviewer" | "challenger" (historical rows, pre-SPEC-verifier-semantics.md)
     status: Mapped[str] = mapped_column(String, nullable=False)
     primary_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     verifier_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)

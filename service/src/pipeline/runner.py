@@ -198,6 +198,9 @@ class PipelineRunner:
         notifiers: dict[str, TelegramNotifier] | None = None,
         artifact_store: ArtifactStore | None = None,
         pipeline_registry: "dict[str, PipelineConfig] | None" = None,
+        calibration_n_min: int = 20,
+        calibration_bin_width: float = 0.1,
+        calibration_cache_ttl_seconds: int = 300,
     ):
         self._executor_classes = executors
         self._executor_instances: dict[str, BaseExecutor] = {}
@@ -205,6 +208,15 @@ class PipelineRunner:
         self._notifiers: dict[str, TelegramNotifier] = notifiers or {}
         self._artifact_store = artifact_store
         self._pipeline_registry = pipeline_registry
+
+        from .calibration import CalibrationCache
+        self._calibration_cache: "CalibrationCache | None" = (
+            CalibrationCache(
+                session_factory, bin_width=calibration_bin_width,
+                n_min=calibration_n_min, ttl_seconds=calibration_cache_ttl_seconds,
+            )
+            if session_factory is not None else None
+        )
 
     def set_pipeline_registry(self, registry: "dict[str, PipelineConfig]") -> None:
         self._pipeline_registry = registry
@@ -705,6 +717,49 @@ class PipelineRunner:
         trust_report: dict | None = None
         combined_trust = effective_confidence
         gate_policy = "legacy_confidence"
+        calibration_report: dict | None = None
+
+        if step.calibration is not None and step.calibration.enforce:
+            gate_policy = "trust_vector"
+            agent_key = (
+                f"{step.executor}:{step.executor_config.get('agent')}"
+                if step.executor_config.get("agent") else None
+            )
+            bucket = None
+            if self._calibration_cache is not None:
+                bucket = await self._calibration_cache.get(
+                    step_name=step.name, agent=agent_key,
+                    model=primary_output.model, provider=primary_output.provider,
+                )
+            calib_bin = bucket.lookup(combined_trust) if bucket is not None else None
+
+            if calib_bin is not None and calib_bin.validated:
+                calibration_report = {
+                    "bucket": {"step_name": step.name, "agent": agent_key,
+                               "model": primary_output.model, "provider": primary_output.provider},
+                    "bin": {"lo": calib_bin.lo, "hi": calib_bin.hi},
+                    "n": calib_bin.n,
+                    "n_min": self._calibration_cache.n_min if self._calibration_cache else None,
+                    "validated": True,
+                    "raw": combined_trust,
+                    "calibrated": calib_bin.mean_label,
+                    "on_uncalibrated": step.calibration.on_uncalibrated,
+                }
+                combined_trust = calib_bin.mean_label
+            else:
+                calibration_report = {
+                    "bucket": {"step_name": step.name, "agent": agent_key,
+                               "model": primary_output.model, "provider": primary_output.provider},
+                    "bin": {"lo": calib_bin.lo, "hi": calib_bin.hi} if calib_bin is not None else None,
+                    "n": calib_bin.n if calib_bin is not None else 0,
+                    "n_min": self._calibration_cache.n_min if self._calibration_cache else None,
+                    "validated": False,
+                    "raw": combined_trust,
+                    "calibrated": None,
+                    "on_uncalibrated": step.calibration.on_uncalibrated,
+                }
+                if step.calibration.on_uncalibrated == "escalate":
+                    combined_trust = 0.0
 
         if step.grounding is not None:
             grounding_score, grounding_report, grounding_tokens = await self._run_grounding(
@@ -723,14 +778,20 @@ class PipelineRunner:
             if not deterministic_passed:
                 combined_trust = 0.0
 
-        if step.grounding is not None or step.deterministic_checks:
+        if (
+            step.grounding is not None
+            or step.deterministic_checks
+            or (step.calibration is not None and step.calibration.enforce)
+        ):
             trust_report = self._build_trust_report(
                 primary_confidence=primary_output.confidence,
                 effective_confidence=effective_confidence,
                 verifier_confidence=verifier_output.confidence if verifier_output else None,
+                verifier_mode=step.verifier.mode if step.verifier and verifier_output else None,
                 grounding_score=grounding_score,
                 grounding_report=grounding_report,
                 deterministic_results=deterministic_results,
+                calibration_report=calibration_report,
                 combined_trust=combined_trust,
                 gate_policy=gate_policy,
             )
@@ -1382,7 +1443,7 @@ class PipelineRunner:
     ) -> LLMOutput | None:
         verifier = step.verifier
         assert verifier is not None
-        span_name = f"{step.name}:challenger" if verifier.mode == "challenger" else f"{step.name}:verifier"
+        span_name = f"{step.name}:independent" if verifier.mode == "independent" else f"{step.name}:verifier"
         with tracer.start_as_current_span(
             span_name,
             attributes={"pork.span.kind": "verifier", "pork.verifier.mode": verifier.mode},
@@ -1406,11 +1467,11 @@ class PipelineRunner:
 
         from jinja2 import Environment
 
-        if verifier.mode == "challenger":
-            # Challenger: run the same task independently — no primary output shared.
+        if verifier.mode == "independent":
+            # Independent: run the same task blind — no primary output shared.
             # Both agents tackle the problem blind; combination strategy reconciles the scores.
             verifier_step = StepConfig(
-                name=f"{step.name}:challenger",
+                name=f"{step.name}:independent",
                 executor=verifier.executor,
                 executor_config=verifier.executor_config,
                 confidence_threshold=0.0,
@@ -1418,7 +1479,7 @@ class PipelineRunner:
             )
             verifier_ctx = ctx
         else:
-            # Reviewer (default): share primary output so verifier can critique the reasoning.
+            # Critic (default): share primary output so verifier can critique the reasoning.
             verifier_step = StepConfig(
                 name=f"{step.name}:verifier",
                 executor=verifier.executor,
@@ -1464,7 +1525,11 @@ class PipelineRunner:
                 "Verifier veto triggered for step '%s': verifier_confidence=%.2f < veto_floor=%.2f",
                 step.name, verifier_confidence, verifier.veto_floor,
             )
-            return verifier_confidence
+            # min(), not verifier_confidence alone — the veto score is only guaranteed
+            # to be the lower of the two when primary is at/above veto_floor. If primary
+            # is already below veto_floor too, returning verifier_confidence unconditionally
+            # could raise trust above primary, violating the downward-only invariant.
+            return min(primary_confidence, verifier_confidence)
 
         return primary_confidence
 
@@ -1651,9 +1716,11 @@ class PipelineRunner:
         primary_confidence: float,
         effective_confidence: float,
         verifier_confidence: float | None,
+        verifier_mode: str | None,
         grounding_score: float | None,
         grounding_report: dict | None,
         deterministic_results: list[dict] | None,
+        calibration_report: dict | None,
         combined_trust: float,
         gate_policy: str,
     ) -> dict:
@@ -1661,13 +1728,13 @@ class PipelineRunner:
             all(r["passed"] for r in deterministic_results) if deterministic_results else None
         )
         return {
-            "version": 1,   # bumped from 0 — D is now a real bool (was always null),
-                             # mode can be "enforced" (was always "shadow")
+            "version": 3,   # bumped from 2 — calibration is new
             "mode": "enforced" if gate_policy == "trust_vector" else "shadow",
             "signals": {
                 "S": primary_confidence,
                 "S_after_V": effective_confidence,
                 "V": verifier_confidence,
+                "V_mode": verifier_mode,   # NEW — "critic" | "independent" | null (no verifier ran)
                 "G": grounding_score,
                 "C": None,                      # consistency — still a later phase
                 "D": deterministic_passed,       # NEW — bool, or null if no checks declared
@@ -1675,6 +1742,7 @@ class PipelineRunner:
             "combined_trust": combined_trust,    # NEW — what the gate actually compared
             "grounding": grounding_report,
             "deterministic_checks": deterministic_results,   # NEW — full per-check detail, or null
+            "calibration": calibration_report,   # NEW — see calibration.py, or null if not enforced
             "gate": {"policy": gate_policy},      # "legacy_confidence" | "trust_vector"
         }
 

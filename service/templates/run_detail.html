@@ -440,7 +440,9 @@
             <span class="font-mono text-zinc-200">{{ "%.0f"|format(sig.S * 100) }}%</span></span>
           {% if sig.V is not none %}
           <span class="text-zinc-400">Verifier (V):
-            <span class="font-mono text-zinc-200">{{ "%.0f"|format(sig.V * 100) }}%</span></span>
+            <span class="font-mono text-zinc-200">{{ "%.0f"|format(sig.V * 100) }}%</span>
+            {% if sig.V_mode %}<span class="text-zinc-600">({{ sig.V_mode }})</span>{% endif %}
+          </span>
           {% endif %}
           <span class="text-zinc-400">Grounding (G):
             {% if sig.G is not none %}

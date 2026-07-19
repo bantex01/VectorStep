@@ -1,3 +1,5 @@
+import itertools
+
 from src.models.pipeline import StepConfig, VerifierConfig, VerifierTriggerConfig
 from src.pipeline.runner import PipelineRunner
 
@@ -6,7 +8,9 @@ def _runner() -> PipelineRunner:
     return PipelineRunner(executors={})
 
 
-def _step_with_verifier(combination_strategy: str = "minimum", veto_floor: float = 0.60) -> StepConfig:
+def _step_with_verifier(
+    combination_strategy: str = "minimum", veto_floor: float = 0.60, mode: str = "critic",
+) -> StepConfig:
     return StepConfig(
         name="step",
         executor="openclaw",
@@ -14,8 +18,30 @@ def _step_with_verifier(combination_strategy: str = "minimum", veto_floor: float
             executor="openclaw",
             combination_strategy=combination_strategy,
             veto_floor=veto_floor,
+            mode=mode,
         ),
     )
+
+
+# ----------------------------------------------------------------------
+# VerifierConfig.mode — legacy aliases (SPEC-verifier-semantics.md)
+# ----------------------------------------------------------------------
+
+def test_legacy_reviewer_alias_coerces_to_critic():
+    assert VerifierConfig(executor="x", mode="reviewer").mode == "critic"
+
+
+def test_legacy_challenger_alias_coerces_to_independent():
+    assert VerifierConfig(executor="x", mode="challenger").mode == "independent"
+
+
+def test_new_mode_names_parse_as_themselves():
+    assert VerifierConfig(executor="x", mode="critic").mode == "critic"
+    assert VerifierConfig(executor="x", mode="independent").mode == "independent"
+
+
+def test_default_mode_is_critic():
+    assert VerifierConfig(executor="x").mode == "critic"
 
 
 # ----------------------------------------------------------------------
@@ -134,3 +160,35 @@ def test_weighted_average_zero_total_weight_returns_zero():
     runner = _runner()
 
     assert runner._join_confidences("weighted_average", [0.5, 0.9], [0.0, 0.0]) == 0.0
+
+
+# ----------------------------------------------------------------------
+# Locked invariant (SPEC-verifier-semantics.md §8 #2): the verifier can only
+# ever lower or hold trust, never raise it. This is a permanent regression
+# test, not an emergent property of the current if/else.
+# ----------------------------------------------------------------------
+
+def test_combine_confidence_never_raises_trust_above_primary():
+    runner = _runner()
+    for strategy in ("minimum", "veto"):
+        step = _step_with_verifier(combination_strategy=strategy, veto_floor=0.6)
+        for primary, verifier_conf in itertools.product(
+            [0.0, 0.25, 0.5, 0.6, 0.75, 0.9, 1.0], repeat=2
+        ):
+            result = runner._combine_confidence(step, primary, verifier_conf)
+            assert result <= primary, (
+                f"strategy={strategy} primary={primary} verifier={verifier_conf} "
+                f"produced {result} > primary"
+            )
+
+
+def test_combine_confidence_is_unaffected_by_verifier_mode():
+    runner = _runner()
+    critic_step = _step_with_verifier(combination_strategy="veto", veto_floor=0.6, mode="critic")
+    independent_step = _step_with_verifier(
+        combination_strategy="veto", veto_floor=0.6, mode="independent"
+    )
+    for primary, verifier_conf in itertools.product([0.2, 0.5, 0.6, 0.8], repeat=2):
+        assert runner._combine_confidence(
+            critic_step, primary, verifier_conf
+        ) == runner._combine_confidence(independent_step, primary, verifier_conf)

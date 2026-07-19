@@ -218,17 +218,19 @@ def test_build_trust_report_shape():
         primary_confidence=0.88,
         effective_confidence=0.86,
         verifier_confidence=0.85,
+        verifier_mode="critic",
         grounding_score=0.15,
         grounding_report={"computed": True, "claims": []},
         deterministic_results=None,
+        calibration_report=None,
         combined_trust=0.86,
         gate_policy="legacy_confidence",
     )
 
-    assert report["version"] == 1
+    assert report["version"] == 3
     assert report["mode"] == "shadow"
     assert report["signals"] == {
-        "S": 0.88, "S_after_V": 0.86, "V": 0.85, "G": 0.15, "C": None, "D": None,
+        "S": 0.88, "S_after_V": 0.86, "V": 0.85, "V_mode": "critic", "G": 0.15, "C": None, "D": None,
     }
     assert report["combined_trust"] == 0.86
     assert report["deterministic_checks"] is None

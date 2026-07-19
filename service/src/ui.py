@@ -208,6 +208,24 @@ def _qualified_model(provider: str | None, model: str | None) -> str:
     return f"{provider}/{model}"
 
 
+def _calibration_recommendation(bucket) -> str | None:
+    """Flag the first validated bin whose predicted score and observed accuracy diverge
+    by >= 15 points — the exact style of recommendation CONFIDENCE-REDESIGN.md §4.3 uses
+    as its own worked example. Returns None if every validated bin looks fine (or there
+    are no validated bins yet)."""
+    for b in bucket.bins:
+        if not b.validated:
+            continue
+        midpoint = (b.lo + b.hi) / 2
+        if abs(b.mean_label - midpoint) >= 0.15:
+            return (
+                f"runs scoring ~{round(midpoint * 100)}% in this configuration are only "
+                f"{round(b.mean_label * 100)}% correct ({b.n} marked) — consider raising "
+                f"the threshold, changing model, or adding grounding/deterministic checks."
+            )
+    return None
+
+
 _TIME_RANGES = {
     "24h": (timedelta(hours=24), "24 hours"),
     "7d": (timedelta(days=7), "7 days"),
@@ -767,7 +785,7 @@ async def ui_run_detail(request: Request, run_id: str):
 
         verifier_parsed = json.loads(step.verifier_output) if step.verifier_output else {}
         verifier_pretty = json.dumps(verifier_parsed, indent=2) if verifier_parsed else ""
-        verifier_label = "Challenger" if step.verifier_mode == "challenger" else "Verifier"
+        verifier_label = "Independent" if step.verifier_mode in ("challenger", "independent") else "Critic"
 
         trace = json.loads(step.agent_trace) if step.agent_trace else []
 
@@ -836,7 +854,7 @@ async def ui_run_detail(request: Request, run_id: str):
                 pretty = json.dumps(parsed, indent=2) if parsed else ""
                 verifier_parsed = json.loads(step.verifier_output) if step.verifier_output else {}
                 verifier_pretty = json.dumps(verifier_parsed, indent=2) if verifier_parsed else ""
-                verifier_label = "Challenger" if step.verifier_mode == "challenger" else "Verifier"
+                verifier_label = "Independent" if step.verifier_mode in ("challenger", "independent") else "Critic"
                 trace = json.loads(step.agent_trace) if step.agent_trace else []
                 if "/" in step.step_name:
                     group_name, branch_name = step.step_name.split("/", 1)
@@ -954,7 +972,7 @@ def _agent_usage_in_pipeline(p: PipelineConfig) -> list[dict]:
     """Every (step, role, executor:agent) usage in a pipeline, read straight from config.
 
     role is "primary" or "verifier" — the same agent can be a primary in one step
-    and a verifier (reviewer or challenger — both use the same VerifierConfig
+    and a verifier (critic or independent — both use the same VerifierConfig
     shape, see README §6) in another, so a given agent can carry both roles.
     Powers the pipeline detail page's Agents card. _agents_in_pipeline collapses
     this down to a flat set of `executor:agent` keys for badges/filtering.
@@ -1756,6 +1774,10 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
     # with the Pipelines Insights drilldown (see _fetch_step_agent_model_combo).
     step_combo = await _fetch_step_agent_model_combo(cutoff)
 
+    from .pipeline.calibration import compute_calibration_buckets
+
+    calibration_buckets = await compute_calibration_buckets(sf)
+
     feedback_by_step: dict[str, dict] = defaultdict(lambda: {"correct": 0, "partial": 0, "incorrect": 0})
     feedback_by_combo: dict[tuple, dict] = defaultdict(lambda: {"correct": 0, "partial": 0, "incorrect": 0})
     for step_name, agent, model, provider, outcome, n in step_feedback_rows:
@@ -1803,6 +1825,8 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
         total = c["total"]
         avg_duration_secs = (c["duration_sum_ms"] / c["duration_n"] / 1000) if c["duration_n"] else None
         fb = feedback_by_combo.get((step_name, agent, _qualified_model(provider, model)))
+        bucket = calibration_buckets.get((step_name, agent, model, provider))
+        calibration_summary = _calibration_recommendation(bucket) if bucket else None
         pipeline_breakdown_by_step[step_name].append({
             "pipeline_name": pipeline_name,
             "agent": agent,
@@ -1814,6 +1838,11 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
             "avg_duration": _format_seconds(avg_duration_secs),
             "accuracy_pct": fb["accuracy_pct"] if fb else None,
             "marked_total": fb["total"] if fb else 0,
+            "calibration_bins": [
+                {"lo": b.lo, "hi": b.hi, "n": b.n, "mean_label": b.mean_label, "validated": b.validated}
+                for b in bucket.bins
+            ] if bucket else [],
+            "calibration_recommendation": calibration_summary,
         })
     for rows_ in pipeline_breakdown_by_step.values():
         rows_.sort(key=lambda r: r["total"], reverse=True)

@@ -165,3 +165,67 @@ def test_load_pipelines_resolves_use_references(tmp_path):
 def test_load_pipelines_missing_directory_raises(tmp_path):
     with pytest.raises(ValueError):
         load_pipelines(tmp_path / "missing")
+
+
+# ----------------------------------------------------------------------
+# _warn_correlated_critic_on_gated_steps (SPEC-verifier-semantics.md §6)
+# ----------------------------------------------------------------------
+
+def _write_pipeline(tmp_path, name: str, step: dict):
+    (tmp_path / f"{name}.yaml").write_text(
+        yaml.dump({
+            "name": name,
+            "trigger": {"match": {}},
+            "steps": [step],
+        })
+    )
+
+
+def _gated_step(mode: str) -> dict:
+    return {
+        "name": "investigate",
+        "executor": "openclaw",
+        "verifier": {"executor": "openclaw", "mode": mode},
+        "deterministic_checks": [{"type": "shell", "name": "check", "run": "true"}],
+    }
+
+
+def test_critic_mode_on_gated_step_logs_advisory_nudge(tmp_path, caplog):
+    _write_pipeline(tmp_path, "p", _gated_step("critic"))
+
+    with caplog.at_level("INFO"):
+        load_pipelines(tmp_path)
+
+    assert "weaker corroboration signal" in caplog.text
+
+
+def test_legacy_reviewer_alias_on_gated_step_logs_advisory_nudge(tmp_path, caplog):
+    _write_pipeline(tmp_path, "p", _gated_step("reviewer"))
+
+    with caplog.at_level("INFO"):
+        load_pipelines(tmp_path)
+
+    assert "weaker corroboration signal" in caplog.text
+
+
+def test_independent_mode_on_gated_step_does_not_log_advisory_nudge(tmp_path, caplog):
+    _write_pipeline(tmp_path, "p", _gated_step("independent"))
+
+    with caplog.at_level("INFO"):
+        load_pipelines(tmp_path)
+
+    assert "weaker corroboration signal" not in caplog.text
+
+
+def test_critic_mode_without_gate_does_not_log_advisory_nudge(tmp_path, caplog):
+    step = {
+        "name": "investigate",
+        "executor": "openclaw",
+        "verifier": {"executor": "openclaw", "mode": "critic"},
+    }
+    _write_pipeline(tmp_path, "p", step)
+
+    with caplog.at_level("INFO"):
+        load_pipelines(tmp_path)
+
+    assert "weaker corroboration signal" not in caplog.text

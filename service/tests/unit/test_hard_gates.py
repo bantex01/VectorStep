@@ -472,8 +472,10 @@ async def test_core_invariant_no_new_config_means_identical_behaviour():
 def test_gate_policy_trust_vector_vs_legacy_confidence():
     trust_vector_report = PipelineRunner._build_trust_report(
         primary_confidence=0.9, effective_confidence=0.9, verifier_confidence=None,
+        verifier_mode=None,
         grounding_score=0.9, grounding_report={"computed": True},
         deterministic_results=[{"name": "a", "type": "shell", "passed": True, "detail": "", "duration_ms": 1}],
+        calibration_report=None,
         combined_trust=0.9, gate_policy="trust_vector",
     )
     assert trust_vector_report["gate"]["policy"] == "trust_vector"
@@ -481,8 +483,10 @@ def test_gate_policy_trust_vector_vs_legacy_confidence():
 
     legacy_report = PipelineRunner._build_trust_report(
         primary_confidence=0.9, effective_confidence=0.9, verifier_confidence=None,
+        verifier_mode=None,
         grounding_score=0.4, grounding_report={"computed": True},
         deterministic_results=None,
+        calibration_report=None,
         combined_trust=0.9, gate_policy="legacy_confidence",
     )
     assert legacy_report["gate"]["policy"] == "legacy_confidence"

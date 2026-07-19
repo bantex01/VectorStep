@@ -213,7 +213,8 @@
               <th class="text-right font-medium pb-1.5 pr-4">Success rate</th>
               <th class="text-right font-medium pb-1.5 pr-4">Accuracy</th>
               <th class="text-right font-medium pb-1.5 pr-4">Avg tokens (in/out)</th>
-              <th class="text-right font-medium pb-1.5">Avg duration</th>
+              <th class="text-right font-medium pb-1.5 pr-4">Avg duration</th>
+              <th class="text-left font-medium pb-1.5">Calibration</th>
             </tr>
           </thead>
           <tbody id="dd-pipeline-breakdown" class="divide-y divide-zinc-800"></tbody>
@@ -440,6 +441,21 @@
             const accStr = s.accuracy_pct != null ? `${s.accuracy_pct}% (${s.marked_total})` : '—';
             const accCls = s.accuracy_pct == null ? 'text-zinc-600' : s.accuracy_pct >= 90 ? 'text-green-400' : s.accuracy_pct >= 70 ? 'text-amber-400' : 'text-red-400';
             const tokStr = s.avg_input_tokens != null ? `${s.avg_input_tokens.toLocaleString()} / ${s.avg_output_tokens.toLocaleString()}` : '—';
+            const bins = s.calibration_bins || [];
+            const binsHtml = bins.length
+              ? bins.map(b => {
+                  const mid = (b.lo + b.hi) / 2;
+                  const cellCls = !b.validated
+                    ? 'bg-zinc-800 text-zinc-600'
+                    : Math.abs(b.mean_label - mid) >= 0.15
+                      ? 'bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800'
+                      : 'bg-zinc-800 text-zinc-400';
+                  const title = b.validated
+                    ? `${Math.round(b.lo * 100)}-${Math.round(b.hi * 100)}%: predicted ~${Math.round(mid * 100)}%, actual ${Math.round(b.mean_label * 100)}% (n=${b.n})`
+                    : `${Math.round(b.lo * 100)}-${Math.round(b.hi * 100)}%: not yet validated (n=${b.n})`;
+                  return `<span class="inline-block w-3 h-3 rounded-sm ${cellCls}" title="${title}"></span>`;
+                }).join(' ')
+              : '<span class="text-xs text-zinc-600">no data</span>';
             return `<tr class="hover:bg-zinc-800/50 transition-colors">
               <td class="py-1.5 pr-4 text-xs">
                 <a href="/ui/pipelines/${s.pipeline_name}" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">${s.pipeline_name}</a>
@@ -450,8 +466,13 @@
               <td class="py-1.5 pr-4 text-right text-xs font-semibold ${rateCls}">${rateStr}</td>
               <td class="py-1.5 pr-4 text-right text-xs font-semibold ${accCls}">${accStr}</td>
               <td class="py-1.5 pr-4 text-right text-xs text-zinc-400">${tokStr}</td>
-              <td class="py-1.5 text-right text-xs text-zinc-500">${s.avg_duration || '—'}</td>
-            </tr>`;
+              <td class="py-1.5 pr-4 text-right text-xs text-zinc-500">${s.avg_duration || '—'}</td>
+              <td class="py-1.5 text-left">${binsHtml}</td>
+            </tr>${s.calibration_recommendation ? `<tr>
+              <td colspan="9" class="pb-2">
+                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800">${s.calibration_recommendation}</span>
+              </td>
+            </tr>` : ''}`;
           }).join('')
         : '<tr><td class="py-4 text-xs text-zinc-500">No breakdown data in range</td></tr>';
     }

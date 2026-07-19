@@ -3,9 +3,31 @@ from pathlib import Path
 
 import yaml
 
-from ..models.pipeline import LibraryStepConfig, PipelineConfig
+from ..models.pipeline import LibraryStepConfig, PipelineConfig, StepConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _warn_correlated_critic_on_gated_steps(pipeline: PipelineConfig) -> None:
+    """Advisory only — CONFIDENCE-REDESIGN.md §2.3: a 'critic' verifier's agreement
+    correlates with the primary's own errors and carries little signal, so it's a weak
+    corroboration source for a step that already opted into the harder trust-vector gate
+    (grounding.enforce or deterministic_checks:). This never blocks a load or changes any
+    gate — it's a one-time, load-time nudge, logged once per step, exactly like the
+    'Loaded pipeline config' line beside it."""
+    for step in pipeline.steps:
+        if not isinstance(step, StepConfig):
+            continue  # parallel/fan-out groups don't carry a `grounding`/`deterministic_checks` shape today
+        is_gated = (step.grounding is not None and step.grounding.enforce) or bool(step.deterministic_checks)
+        if is_gated and step.verifier is not None and step.verifier.mode == "critic":
+            logger.info(
+                "Pipeline '%s' step '%s' uses verifier mode=critic on a step with an "
+                "enforced trust gate (grounding.enforce or deterministic_checks) — a "
+                "critic's agreement correlates with the primary's own errors, so it's a "
+                "weaker corroboration signal here. Consider mode: independent for gates "
+                "that authorise side effects (CONFIDENCE-REDESIGN.md §2.3).",
+                pipeline.name, step.name,
+            )
 
 
 def load_step_library(steps_dir: str | Path) -> dict[str, dict]:
@@ -125,6 +147,7 @@ def load_pipelines(
             if step_library and isinstance(raw.get("steps"), list):
                 raw["steps"] = _resolve_step_references(raw["steps"], step_library)
             pipeline = PipelineConfig.model_validate(raw)
+            _warn_correlated_critic_on_gated_steps(pipeline)
             pipelines.append(pipeline)
             logger.info("Loaded pipeline config: %s (from %s)", pipeline.name, path.name)
         except Exception as exc:

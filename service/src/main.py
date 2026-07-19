@@ -444,12 +444,16 @@ async def lifespan(app: FastAPI):
         _artifact_store = None
 
     # Runner
+    calibration_cfg = config.get("calibration", {})
     _runner = PipelineRunner(
         executors=executors,
         session_factory=get_session_factory(),
         notifiers=notifiers,
         artifact_store=_artifact_store,
         pipeline_registry={p.name: p for p in _pipelines},
+        calibration_n_min=calibration_cfg.get("n_min", 20),
+        calibration_bin_width=calibration_cfg.get("bin_width", 0.1),
+        calibration_cache_ttl_seconds=calibration_cfg.get("cache_ttl_seconds", 300),
     )
 
     # Scheduler

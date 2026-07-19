@@ -779,8 +779,17 @@ Two verifier **modes** are available:
 
 | Mode | Behaviour |
 |---|---|
-| `reviewer` (default) | Verifier receives the primary agent's prompt and full response — critiques the reasoning |
-| `challenger` | Verifier receives only the original task prompt — executes the same task independently |
+| `critic` (default) | Verifier receives the primary agent's prompt and full response — critiques the reasoning. Its *agreement* correlates with the primary's own errors and carries little signal; its *disagreement* is what's informative. |
+| `independent` | Verifier receives only the original task prompt — executes the same task blind, with no sight of the primary's answer. Its agreement is uncorrelated with the primary's errors, so it's the stronger corroboration signal — prefer it for steps that authorise a side effect. |
+
+> **Renamed from `reviewer`/`challenger`.** Those names still work — parsed as permanent
+> aliases for `critic`/`independent` respectively — so no existing pipeline needs to
+> change. New pipelines should prefer the new names; they describe the *role*
+> (correlated critique vs. blind corroboration) rather than an adversarial framing.
+
+See `samples/pipelines/trust-vector-remediation.yaml` for `critic` and `independent`
+used side by side — cheap corroboration on a step that only informs, versus blind
+corroboration on a step that authorises a side effect.
 
 **Always verify:**
 ```yaml
@@ -788,7 +797,7 @@ verifier:
   executor: openclaw
   executor_config:
     agent: sre-verifier-opus
-  mode: reviewer
+  mode: critic
   combination_strategy: minimum
   trigger:
     always: true
@@ -816,7 +825,12 @@ The verifier fires only when: `confidence_above < primary_confidence < confidenc
 | `minimum` | `effective = min(primary, verifier)` — both must be confident |
 | `veto` | Primary passes through unless verifier < `veto_floor`, in which case verifier score overrides |
 
-Verifier failures (executor errors) are non-fatal — the runner logs a warning and falls back to primary confidence only.
+Verifier failures (executor errors) are non-fatal — the runner logs a warning and falls
+back to primary confidence only. **The verifier can only ever lower or hold the primary's
+effective confidence — never raise it** (`minimum` takes the lower of the two; `veto`
+only overrides when the verifier scores *below* `veto_floor`). This is a permanent
+invariant, not an emergent property of the current code — see `_combine_confidence` and
+its regression test in `tests/unit/test_confidence.py`.
 
 ---
 
@@ -1541,7 +1555,7 @@ retry:
 | `verifier_confidence` | float, nullable | Verifier agent confidence (if verifier ran) |
 | `effective_confidence` | float | Confidence used for threshold gate (post-combination) |
 | `grounding_score` | float, nullable | Shadow-mode grounding score **G** ∈ [0,1] — the fraction of the step's load-bearing claims a blind grounding judge found supported by evidence in the step's own execution trace. NULL when grounding wasn't configured for the step, or when it had no trace to check against. Never gates — see [§16 Grounding (shadow mode)](#grounding-shadow-mode). |
-| `trust_report` | json, nullable | Per-step TrustReport: the trust vector `{S, S_after_V, V, G, C, D}`, `combined_trust`, `gate.policy` (`legacy_confidence` / `trust_vector`), and — for grounding — the per-claim support breakdown, and — for deterministic checks — the full per-check detail. Populated for steps with a `grounding:` block and/or `deterministic_checks:`; `mode` is `"shadow"` when recorded-only or `"enforced"` when either mechanism actually participated in the gate. See [Deterministic checks & enforced grounding (Phase 1)](#deterministic-checks--enforced-grounding-phase-1). |
+| `trust_report` | json, nullable | Per-step TrustReport: the trust vector `{S, S_after_V, V, V_mode, G, C, D}`, `combined_trust`, `gate.policy` (`legacy_confidence` / `trust_vector`), and — for grounding — the per-claim support breakdown, and — for deterministic checks — the full per-check detail. Populated for steps with a `grounding:` block, `deterministic_checks:`, and/or `calibration: {enforce: true}`; `mode` is `"shadow"` when recorded-only or `"enforced"` when any mechanism actually participated in the gate. See [Deterministic checks & enforced grounding (Phase 1)](#deterministic-checks--enforced-grounding-phase-1). A `calibration` sub-key (bucket/bin/n/n_min/validated/raw/calibrated/on_uncalibrated) is present only for a step with `calibration: {enforce: true}` — see [Calibration (Phase 3)](#calibration-phase-3). |
 | `deterministic_passed` | bool, nullable | Whole-step pass/fail across all declared deterministic checks — `True` only if every check passed. NULL when no `deterministic_checks:` were declared. Full per-check detail lives in `trust_report.deterministic_checks`. |
 | `duration_ms` | int | |
 | `executed_at` | datetime | |
@@ -1715,7 +1729,7 @@ Grafana Alloy/Tempo).
 pipeline.run: <team>/<pipeline>       (pork.pipeline.name, pork.run.id, pork.source, pork.team, pork.run.status)
 ├── <step name>                       (pork.span.kind=step, pork.executor, pork.agent, confidences, pork.model, pork.provider)
 │   ├── gen_ai.<executor>             (pork.span.kind=gen_ai — the LLM call itself)
-│   └── <step>:verifier|:challenger   (pork.span.kind=verifier, pork.verifier.mode, pork.confidence)
+│   └── <step>:verifier|:independent   (pork.span.kind=verifier, pork.verifier.mode, pork.confidence)
 │       └── gen_ai.<executor>
 ├── <group name>                      (pork.span.kind=parallel_group, pork.join_strategy, pork.branch_count)
 │   ├── <branch name>                 (pork.span.kind=branch, pork.executor, pork.agent, pork.confidence, pork.model, pork.provider)
@@ -1766,7 +1780,7 @@ The web UI is served under `/ui` and provides the following pages:
 | Approvals | `/ui/approvals` | Every pending `executor: human` approval (§ "human — Human-in-the-Loop"), regardless of channel — a universal fallback so a team isn't stuck if their primary chat channel (Slack/Telegram) is unreachable. No standalone sidebar entry; reached via a pending-count badge next to **Runs** (only shown when the count is non-zero) |
 | Approval decision | `/ui/approvals/{token}` | Standalone page (no sidebar) reached via a direct token link — used by the Teams approval channel, which posts this link instead of an in-chat button since Teams interactive cards need a public Bot Framework callback endpoint this deployment doesn't expose (see `executors/human.py` `TeamsApprovalChannel`). Approve/Reject decision buttons post back to this same route |
 | Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status, run counts, per-pipeline agent badges (read from config), all-time success rate, avg tokens in/out per run, a **TESTING** badge per pipeline (§3c), and **tag** (`?tag=`) / **agent** (`?agent=`) filters; header stat cards and all per-pipeline rollups are scoped to production |
-| Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, stage badge, **Agents card** (every agent used by the pipeline — including verifiers/challengers — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), accuracy feedback summary bar (production only), recent runs (badged, all stages), YAML viewer, and **Run now** button (always runs regardless of stage) |
+| Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, stage badge, **Agents card** (every agent used by the pipeline — including verifier agents in critic or independent mode — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), accuracy feedback summary bar (production only), recent runs (badged, all stages), YAML viewer, and **Run now** button (always runs regardless of stage) |
 | Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) — summary cards and the config-fingerprint comparison are production only; the chronological "every marked run" table shows all stages, badged |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, a **tag filter** (`?tag=`), and a per-pipeline/agent/model breakdown table (runs, success rate, avg tokens) for steps with run history |
 | Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg duration, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
@@ -1994,6 +2008,92 @@ a `Checks (D)` PASS/FAIL chip, and a per-check ✓/✗ list (name, type, detail)
 `pork_step_deterministic_check_total` (see §Metrics) exposes check outcomes for
 Grafana.
 
+See `samples/pipelines/trust-vector-remediation.yaml` for a complete worked example of
+enforced grounding and a deterministic check gating a side-effecting step.
+
+### Calibration (Phase 3)
+
+Every step execution's `effective_confidence` has been persisted since Phase 0, and
+per-step/per-run human feedback (`step_feedback`/`run_feedback`) plus deterministic-check
+failures (Phase 1) have been accumulating. Phase 3 finally checks whether the *number*
+means what it claims: does a step that reports 0.75 confidence in a specific
+`(step × agent × model × provider)` configuration actually turn out correct roughly 75%
+of the time?
+
+**Bucketing.** Marked step-executions are grouped by `(step_name, agent, model,
+provider)` — a `library step` (see §Adding a Library Step) used across five pipelines
+feeds **one** bucket instead of five, and changing one step's model resets only that
+step's bucket. Fan-out branches (`step_name` like `triage/0`, `triage/1`) collapse into
+their parent step's bucket rather than one bucket per branch index.
+
+**Label precedence, per step-execution:**
+1. **Human** — a resolved `StepFeedback` row for that step execution (`correct → 1.0`,
+   `partial → 0.5`, `incorrect → 0.0`) — authoritative when present.
+2. **Deterministic (D)** — `pipeline_steps.deterministic_passed == False` labels the
+   step `0.0`, for free, at scale. A *passing* check is **not** used as a positive
+   label on its own — only failure is a strong-enough automated signal.
+3. **Run-level fallback** — the enclosing run's `RunFeedback.outcome`, used only when
+   neither of the above exists for that step execution.
+4. Otherwise the step-execution is **excluded** entirely — not counted as a 0, not
+   counted toward `N`.
+
+**Binning, not curve-fitting.** Rather than isotonic/Platt regression (which would pull
+in `scipy`/`sklearn`, a dependency this service otherwise has zero of), calibration uses
+simple fixed-width bins — default width 0.1 (10 bins across `[0, 1]`) — and reports each
+bin's sample count and mean label. This is directly interpretable and matches the exact
+language calibration recommendations use: *"runs scoring ~70% in this configuration are
+only 50% correct (40 runs)."* A bin needs `n_min` (default 20) marked outcomes before
+it's considered **validated**; nothing computed from an unvalidated bin is used to gate
+anything.
+
+**Advisory by default, no opt-in required.** `/ui/insights/steps` shows every bucket's
+calibration bins and, for any validated bin whose predicted score and observed accuracy
+diverge by 15 points or more, a recommendation string — with no `calibration:` config on
+any step. Nothing here changes a run's outcome; it's a report the human can inspect and act
+on, exactly the same "tool informs, human governs" posture as the accuracy pages already
+have.
+
+**Enforcing (opt-in per step, never silent).** A step can opt its *gate* into using the
+bucket's empirical accuracy instead of the raw self-report/verifier number:
+
+```yaml
+- name: investigate
+  executor: gateway
+  executor_config: { agent: sre-investigation }
+  confidence_threshold: 0.75
+  calibration:
+    enforce: true
+    on_uncalibrated: proceed   # or "escalate" — see below
+```
+
+When enforced and the step's bucket/bin is validated, `combined_trust` is **replaced**
+with the bin's `mean_label` before grounding's `min()` and deterministic checks' force-zero
+apply on top — the *same* `confidence_threshold` then decides `on_low_confidence`, no new
+threshold config. The `TrustReport`'s `calibration` block always shows the arithmetic:
+raw score, calibrated score, bin, `n`/`n_min`, so a calibrated escalation is never a
+mysterious abort.
+
+When the bucket/bin has **not** yet accumulated `n_min` marked outcomes,
+`on_uncalibrated` decides the posture:
+- `proceed` (default) — `combined_trust` is left as the raw `effective_confidence`,
+  unchanged; the run behaves exactly as it would with no `calibration:` block. The
+  `TrustReport` still records "not yet validated, N=x/N_min" for transparency.
+- `escalate` — forces `combined_trust = 0.0`, driving the step's *existing*
+  `on_low_confidence` action. An explicit "no track record → a human checks" policy for
+  high-blast-radius steps; not imposed as a universal default.
+
+A step with **no** `calibration:` block is unaffected by any of this — same posture as
+Phase 1's core invariant.
+
+**No new column, no new metric.** Calibration is computed fresh from the existing
+`pipeline_steps`/`step_feedback`/`run_feedback` tables on every request, the same way the
+Insights pages already recompute their rollups — there is no persisted calibration curve
+to migrate or invalidate.
+
+See `samples/pipelines/trust-vector-remediation.yaml` for a complete worked example
+combining `critic`/`independent` verifier modes, enforced grounding, deterministic
+checks, and calibration into a single trust-vector gate on a side-effecting step.
+
 ### Agent Library
 
 The `/ui/agents` page provides a unified library of agents across all configured executor backends. Agents are fetched live from each backend and merged into a single list with executor badges.
@@ -2086,6 +2186,11 @@ observability:
     exporter: otlp                     # otlp | console — see §15b
     endpoint: http://localhost:4318/v1/traces
     service_name: pork-service
+
+calibration:                           # omit this block entirely for the defaults shown below
+  n_min: 20                            # marked outcomes required before a bucket is "validated"
+  bin_width: 0.1                       # must evenly divide 1.0 — see §Calibration (Phase 3)
+  cache_ttl_seconds: 300                # how long the in-process bucket cache is reused before refetching
 ```
 
 `${ENV_VAR}` placeholders are resolved at startup. Unresolved placeholders become `""`.
