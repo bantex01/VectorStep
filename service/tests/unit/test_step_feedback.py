@@ -197,6 +197,7 @@ def test_collect_emits_pork_step_feedback_total():
             ("p", "triage", None, None, None, "incorrect", 1),
         ],
         grounding_scores=[],
+        deterministic_check_counts=[],
     )
     families = list(PorkCollector(data).collect())
     family = _find_family(families, "pork_step_feedback_total")

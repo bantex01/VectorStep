@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from ..utils import utc_now
@@ -55,6 +55,7 @@ class PipelineStep(Base):
     effective_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     grounding_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # G ∈ [0,1], NULL when not computed
     trust_report: Mapped[str | None] = mapped_column(Text, nullable=True)         # JSON TrustReport (shadow, per step)
+    deterministic_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # NULL = no checks declared
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     executed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
     artifacts: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: {key: reference}

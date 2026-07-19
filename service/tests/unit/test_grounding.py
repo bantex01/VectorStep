@@ -220,13 +220,18 @@ def test_build_trust_report_shape():
         verifier_confidence=0.85,
         grounding_score=0.15,
         grounding_report={"computed": True, "claims": []},
+        deterministic_results=None,
+        combined_trust=0.86,
+        gate_policy="legacy_confidence",
     )
 
-    assert report["version"] == 0
+    assert report["version"] == 1
     assert report["mode"] == "shadow"
     assert report["signals"] == {
         "S": 0.88, "S_after_V": 0.86, "V": 0.85, "G": 0.15, "C": None, "D": None,
     }
+    assert report["combined_trust"] == 0.86
+    assert report["deterministic_checks"] is None
     assert report["gate"] == {"policy": "legacy_confidence"}
 
 
@@ -364,6 +369,7 @@ def test_collect_emits_pork_step_grounding_score():
             ("p", "investigate", "agent-x", "claude-sonnet-5", "anthropic", 0.9),
             ("p", "investigate", "agent-x", "claude-sonnet-5", "anthropic", 0.3),
         ],
+        deterministic_check_counts=[],
     )
     families = list(PorkCollector(data).collect())
     family = _find_family(families, "pork_step_grounding_score")

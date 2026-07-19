@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -42,6 +42,57 @@ class GroundingConfig(BaseModel):
     executor: str = "gateway"        # only gateway steps produce a trace to ground against
     executor_config: dict = Field(default_factory=dict)  # extra keys merged into the grounding call (e.g. model)
     timeout_seconds: int = 120       # keep the shadow pass cheap; never block the run for long
+    enforce: bool = False   # NEW (Phase 1). False (default) = Phase 0 shadow behaviour,
+                             # byte-identical to before this spec. True = G participates
+                             # in the gate as a ceiling on combined_trust (§4). Opt-in,
+                             # per step — existing grounding: blocks are unaffected.
+
+
+class ShellCheckConfig(BaseModel):
+    """Run a shell command; evaluate its output. `run` is executed via the shell (so
+    pipes/redirects work, e.g. `curl ... | jq ...`), inheriting the P-Ork process's
+    environment and permissions — deliberately unsandboxed, see README §8."""
+    type: Literal["shell"] = "shell"
+    name: str
+    run: str                                    # shell command string
+    expect: str = "exit_code == 0"              # bare Jinja2 bool expr, same convention as
+                                                 # step.when (NOT wrapped in {{ }} — evaluated
+                                                 # via the same _eval_when as when:). Sees
+                                                 # `result` (stdout, stripped) and `exit_code`,
+                                                 # plus the normal step context (steps.*, vars, etc.)
+    timeout_seconds: int = 30
+
+
+class WebhookCheckConfig(BaseModel):
+    """Call a URL; evaluate the response. Same shape as StepFailureWebhookConfig
+    (url/method/headers/payload) — deliberately does not raise_for_status, since a
+    check might legitimately expect a non-2xx status (e.g. 404 = "does not exist")."""
+    type: Literal["webhook"] = "webhook"
+    name: str
+    url: str
+    method: str = "POST"
+    headers: dict[str, str] = Field(default_factory=dict)
+    payload: dict = Field(default_factory=dict)
+    expect: str = "response.status_code < 400"   # bare Jinja2 bool expr, same convention as
+                                                  # step.when. Sees `response` = {status_code, body}
+    timeout_seconds: int = 30
+
+
+class HumanCheckConfig(BaseModel):
+    """Ask a human to approve/reject via the existing human-approval subsystem
+    (executors/human.py) — same channels (Telegram/Slack/Teams), same per-team routing,
+    same testing-stage behaviour as `executor: human`. Approved = pass, rejected OR
+    timed out (in production) = fail."""
+    type: Literal["human"] = "human"
+    name: str
+    message: str                    # Jinja2-rendered against the normal step context
+    timeout_seconds: int = 300
+
+
+DeterministicCheckConfig = Annotated[
+    ShellCheckConfig | WebhookCheckConfig | HumanCheckConfig,
+    Field(discriminator="type"),
+]
 
 
 ParallelStepConfig.model_rebuild()
@@ -100,6 +151,7 @@ class StepConfig(BaseModel):
     retry: RetryConfig | None = None
     loop_until: LoopConfig | None = None
     grounding: GroundingConfig | None = None
+    deterministic_checks: list[DeterministicCheckConfig] = Field(default_factory=list)
 
     @field_validator("on_failure", mode="before")
     @classmethod
@@ -204,6 +256,7 @@ class LibraryStepConfig(BaseModel):
     retry: RetryConfig | None = None
     loop_until: LoopConfig | None = None
     grounding: GroundingConfig | None = None
+    deterministic_checks: list[DeterministicCheckConfig] = Field(default_factory=list)
 
     @field_validator("on_failure", mode="before")
     @classmethod

@@ -66,6 +66,7 @@ _COLUMN_MIGRATIONS = [
     ("pipeline_runs", "stage", "TEXT DEFAULT 'production'"),
     ("pipeline_steps", "grounding_score", "FLOAT"),
     ("pipeline_steps", "trust_report", "TEXT"),
+    ("pipeline_steps", "deterministic_passed", "BOOLEAN"),
 ]
 
 _INDEX_MIGRATIONS = [

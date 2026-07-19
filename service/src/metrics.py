@@ -47,6 +47,9 @@ class MetricsData:
     # (pipeline, step_name, agent, model, provider, outcome, count) — from StepFeedback
     grounding_scores: list[tuple[str, str, str | None, str | None, str | None, float]]
     # (pipeline, step_name, agent, model, provider, grounding_score) — from pipeline_steps, G non-null
+    deterministic_check_counts: list[tuple[str, str, str, int]]
+    # (pipeline, step_name, outcome["passed"|"failed"], count) — from pipeline_steps,
+    # deterministic_passed IS NOT NULL
 
 
 async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData:
@@ -192,6 +195,21 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         )
         grounding_scores = list(rows.all())
 
+        outcome_case = case(
+            (PipelineStep.deterministic_passed.is_(True), "passed"),
+            else_="failed",
+        )
+        rows = await session.execute(
+            select(
+                PipelineRun.pipeline_name, PipelineStep.step_name,
+                outcome_case.label("outcome"), func.count(),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.deterministic_passed.is_not(None), PipelineRun.stage == "production")
+            .group_by(PipelineRun.pipeline_name, PipelineStep.step_name, outcome_case)
+        )
+        deterministic_check_counts = list(rows.all())
+
     return MetricsData(
         run_counts=list(run_counts),
         runs_in_progress=runs_in_progress or 0,
@@ -203,6 +221,7 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         feedback_counts=list(feedback_counts),
         step_feedback_counts=step_feedback_counts,
         grounding_scores=grounding_scores,
+        deterministic_check_counts=deterministic_check_counts,
     )
 
 
@@ -300,6 +319,15 @@ class PorkCollector(Collector):
                 [pipeline, step_name, agent or "", model or "", provider or "", outcome], count
             )
         yield step_feedback_total
+
+        deterministic_total = CounterMetricFamily(
+            "pork_step_deterministic_check_total",
+            "Total deterministic-check step outcomes, by pipeline, step, and outcome",
+            labels=["pipeline", "step_name", "outcome"],
+        )
+        for pipeline, step_name, outcome, count in data.deterministic_check_counts:
+            deterministic_total.add_metric([pipeline, step_name, outcome], count)
+        yield deterministic_total
 
         yield self._pending_approvals_gauge()
 

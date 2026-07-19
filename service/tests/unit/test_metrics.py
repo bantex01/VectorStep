@@ -14,6 +14,7 @@ def _empty_metrics_data(
     feedback_counts=None,
     step_feedback_counts=None,
     grounding_scores=None,
+    deterministic_check_counts=None,
 ) -> MetricsData:
     return MetricsData(
         run_counts=[],
@@ -26,6 +27,7 @@ def _empty_metrics_data(
         feedback_counts=feedback_counts or [],
         step_feedback_counts=step_feedback_counts or [],
         grounding_scores=grounding_scores or [],
+        deterministic_check_counts=deterministic_check_counts or [],
     )
 
 

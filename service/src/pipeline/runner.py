@@ -24,14 +24,17 @@ from ..utils import utc_now
 from ..models.pipeline import (
     FanOutConfig,
     FanOutGroupConfig,
+    HumanCheckConfig,
     LoopConfig,
     ParallelGroupConfig,
     ParallelGroupInner,
     ParallelStepConfig,
     PipelineConfig,
     RetryConfig,
+    ShellCheckConfig,
     StepConfig,
     VerifierConfig,
+    WebhookCheckConfig,
 )
 from ..notifications.telegram import TelegramNotifier
 from .context import build_context
@@ -174,6 +177,7 @@ class StepResult:
     total_tokens: int = 0
     grounding_score: float | None = None       # G ∈ [0,1], or None when not computed
     trust_report: dict | None = None           # full TrustReport (§5e), or None
+    deterministic_passed: bool | None = None   # None = no checks declared; else all-checks-passed
 
 
 @dataclass
@@ -696,17 +700,39 @@ class PipelineRunner:
         grounding_score: float | None = None
         grounding_report: dict | None = None
         grounding_tokens = 0
+        deterministic_results: list[dict] | None = None
+        deterministic_passed: bool | None = None
         trust_report: dict | None = None
+        combined_trust = effective_confidence
+        gate_policy = "legacy_confidence"
+
         if step.grounding is not None:
             grounding_score, grounding_report, grounding_tokens = await self._run_grounding(
                 step=step, ctx=ctx, primary_output=primary_output, run_log=run_log,
             )
+            if step.grounding.enforce and grounding_score is not None:
+                combined_trust = min(combined_trust, grounding_score)
+                gate_policy = "trust_vector"
+
+        if step.deterministic_checks:
+            deterministic_results = await self._run_deterministic_checks(
+                step=step, ctx=ctx, run_log=run_log,
+            )
+            deterministic_passed = all(r["passed"] for r in deterministic_results)
+            gate_policy = "trust_vector"
+            if not deterministic_passed:
+                combined_trust = 0.0
+
+        if step.grounding is not None or step.deterministic_checks:
             trust_report = self._build_trust_report(
                 primary_confidence=primary_output.confidence,
                 effective_confidence=effective_confidence,
                 verifier_confidence=verifier_output.confidence if verifier_output else None,
                 grounding_score=grounding_score,
                 grounding_report=grounding_report,
+                deterministic_results=deterministic_results,
+                combined_trust=combined_trust,
+                gate_policy=gate_policy,
             )
 
         _in_tok, _out_tok = self._extract_usage(primary_output.raw_response)
@@ -716,14 +742,15 @@ class PipelineRunner:
             _out_tok += _vo
         _step_tokens = _in_tok + _out_tok + grounding_tokens
 
-        if effective_confidence < step.confidence_threshold:
+        if combined_trust < step.confidence_threshold:
             action = step.on_low_confidence
             logger.info(
-                "Step '%s' below confidence threshold (%.2f < %.2f): action=%s",
-                step.name, effective_confidence, step.confidence_threshold, action,
+                "Step '%s' below confidence threshold (trust %.2f < %.2f; self-report was %.2f): action=%s",
+                step.name, combined_trust, step.confidence_threshold, effective_confidence, action,
             )
-            conf_msg = (f"confidence {effective_confidence:.0%} < "
-                        f"threshold {step.confidence_threshold:.0%}")
+            conf_msg = (f"trust {combined_trust:.0%} < threshold {step.confidence_threshold:.0%}"
+                        + (f" (self-report was {effective_confidence:.0%})"
+                           if combined_trust != effective_confidence else ""))
             if action == "abort":
                 _log_event(run_log, "warn", "step_aborted",
                            f"Step aborted: {step.name} — {conf_msg}", step=step.name)
@@ -738,6 +765,7 @@ class PipelineRunner:
                     total_tokens=_step_tokens,
                     grounding_score=grounding_score,
                     trust_report=trust_report,
+                    deterministic_passed=deterministic_passed,
                 )
             if action == "escalate":
                 _log_event(run_log, "warn", "step_escalated",
@@ -753,6 +781,7 @@ class PipelineRunner:
                     total_tokens=_step_tokens,
                     grounding_score=grounding_score,
                     trust_report=trust_report,
+                    deterministic_passed=deterministic_passed,
                 )
 
         if not primary_output.proceed:
@@ -775,6 +804,7 @@ class PipelineRunner:
                 total_tokens=_step_tokens,
                 grounding_score=grounding_score,
                 trust_report=trust_report,
+                deterministic_passed=deterministic_passed,
             )
 
         duration_ms = int(time.time() * 1000) - start_ms
@@ -793,6 +823,7 @@ class PipelineRunner:
             total_tokens=_step_tokens,
             grounding_score=grounding_score,
             trust_report=trust_report,
+            deterministic_passed=deterministic_passed,
         )
 
     # ------------------------------------------------------------------
@@ -1511,6 +1542,110 @@ class PipelineRunner:
             }
             return g, report, _gi + _go
 
+    async def _run_deterministic_checks(
+        self,
+        step: StepConfig,
+        ctx: dict,
+        run_log: list,
+    ) -> list[dict]:
+        """Evaluate every declared deterministic check. Fail-closed: an execution
+        error, timeout, or evaluation exception counts as passed=False, never as
+        skipped — see §2 of SPEC-hard-gates.md for why this differs from grounding's
+        soft-fail philosophy."""
+        results: list[dict] = []
+        for check in step.deterministic_checks:
+            start = time.time()
+            try:
+                if check.type == "shell":
+                    passed, detail = await self._eval_shell_check(check, ctx)
+                elif check.type == "webhook":
+                    passed, detail = await self._eval_webhook_check(check, ctx)
+                else:
+                    passed, detail = await self._eval_human_check(check, ctx)
+            except Exception as exc:
+                passed, detail = False, f"check errored: {exc}"
+            duration_ms = int((time.time() - start) * 1000)
+            results.append({
+                "name": check.name, "type": check.type, "passed": passed,
+                "detail": detail, "duration_ms": duration_ms,
+            })
+            _log_event(
+                run_log, "info" if passed else "warn", "deterministic_check_ran",
+                f"Deterministic check {'passed' if passed else 'FAILED'}: "
+                f"{check.name} ({check.type}) — {detail}",
+                step=step.name,
+            )
+        return results
+
+    async def _eval_shell_check(self, check: ShellCheckConfig, ctx: dict) -> tuple[bool, str]:
+        proc = await asyncio.create_subprocess_shell(
+            check.run,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=check.timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False, f"timed out after {check.timeout_seconds}s"
+
+        result = stdout.decode(errors="replace").strip()
+        exit_code = proc.returncode
+        if exit_code != 0:
+            err = stderr.decode(errors="replace").strip()
+            return False, f"exit code {exit_code}: {(err or result)[:300]}"
+
+        passed = self._eval_when(check.expect, {**ctx, "result": result, "exit_code": exit_code})
+        return passed, f"exit 0, result={result[:200]!r}"
+
+    async def _eval_webhook_check(self, check: WebhookCheckConfig, ctx: dict) -> tuple[bool, str]:
+        env = Environment(undefined=Undefined)
+
+        def _render(obj: object) -> object:
+            if isinstance(obj, str):
+                return env.from_string(obj).render(**ctx)
+            if isinstance(obj, dict):
+                return {k: _render(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_render(item) for item in obj]
+            return obj
+
+        url = self._resolve_env(env.from_string(check.url).render(**ctx))
+        headers = {k: self._resolve_env(v) for k, v in check.headers.items()}
+        payload = _render(check.payload)
+
+        async with httpx.AsyncClient(timeout=check.timeout_seconds) as client:
+            resp = await client.request(check.method.upper(), url, json=payload, headers=headers)
+
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+
+        response = {"status_code": resp.status_code, "body": body}
+        passed = self._eval_when(check.expect, {**ctx, "response": response})
+        return passed, f"HTTP {resp.status_code}"
+
+    async def _eval_human_check(self, check: HumanCheckConfig, ctx: dict) -> tuple[bool, str]:
+        from ..executors.human import request_decision
+
+        message = Environment(undefined=Undefined).from_string(check.message).render(**ctx)
+        decision, _token = await request_decision(
+            message=message,
+            step_name=check.name,
+            pipeline_name=ctx.get("pipeline_name"),
+            run_id=ctx.get("pipeline_run_id"),
+            team=ctx.get("team"),
+            testing=ctx.get("_testing", False),
+            timeout=check.timeout_seconds,
+        )
+        if decision is None:
+            return False, "timed out awaiting human decision"
+        return decision, "approved by human" if decision else "rejected by human"
+
     @staticmethod
     def _build_trust_report(
         primary_confidence: float,
@@ -1518,20 +1653,29 @@ class PipelineRunner:
         verifier_confidence: float | None,
         grounding_score: float | None,
         grounding_report: dict | None,
+        deterministic_results: list[dict] | None,
+        combined_trust: float,
+        gate_policy: str,
     ) -> dict:
+        deterministic_passed = (
+            all(r["passed"] for r in deterministic_results) if deterministic_results else None
+        )
         return {
-            "version": 0,
-            "mode": "shadow",             # Phase 0: recorded, never enforced
+            "version": 1,   # bumped from 0 — D is now a real bool (was always null),
+                             # mode can be "enforced" (was always "shadow")
+            "mode": "enforced" if gate_policy == "trust_vector" else "shadow",
             "signals": {
-                "S": primary_confidence,            # raw self-report
-                "S_after_V": effective_confidence,  # existing effective_confidence (S combined w/ verifier)
-                "V": verifier_confidence,           # verifier/challenger confidence, or null
-                "G": grounding_score,               # NEW — grounding, or null when not computed
-                "C": None,                          # consistency — later phase
-                "D": None,                          # deterministic checks — later phase
+                "S": primary_confidence,
+                "S_after_V": effective_confidence,
+                "V": verifier_confidence,
+                "G": grounding_score,
+                "C": None,                      # consistency — still a later phase
+                "D": deterministic_passed,       # NEW — bool, or null if no checks declared
             },
-            "grounding": grounding_report,          # provenance + per-claim breakdown, or null
-            "gate": {"policy": "legacy_confidence"},  # the live gate is still the old float compare
+            "combined_trust": combined_trust,    # NEW — what the gate actually compared
+            "grounding": grounding_report,
+            "deterministic_checks": deterministic_results,   # NEW — full per-check detail, or null
+            "gate": {"policy": gate_policy},      # "legacy_confidence" | "trust_vector"
         }
 
     # ------------------------------------------------------------------
@@ -1650,6 +1794,7 @@ class PipelineRunner:
                 effective_confidence=result.effective_confidence,
                 grounding_score=result.grounding_score,
                 trust_report=json.dumps(result.trust_report) if result.trust_report else None,
+                deterministic_passed=result.deterministic_passed,
                 duration_ms=result.duration_ms,
                 executed_at=utc_now(),
                 artifacts=_artifact_refs,
@@ -1733,14 +1878,17 @@ class PipelineRunner:
     ) -> dict:
         output = step_result.output
         reasoning = output.reasoning or {} if output else {}
+        trust = step_result.trust_report or {}
+        combined_trust = trust.get("combined_trust", step_result.effective_confidence)
 
-        if step_result.effective_confidence is not None:
-            if step_result.effective_confidence < confidence_threshold:
-                escalation_reason = "low_confidence"
-            else:
-                escalation_reason = step_result.status
+        if combined_trust is not None and combined_trust < confidence_threshold:
+            escalation_reason = "low_confidence"
         else:
             escalation_reason = step_result.status
+
+        failed_checks = [
+            c["name"] for c in (trust.get("deterministic_checks") or []) if not c["passed"]
+        ]
 
         return {
             "escalation_reason": escalation_reason,
@@ -1748,6 +1896,10 @@ class PipelineRunner:
             "confidence_threshold": confidence_threshold,
             "contradicts": reasoning.get("contradicts", ""),
             "step_summary": output.summary if output else "",
+            "gate_policy": trust.get("gate", {}).get("policy", "legacy_confidence"),
+            "combined_trust": combined_trust,
+            "grounding_score": step_result.grounding_score,
+            "failed_checks": failed_checks,
         }
 
     async def _fire_step_failure_webhook(

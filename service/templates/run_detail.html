@@ -428,8 +428,12 @@
       {% set sig = item.trust.signals %}
       <div class="px-4 py-3 border-t border-zinc-800">
         <div class="flex items-center gap-2 mb-2">
-          <span class="text-xs font-semibold text-zinc-500 uppercase tracking-wide">Trust (shadow)</span>
-          <span class="text-[10px] text-zinc-600">recorded, not enforced</span>
+          <span class="text-xs font-semibold text-zinc-500 uppercase tracking-wide">
+            Trust {% if item.trust.mode == 'enforced' %}(enforced){% else %}(shadow){% endif %}
+          </span>
+          <span class="text-[10px] text-zinc-600">
+            {% if item.trust.mode == 'enforced' %}gated this decision{% else %}recorded, not enforced{% endif %}
+          </span>
         </div>
         <div class="flex flex-wrap items-center gap-4 text-xs">
           <span class="text-zinc-400">Self-report (S):
@@ -445,6 +449,15 @@
               <span class="font-mono text-zinc-600">n/a</span>
             {% endif %}
           </span>
+          {% if sig.D is not none %}
+          <span class="text-zinc-400">Checks (D):
+            <span class="font-mono {% if sig.D %}text-green-400{% else %}text-red-400{% endif %}">{{ "PASS" if sig.D else "FAIL" }}</span>
+          </span>
+          {% endif %}
+          {% if item.trust.mode == 'enforced' %}
+          <span class="text-zinc-400">Combined trust:
+            <span class="font-mono text-zinc-200">{{ "%.0f"|format(item.trust.combined_trust * 100) }}%</span></span>
+          {% endif %}
           {% if sig.G is not none and (sig.G - sig.S)|abs >= 0.2 %}
             <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800">S/G divergence</span>
           {% endif %}
@@ -462,6 +475,18 @@
         </div>
         {% elif item.trust.grounding and not item.trust.grounding.computed %}
         <p class="mt-1 text-xs text-zinc-600">Grounding not computed ({{ item.trust.grounding.reason or 'unavailable' }}).</p>
+        {% endif %}
+        {% if item.trust.deterministic_checks %}
+        <div class="mt-2 space-y-1">
+          {% for c in item.trust.deterministic_checks %}
+          <div class="flex items-start gap-2 text-xs">
+            <span class="shrink-0 mt-0.5 {% if c.passed %}text-green-400{% else %}text-red-400{% endif %}">
+              {% if c.passed %}✓{% else %}✗{% endif %}
+            </span>
+            <span class="text-zinc-300">{{ c.name }} <span class="text-zinc-600">({{ c.type }})</span><span class="text-zinc-600"> — {{ c.detail }}</span></span>
+          </div>
+          {% endfor %}
+        </div>
         {% endif %}
       </div>
       {% endif %}

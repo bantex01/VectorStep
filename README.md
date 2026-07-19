@@ -1541,7 +1541,8 @@ retry:
 | `verifier_confidence` | float, nullable | Verifier agent confidence (if verifier ran) |
 | `effective_confidence` | float | Confidence used for threshold gate (post-combination) |
 | `grounding_score` | float, nullable | Shadow-mode grounding score **G** ∈ [0,1] — the fraction of the step's load-bearing claims a blind grounding judge found supported by evidence in the step's own execution trace. NULL when grounding wasn't configured for the step, or when it had no trace to check against. Never gates — see [§16 Grounding (shadow mode)](#grounding-shadow-mode). |
-| `trust_report` | json, nullable | Per-step TrustReport: the trust vector `{S, S_after_V, V, G, C, D}` and, for grounding, the per-claim support breakdown. Only populated for steps with a `grounding:` block — recorded, never enforced. |
+| `trust_report` | json, nullable | Per-step TrustReport: the trust vector `{S, S_after_V, V, G, C, D}`, `combined_trust`, `gate.policy` (`legacy_confidence` / `trust_vector`), and — for grounding — the per-claim support breakdown, and — for deterministic checks — the full per-check detail. Populated for steps with a `grounding:` block and/or `deterministic_checks:`; `mode` is `"shadow"` when recorded-only or `"enforced"` when either mechanism actually participated in the gate. See [Deterministic checks & enforced grounding (Phase 1)](#deterministic-checks--enforced-grounding-phase-1). |
+| `deterministic_passed` | bool, nullable | Whole-step pass/fail across all declared deterministic checks — `True` only if every check passed. NULL when no `deterministic_checks:` were declared. Full per-check detail lives in `trust_report.deterministic_checks`. |
 | `duration_ms` | int | |
 | `executed_at` | datetime | |
 | `artifacts` | json, nullable | `{key: reference}` map — references are opaque strings pointing to artifact files on disk. Content is not stored in the DB. |
@@ -1673,6 +1674,7 @@ default, see §3c) contributes to none of them, including the metrics that query
 | `pork_pipeline_feedback_total` | counter | `pipeline`, `outcome` | Cumulative human accuracy feedback (§Accuracy feedback — the same data backing `/ui/pipelines/{name}/feedback`). `outcome` is `correct`/`partial`/`incorrect`. |
 | `pork_step_feedback_total` | counter | `pipeline`, `step_name`, `agent`, `model`, `provider`, `outcome` | Cumulative per-step human accuracy feedback (§Accuracy feedback), production-scoped. `outcome` is `correct`/`partial`/`incorrect`. |
 | `pork_step_grounding_score` | histogram | `pipeline`, `step_name`, `agent`, `model`, `provider` | Shadow-mode grounding score (G) distribution per step (§Grounding (shadow mode)), production-scoped (buckets: 0.1, 0.2, ..., 1.0, +Inf). Only steps with a `grounding:` block that produced a score contribute — NULL/not-computed steps are excluded, not padded as zero. |
+| `pork_step_deterministic_check_total` | counter | `pipeline`, `step_name`, `outcome` | Cumulative whole-step deterministic-check outcomes (§Deterministic checks & enforced grounding (Phase 1)), production-scoped. `outcome` is `passed`/`failed` — `passed` only when every declared check for that step run passed. Steps with no `deterministic_checks:` declared are excluded. |
 | `pork_human_approvals_pending` | gauge | `team` | Currently pending `human` step approvals, awaiting a response on whichever channel (Telegram/Slack/Teams) that team is routed to (§ "human — Human-in-the-Loop"). Unlike every other metric here this isn't derived from the database — pending approvals are in-memory only — so it reflects only this process's current state, not a historical/cumulative total. NULL team is bucketed as `""`. Always emits at least a zero-valued series so the metric doesn't disappear from dashboards when nothing's pending. Excludes `stage=testing` pending approvals, same as every other series on this page — see §3c. |
 
 Dollar-cost conversion is intentionally not provided — there's no per-model
@@ -1876,6 +1878,121 @@ steps:
 - **`next_step_context`** — unused, `""`.
 
 **Where it surfaces.** Each grounded step's expanded detail panel shows a **"Trust (shadow)"** widget: self-report (S) vs. verifier (V, if any) vs. grounding (G), a divergence flag when `|G − S| ≥ 0.2`, and the per-claim ✓/✗ breakdown with evidence. `pork_step_grounding_score` (see §Metrics) exposes the score distribution for Grafana.
+
+### Deterministic checks & enforced grounding (Phase 1)
+
+Phase 0 (above) only ever records G — it never gates. Phase 1 adds two **opt-in per
+step** mechanisms that can actually change a step's outcome: deterministic checks (D)
+and grounding-as-a-gate (`grounding.enforce: true`). A step that declares neither
+behaves byte-for-byte as it did before this feature existed — the legacy
+`effective_confidence < confidence_threshold` comparison is a permanent, first-class
+gate policy, not a deprecated code path.
+
+**The gate formula.**
+
+```
+combined_trust = effective_confidence                    # today's S after the verifier's veto, unchanged
+if grounding.enforce and G is not None:
+    combined_trust = min(combined_trust, G)               # G can only ever pull trust down
+if deterministic_checks declared and not all_passed:
+    combined_trust = 0.0                                  # a failed check is dispositive
+
+# the SAME comparison, SAME threshold, SAME on_low_confidence action as today:
+if combined_trust < step.confidence_threshold:
+    <on_low_confidence action>
+```
+
+There is deliberately no second, separately-tuned threshold for grounding (no
+`require_grounding: 0.7` or similar) — `grounding.enforce` reuses the step's *existing*
+`confidence_threshold`. A null G (grounding wasn't computed this run — no trace, or the
+grounding call itself soft-failed) never triggers the cap; `combined_trust` is simply
+left as whatever it already was, consistent with Phase 0's "no evidence trail to check"
+≠ "unsupported" rule.
+
+**Deterministic checks (D).** A step can declare a list of `deterministic_checks:`,
+each a pass/fail assertion the *runner* evaluates directly — no LLM involved. Three
+check types:
+
+- **`shell`** — run a command; evaluate its output.
+  ```yaml
+  deterministic_checks:
+    - type: shell
+      name: still_breaching
+      run: "curl -s 'http://prometheus/api/v1/query?query=rate(http_5xx[5m])' | jq '.data.result[0].value[1]'"
+      expect: "result | float > 0.02"     # bare Jinja2 bool expr — same convention as `when:`,
+                                          # NOT wrapped in {{ }}. Sees `result` (stdout, stripped)
+                                          # and `exit_code`, plus the normal step context.
+      timeout_seconds: 30                # default
+  ```
+- **`webhook`** — call a URL; evaluate the response. Same shape as the existing
+  `on_failure.webhook` config (`url`/`method`/`headers`/`payload`) — deliberately does
+  **not** call `raise_for_status`, since a check might legitimately expect a non-2xx
+  status (e.g. 404 = "does not exist").
+  ```yaml
+  deterministic_checks:
+    - type: webhook
+      name: dashboard_resolves
+      url: "https://grafana.example.com/api/dashboards/uid/{{ steps.investigate.dashboard_uid }}"
+      method: GET
+      expect: "response.status_code == 200"   # sees `response` = {status_code, body}
+  ```
+- **`human`** — ask a person to approve/reject, reusing the *existing* human-approval
+  subsystem (same channels, same per-team routing, same testing-stage behaviour as
+  `executor: human`).
+  ```yaml
+  deterministic_checks:
+    - type: human
+      name: sre_signoff
+      message: "Auto-remediate {{ steps.investigate.summary }}? Approve to proceed."
+      timeout_seconds: 300               # default
+  ```
+
+**Fail-closed, universally.** A check that cannot be evaluated — a shell command
+errors or times out, a webhook is unreachable, a human approval times out — is
+recorded as **failed**, never silently skipped. D is meant to be the strongest,
+most trustworthy signal in the trust vector, so an unanswerable check must not
+quietly vanish from the computation. (This is a deliberate divergence from
+grounding's soft-fail philosophy above — grounding failing soft just means "less
+signal"; a deterministic check failing soft would mean "we lost the ability to catch
+a real problem.")
+
+**Stage behaviour differs by check type.** `shell` and `webhook` checks are semantically
+*queries*, not outbound notifications, so — unlike `on_failure.webhook` — they are
+**not** muted by `stage: testing`; muting them would make it impossible to test check
+logic in a testing pipeline. `human`-type checks **do** inherit `executor: human`'s
+existing testing-stage behaviour (external channel not sent; the decision is made via
+P-Ork's own `/ui/approvals`; a timeout auto-approves).
+
+**Unsandboxed by design.** A `shell` check runs with the full environment and
+permissions of the P-Ork process — there is no sandboxing or resource-limiting. This is
+a deliberate choice for a single-operator, self-hosted deployment where the operator
+already fully controls pipeline YAML and already has executors capable of far more (MCP
+tools, OpenClaw). Revisit this if the deployment model ever becomes multi-tenant.
+
+**Grounding as a gate.** Add `enforce: true` to an existing `grounding:` block:
+
+```yaml
+steps:
+  - name: investigate
+    executor: gateway
+    executor_config: { agent: sre-investigation }
+    confidence_threshold: 0.75
+    grounding:
+      agent: grounding-judge
+      enforce: true                      # G now participates as a ceiling on combined_trust
+    deterministic_checks:
+      - type: shell
+        name: still_breaching
+        run: "curl -s '...' | jq '.data.result[0].value[1]'"
+        expect: "result | float > 0.02"
+```
+
+**Where it surfaces.** The run-detail Trust panel header now reads **"Trust
+(enforced)"** instead of "(shadow)" for any step where grounding or a deterministic
+check actually participated in the gate, with a `Combined trust` figure alongside S/V/G,
+a `Checks (D)` PASS/FAIL chip, and a per-check ✓/✗ list (name, type, detail).
+`pork_step_deterministic_check_total` (see §Metrics) exposes check outcomes for
+Grafana.
 
 ### Agent Library
 
