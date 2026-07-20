@@ -1,0 +1,139 @@
+# Sample: one step, every trust-vector knob turned on — a playground for watching
+# S/V/G/D/calibration interact, built to be run over and over via "Run now" so you
+# can bootstrap a calibration bucket without waiting for real alerts.
+#
+# The step itself is copied from otel-triage-verified.yaml's `first-line-triage`
+# (same agent, same prompt) — only the executor and the trust-vector config are new.
+#
+#   S — always on (primary_output.confidence, self-reported by the agent)
+#   V — verifier: mode: independent — a second agent (principal-sre) attempts the
+#       SAME triage blind, with no sight of first-line-support's answer.
+#   G — grounding: enforce: true — this step's claims get checked against its own
+#       tool-call trace. NOTE: if you've already seen this exact agent/step report
+#       G around 50% in shadow mode (recorded, not enforced), flipping enforce: true
+#       here means combined_trust gets CAPPED there — expect escalations. That's
+#       not a bug, that's the whole point of the enforced/shadow distinction; see
+#       README "Deterministic checks & enforced grounding (Phase 1)".
+#   D — deterministic_checks: a placeholder shell check that always passes. Flip
+#       `run: "exit 0"` to `run: "exit 1"` to watch D force combined_trust to 0.0
+#       and escalate regardless of how confident S/V/G are — D is dispositive.
+#       Swap it for something real (a Prometheus query, a webhook check against
+#       Jira for the ticket this step creates, etc.) once you're past bootstrapping.
+#   Calibration — enforce: true, on_uncalibrated: proceed. Every marked run feeds
+#       the (first-line-triage × gateway:first-line-support × model) bucket. Watch
+#       /ui/insights/steps — bins stay grey until a bin hits n_min (config.yaml
+#       calibration.n_min, default 20) marked outcomes IN THAT BIN. Mark each run's
+#       step Correct/Partial/Incorrect on its run-detail page after it completes.
+#
+# stage: production is deliberate and load-bearing — compute_calibration_buckets()
+# only counts production-stage runs. "Run now" runs regardless of stage, but if
+# this were "testing" your marks would never show up in the calibration bucket.
+
+name: first-line-triage-trust-vector-demo
+description: Single-step playground with verifier + enforced grounding + a deterministic check + calibration all turned on, for bootstrapping a calibration bucket via repeated Run now
+version: 1
+stage: production   # load-bearing — see note above
+
+trigger:
+  match:
+    source: demo   # irrelevant for "Run now" (which triggers by name), only matters for real webhooks
+
+vars:
+  confluence_space: SOC
+  confluence_space_url: https://alexfdalton.atlassian.net/wiki/spaces/SOC/
+  confluence_service_docs_folder: Service Documentation
+  confluence_service_doc_name: OTEL Collector
+  service_doc_schema: "Owner, Business Criticality, SLO (Scrape Duration), SLO (Availability), Dependencies (Upstream + Downstream), Failure Impact, Known Fragility"
+  jira_project: OC
+  jira_project_url: https://alexfdalton.atlassian.net/jira/software/projects/OC/
+
+context_template:
+  include:
+    - severity
+    - labels.service
+    - labels.environment
+    - summary
+
+steps:
+  - name: first-line-triage
+    executor: gateway
+    executor_config:
+      agent: first-line-support
+      session_key: "agent:first-line-support:{{pipeline_run_id}}"
+    confidence_threshold: 0.60
+    on_low_confidence: escalate
+    on_abort: notify
+    prompt_template: |
+      Alert severity: {{severity}}
+      Service: {{labels.service}}
+      Environment: {{labels.environment}}
+      Summary: {{summary}}
+
+      Confluence space: {{confluence_space}} ({{confluence_space_url}})
+      Service doc: "{{confluence_service_doc_name}}" in folder "{{confluence_service_docs_folder}}"
+      Expected doc sections: {{service_doc_schema}}
+      Jira project: {{jira_project}} ({{jira_project_url}})
+
+      Set confidence based on how completely you executed the tasks — did you
+      find the service doc, raise the ticket, and produce a useful brief?
+      Not a rating of the alert severity.
+
+      Once you have looked up the service doc and raised the Jira ticket,
+      respond with ONLY this JSON and nothing else:
+      {
+        "confidence": 0.0,
+        "doc_found": true,
+        "summary": "One sentence: what is happening and how serious",
+        "jira_ticket": "{{jira_project}}-<number>",
+        "next_step_context": "Focused investigation brief for the next step",
+        "reasoning": {
+          "supports": "Evidence that makes this alert credible",
+          "contradicts": "Evidence that suggests noise or false positive",
+          "assumptions": "What you are assuming in the absence of data"
+        }
+      }
+
+    # V — blind second opinion from a different agent.
+    verifier:
+      executor: gateway
+      executor_config:
+        agent: principal-sre
+      mode: independent
+      combination_strategy: veto
+      veto_floor: 0.5
+      trigger:
+        always: true
+
+    # G — enforced grounding (not shadow). Caps combined_trust at how well the
+    # claims are actually anchored in this step's own tool-call trace.
+    grounding:
+      enforce: true
+
+    # D — dispositive. Flip run: "exit 1" to see the force-to-zero/escalate path.
+    deterministic_checks:
+      - type: shell
+        name: demo_ground_truth
+        run: "exit 0"
+        expect: "exit_code == 0"
+
+    # Calibration — advisory-only until this bucket's bin hits n_min marked outcomes.
+    calibration:
+      enforce: true
+      on_uncalibrated: proceed
+
+notifications:
+  escalate:
+    - channel: telegram
+      template: |
+        ⚠️ Escalated: {{pipeline_name}}
+        Service: {{labels.service}} ({{labels.environment}})
+        Step: {{current_step}}
+        Reason: {{escalation_reason}}{% if confidence is not none %} — trust {{confidence | round(2)}} below threshold {{confidence_threshold}}{% endif %}
+        Summary: {{step_summary}}
+  notify:
+    - channel: telegram
+      template: |
+        Aborted: {{pipeline_name}}
+        Service: {{labels.service}}
+        Step: {{current_step}}
+        Summary: {{step_summary}}
