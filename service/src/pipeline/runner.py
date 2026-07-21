@@ -117,20 +117,30 @@ Return JSON only, no other text:
 #   {{primary_response}} — the primary agent's JSON output (no raw_response)
 #   {{agent_trace}}      — a formatted transcript of the primary's tool calls + results
 _GROUNDING_PROMPT_TEMPLATE = """\
-You are a grounding auditor. You are shown another agent's structured output and the \
-execution trace it produced (its tool calls and the results those tools returned). Your \
-ONLY job is to check whether the agent's load-bearing claims are supported by evidence \
-that actually appears in the trace. You cannot add outside knowledge, you cannot browse, \
-and you are NOT assessing whether the conclusion is correct — only whether it is anchored \
-to evidence that the trace actually returned.
+You are a grounding auditor. You are shown the task another agent was given, its \
+structured output, and the execution trace it produced (its tool calls and the results \
+those tools returned). Your ONLY job is to check whether the agent's load-bearing claims \
+are supported by evidence — either the original task input below, or a tool result in the \
+trace. You cannot add outside knowledge, you cannot browse, and you are NOT assessing \
+whether the conclusion is correct — only whether it is anchored to evidence actually \
+available to the agent.
 
 A "load-bearing claim" is an assertion the output depends on: a stated root cause, a \
 metric value, a causal link ("X because Y"), a referenced ticket/dashboard/id. Ignore \
 hedging, restatements of the task, and generic advice.
 
-For each load-bearing claim, decide if a tool result in the trace supports it. A claim \
-reached with zero supporting tool results — or whose supporting tool call errored — is \
-NOT supported.
+IMPORTANT — the task given to the agent below (severity, service, environment, summary, \
+and anything else it was handed as input) is GIVEN, trusted context, not something the \
+agent needed to discover. A claim that merely restates a fact already present in the \
+original task needs NO trace evidence — it was told, not found. Only claims that go \
+BEYOND what the agent was given — a root cause, a specific metric value read from a tool, \
+a causal link, a referenced ticket/dashboard id it created or looked up — need a \
+supporting tool result in the trace.
+
+Original task given to the primary agent:
+---
+{{primary_prompt}}
+---
 
 Primary agent's output:
 ---
@@ -1554,6 +1564,13 @@ class PipelineRunner:
 
         grounding_ctx = {
             **ctx,
+            # The original task the primary agent was given — same rendering the critic
+            # verifier already shares (see _run_verifier_impl). Without this, the judge
+            # has no way to tell "restates a fact it was given as input" (e.g. alert
+            # severity, service name) apart from "claims something it needed to discover"
+            # — it would mark input facts unsupported for lack of a matching tool result,
+            # which is a false "unsupported" verdict, not a real gap in the evidence.
+            "primary_prompt": Environment().from_string(step.prompt_template).render(**ctx),
             # `artifacts` is presentation content (e.g. a full markdown report), not a
             # claim itself — the load-bearing claims live in the structured fields
             # (summary, reasoning, and whatever extra fields the agent returns

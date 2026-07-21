@@ -122,6 +122,32 @@ async def test_run_grounding_extracts_score_and_claims():
     assert report["claims"] == [{"claim": "pool exhaustion", "supported": True, "evidence": "pool-wait metric"}]
 
 
+async def test_run_grounding_shares_original_task_prompt_with_judge():
+    """Without the original task, the judge can't tell 'restates a fact it was given
+    as input' (e.g. alert severity) apart from 'claims something it needed to discover'
+    — it would mark given facts unsupported for lack of a matching tool result."""
+    captured_ctx = {}
+
+    class _CapturingExecutor:
+        async def execute(self, step, ctx):
+            captured_ctx.update(ctx)
+            return LLMOutput(confidence=0.5, summary="x", next_step_context="", raw_response={})
+
+    runner = _runner(executors={"grounding_stub": lambda: _CapturingExecutor()})
+    step = StepConfig(
+        name="investigate", executor="gateway",
+        prompt_template="Alert severity: {{severity}}. Investigate.",
+        grounding=GroundingConfig(executor="grounding_stub"),
+    )
+    primary = _make_output(confidence=0.9, raw_response={"trace": _TOOL_TRACE})
+
+    await runner._run_grounding(
+        step=step, ctx={"severity": "critical"}, primary_output=primary, run_log=[],
+    )
+
+    assert captured_ctx["primary_prompt"] == "Alert severity: critical. Investigate."
+
+
 async def test_run_grounding_excludes_artifacts_but_keeps_other_extra_fields():
     """artifacts (e.g. a full markdown report) is presentation content, not a claim —
     excluding it keeps the grounding call cheap and stops the judge quoting a large

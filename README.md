@@ -1884,8 +1884,11 @@ steps:
 
 **The `grounding-judge` agent contract.** Grounding calls a gateway agent (configured on the **P-Ork Gateway**, not in this repo) whose only job is a constrained cross-reference — it cannot browse or add outside knowledge. It receives:
 
-1. the primary agent's structured output (`summary`, `next_step_context`, `reasoning`), and
-2. a formatted transcript of the primary agent's tool calls and results.
+1. the original task given to the primary agent (its rendered `prompt_template` — the same thing a `critic`-mode verifier sees, see §6),
+2. the primary agent's structured output (`summary`, `next_step_context`, `reasoning`), and
+3. a formatted transcript of the primary agent's tool calls and results.
+
+The judge's prompt is explicit that (1) is *given, trusted input* — a claim that merely restates a fact already present in the original task (alert severity, service name, environment, summary, ...) needs no trace evidence, because the agent was told it, not asked to discover it. Only claims that go beyond the given input (a root cause, a specific metric value, a causal link, a ticket/dashboard id it created or looked up) need a supporting tool result. Without (1), the judge has no way to tell "restates the input" apart from "claims something it needed to discover," and will mark plain input facts as unsupported — a false "unsupported" verdict, not a real evidence gap.
 
 ...and must return an `LLMOutput`-shaped JSON object where:
 
