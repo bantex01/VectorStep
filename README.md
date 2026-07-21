@@ -1873,9 +1873,12 @@ steps:
     executor_config: { agent: sre-investigation }
     grounding:
       agent: grounding-judge      # gateway agent; must be configured on the gateway
+      max_trace_chars: 4000       # optional — see below
 ```
 
-`grounding.agent` (default `grounding-judge`), `grounding.executor` (default `gateway`), `grounding.executor_config`, and `grounding.timeout_seconds` (default 120) are the only knobs — there's no threshold or cap here; that's Phase 1.
+`grounding.agent` (default `grounding-judge`), `grounding.executor` (default `gateway`), `grounding.executor_config`, `grounding.timeout_seconds` (default 120), and `grounding.max_trace_chars` (default 1500) are the only knobs — there's no threshold or cap here; that's Phase 1.
+
+**`max_trace_chars` — truncation, not a hallucination.** The transcript handed to the judge truncates each `tool_result`/agent-text event at `max_trace_chars`, with a trailing `…`. A claim whose supporting evidence lands past that cutoff is genuinely invisible to the judge — that shows up looking exactly like "the primary agent is making things up," when actually the trace transcript just didn't include the relevant part. Steps whose tools return long content (a full document read, a large query result) should raise this; the default (1500) is tuned for cheap, short evidence, not long reads.
 
 **Soft failure.** Like the verifier, a grounding call that errors or times out logs a warning and records `grounding_score = NULL` with the error captured in the report — it never breaks or delays the step.
 

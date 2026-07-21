@@ -1546,7 +1546,7 @@ class PipelineRunner:
         assert grounding is not None
 
         trace = (primary_output.raw_response or {}).get("trace") or []
-        transcript = self._format_trace_for_grounding(trace)
+        transcript = self._format_trace_for_grounding(trace, max_chars=grounding.max_trace_chars)
         if not transcript:
             # No evidence trail (non-gateway step, or a trace with no tool activity):
             # "nothing to check" is null, not zero.

@@ -153,6 +153,36 @@ async def test_run_grounding_excludes_artifacts_but_keeps_other_extra_fields():
     assert "recurring 500s" in captured_ctx["primary_response"]
 
 
+def test_grounding_config_max_trace_chars_defaults_to_1500():
+    assert GroundingConfig().max_trace_chars == 1500
+
+
+async def test_run_grounding_respects_custom_max_trace_chars():
+    """A claim whose supporting evidence lands past the truncation cutoff is invisible
+    to the judge — max_trace_chars lets a step raise that cutoff instead of silently
+    producing false 'unsupported' verdicts on long tool results."""
+    captured_ctx = {}
+
+    class _CapturingExecutor:
+        async def execute(self, step, ctx):
+            captured_ctx.update(ctx)
+            return LLMOutput(confidence=0.5, summary="x", next_step_context="", raw_response={})
+
+    runner = _runner(executors={"grounding_stub": lambda: _CapturingExecutor()})
+    long_content = "x" * 5000
+    trace = [{"type": "tool_result", "name": "confluence", "content": long_content, "is_error": False}]
+    step = StepConfig(
+        name="investigate", executor="gateway", prompt_template="",
+        grounding=GroundingConfig(executor="grounding_stub", max_trace_chars=4000),
+    )
+    primary = _make_output(confidence=0.9, raw_response={"trace": trace})
+
+    await runner._run_grounding(step=step, ctx={}, primary_output=primary, run_log=[])
+
+    assert "x" * 4000 in captured_ctx["agent_trace"]
+    assert "x" * 4001 not in captured_ctx["agent_trace"]
+
+
 async def test_run_grounding_clamps_score_to_unit_interval():
     judge_output = LLMOutput(confidence=1.4, summary="x", next_step_context="", raw_response={})
     runner = _runner(executors={"grounding_stub": lambda: _StubExecutor(judge_output)})

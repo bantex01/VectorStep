@@ -60,6 +60,12 @@ class GroundingConfig(BaseModel):
                              # byte-identical to before this spec. True = G participates
                              # in the gate as a ceiling on combined_trust (§4). Opt-in,
                              # per step — existing grounding: blocks are unaffected.
+    max_trace_chars: int = 1500   # per tool_result/text event, before truncation with "…".
+                             # A claim whose supporting evidence lands past this cutoff is
+                             # invisible to the judge — raise this for steps with long tool
+                             # outputs (e.g. full document reads) if grounding is producing
+                             # false "unsupported" verdicts because of truncation rather than
+                             # an actual hallucination.
 
 
 class CalibrationConfig(BaseModel):
