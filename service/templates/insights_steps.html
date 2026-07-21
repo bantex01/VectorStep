@@ -446,10 +446,10 @@
               ? bins.map(b => {
                   const mid = (b.lo + b.hi) / 2;
                   const cellCls = !b.validated
-                    ? 'bg-zinc-800 text-zinc-600'
+                    ? 'bg-zinc-800 ring-1 ring-inset ring-zinc-700'
                     : Math.abs(b.mean_label - mid) >= 0.15
-                      ? 'bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800'
-                      : 'bg-zinc-800 text-zinc-400';
+                      ? 'bg-amber-950 ring-1 ring-inset ring-amber-800'
+                      : 'bg-green-950 ring-1 ring-inset ring-green-800';
                   const title = b.validated
                     ? `${Math.round(b.lo * 100)}-${Math.round(b.hi * 100)}%: predicted ~${Math.round(mid * 100)}%, actual ${Math.round(b.mean_label * 100)}% (n=${b.n})`
                     : `${Math.round(b.lo * 100)}-${Math.round(b.hi * 100)}%: not yet validated (n=${b.n})`;
