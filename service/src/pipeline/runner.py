@@ -1618,6 +1618,8 @@ class PipelineRunner:
             report = {
                 "computed": True,
                 "agent": grounding.agent,
+                "model": out.model,
+                "provider": out.provider,
                 "score": g,
                 "summary": out.summary,
                 "claims": claims if isinstance(claims, list) else [],
@@ -1873,6 +1875,13 @@ class PipelineRunner:
                 parsed_output=result.output.model_dump_json(exclude={"raw_response"}) if result.output else None,
                 verifier_output=result.verifier_output.model_dump_json(exclude={"raw_response"}) if result.verifier_output else None,
                 verifier_mode=step.verifier.mode if step.verifier and result.verifier_output else None,
+                verifier_agent=(
+                    f"{step.verifier.executor}:{step.verifier.executor_config.get('agent')}"
+                    if step.verifier and result.verifier_output and step.verifier.executor_config.get("agent")
+                    else None
+                ),
+                verifier_model=result.verifier_output.model if result.verifier_output else None,
+                verifier_provider=result.verifier_output.provider if result.verifier_output else None,
                 status=result.status,
                 primary_confidence=result.output.confidence if result.output else None,
                 verifier_confidence=result.verifier_output.confidence if result.verifier_output else None,

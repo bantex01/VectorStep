@@ -107,6 +107,8 @@ async def test_run_grounding_extracts_score_and_claims():
         next_step_context="",
         reasoning={"claims": [{"claim": "pool exhaustion", "supported": True, "evidence": "pool-wait metric"}]},
         raw_response={},
+        model="gpt-5",
+        provider="azure",
     )
     runner = _runner(executors={"grounding_stub": lambda: _StubExecutor(judge_output)})
     step = StepConfig(
@@ -120,6 +122,9 @@ async def test_run_grounding_extracts_score_and_claims():
     assert g == 0.9
     assert report["computed"] is True
     assert report["claims"] == [{"claim": "pool exhaustion", "supported": True, "evidence": "pool-wait metric"}]
+    assert report["agent"] == "grounding-judge"
+    assert report["model"] == "gpt-5"
+    assert report["provider"] == "azure"
 
 
 async def test_run_grounding_shares_original_task_prompt_with_judge():

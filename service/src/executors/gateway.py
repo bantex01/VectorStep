@@ -55,6 +55,14 @@ class GatewayExecutor(BaseExecutor):
         session_key   — Jinja2 template for session key; defaults to
                         "pipeline:{{pipeline_run_id}}:{{step_name}}"
         timeout_seconds — per-request timeout (default: 1200)
+        trace_max_chars — overrides the Gateway's limits.trace_tool_result_max_chars
+                        (default 3000) for this step's tool_result trace events only.
+                        Only affects what's recorded/streamed for observability — the
+                        agent's own conversation always sees the full tool output
+                        regardless of this setting. Raise it on steps whose tools
+                        return long content (a full document read, a large query
+                        result) if grounding or a human is drawing false conclusions
+                        from a trace that got cut off before the real evidence.
     """
 
     def __init__(self, url: str, token: str, timeout_seconds: int = 1200):
@@ -79,6 +87,7 @@ class GatewayExecutor(BaseExecutor):
 
         model_override = step.executor_config.get("model")
         thinking_level = step.executor_config.get("thinking_level")
+        trace_max_chars = step.executor_config.get("trace_max_chars")
 
         logger.info(
             "Gateway execute: step=%s agent=%s session=%s",
@@ -101,6 +110,7 @@ class GatewayExecutor(BaseExecutor):
                 timeout=timeout,
                 model_override=model_override,
                 thinking_level=thinking_level,
+                trace_max_chars=trace_max_chars,
                 run_id=context.get("pipeline_run_id", ""),
                 step_name=step.name,
             )
@@ -130,6 +140,7 @@ class GatewayExecutor(BaseExecutor):
         timeout: int,
         model_override: str | None,
         thinking_level: str | None,
+        trace_max_chars: int | None = None,
         run_id: str = "",
         step_name: str = "",
     ) -> dict:
@@ -170,6 +181,8 @@ class GatewayExecutor(BaseExecutor):
                     params["model"] = model_override
                 if thinking_level:
                     params["thinkingLevel"] = thinking_level
+                if trace_max_chars:
+                    params["traceToolResultMax"] = trace_max_chars
 
                 params = inject_traceparent(params)
 

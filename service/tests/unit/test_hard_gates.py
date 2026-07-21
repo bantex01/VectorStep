@@ -24,6 +24,8 @@ from src.models.pipeline import (
     ShellCheckConfig,
     StepConfig,
     TriggerConfig,
+    VerifierConfig,
+    VerifierTriggerConfig,
     WebhookCheckConfig,
 )
 from src.pipeline.runner import PipelineRunner
@@ -537,6 +539,74 @@ async def test_deterministic_passed_persisted(tmp_path):
     assert plain_row.deterministic_passed is None
 
 
+async def test_verifier_agent_model_provider_persisted_to_db(tmp_path):
+    """Which agent/model actually ran the verifier must be a real per-run column, not
+    something read back out of the pipeline's current config — the config can drift
+    from what a historical run actually executed."""
+    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
+    await create_tables()
+    sf = get_session_factory()
+
+    primary_output = LLMOutput(
+        confidence=0.9, summary="ok", next_step_context="", raw_response={},
+        model="claude-sonnet-5", provider="anthropic",
+    )
+    verifier_output = LLMOutput(
+        confidence=0.8, summary="ok", next_step_context="", raw_response={},
+        model="gpt-5", provider="azure",
+    )
+    runner = PipelineRunner(
+        executors={
+            "gateway": lambda: _StubExecutor(primary_output),
+            "verifier_stub": lambda: _StubExecutor(verifier_output),
+        },
+        session_factory=sf,
+    )
+    step = StepConfig(
+        name="investigate", executor="gateway", prompt_template="",
+        verifier=VerifierConfig(
+            executor="verifier_stub",
+            executor_config={"agent": "principal-sre"},
+            trigger=VerifierTriggerConfig(always=True),
+        ),
+    )
+    pipeline = PipelineConfig(name="p", trigger=TriggerConfig(), steps=[step])
+
+    result = await runner.run(pipeline=pipeline, normalised=_make_normalised(), run_id="run-v1")
+    assert result.status == "completed"
+
+    async with sf() as session:
+        row = (await session.execute(
+            select(PipelineStep).where(PipelineStep.run_id == "run-v1")
+        )).scalar_one()
+
+    assert row.verifier_agent == "verifier_stub:principal-sre"
+    assert row.verifier_model == "gpt-5"
+    assert row.verifier_provider == "azure"
+
+
+async def test_no_verifier_leaves_verifier_attribution_columns_null(tmp_path):
+    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
+    await create_tables()
+    sf = get_session_factory()
+
+    primary_output = _make_output(confidence=0.9)
+    runner = PipelineRunner(executors={"gateway": lambda: _StubExecutor(primary_output)}, session_factory=sf)
+    step = StepConfig(name="investigate", executor="gateway", prompt_template="")
+    pipeline = PipelineConfig(name="p", trigger=TriggerConfig(), steps=[step])
+
+    await runner.run(pipeline=pipeline, normalised=_make_normalised(), run_id="run-v2")
+
+    async with sf() as session:
+        row = (await session.execute(
+            select(PipelineStep).where(PipelineStep.run_id == "run-v2")
+        )).scalar_one()
+
+    assert row.verifier_agent is None
+    assert row.verifier_model is None
+    assert row.verifier_provider is None
+
+
 # ---------------------------------------------------------------------------
 # 9. Migration
 # ---------------------------------------------------------------------------
@@ -553,6 +623,9 @@ async def test_deterministic_passed_column_exists_after_create_tables(tmp_path):
         columns = {row[1] for row in columns_result.fetchall()}
 
     assert "deterministic_passed" in columns
+    assert "verifier_agent" in columns
+    assert "verifier_model" in columns
+    assert "verifier_provider" in columns
 
 
 # ---------------------------------------------------------------------------

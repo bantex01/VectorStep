@@ -417,7 +417,12 @@
       {% endif %}
       {% if item.verifier_pretty %}
       <div class="px-4 py-4">
-        <p class="text-xs text-zinc-500 uppercase tracking-wide mb-2">{{ item.verifier_label }}</p>
+        <p class="text-xs text-zinc-500 uppercase tracking-wide mb-2">
+          {{ item.verifier_label }}
+          {% if item.step.verifier_agent %}
+            <span class="normal-case text-zinc-600 font-normal">— {{ item.step.verifier_agent }}{% if item.step.verifier_model %} · {{ item.step.verifier_model }}{% endif %}</span>
+          {% endif %}
+        </p>
         <pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.verifier_pretty }}</pre>
       </div>
       {% endif %}
@@ -442,6 +447,9 @@
           <span class="text-zinc-400">Verifier (V):
             <span class="font-mono text-zinc-200">{{ "%.0f"|format(sig.V * 100) }}%</span>
             {% if sig.V_mode %}<span class="text-zinc-600">({{ sig.V_mode }})</span>{% endif %}
+            {% if item.step.verifier_agent %}
+              <span class="text-zinc-600">— {{ item.step.verifier_agent }}{% if item.step.verifier_model %} · {{ item.step.verifier_model }}{% endif %}</span>
+            {% endif %}
           </span>
           {% endif %}
           <span class="text-zinc-400">Grounding (G):
@@ -449,6 +457,9 @@
               <span class="font-mono {% if sig.G >= 0.7 %}text-green-400{% elif sig.G >= 0.4 %}text-amber-400{% else %}text-red-400{% endif %}">{{ "%.0f"|format(sig.G * 100) }}%</span>
             {% else %}
               <span class="font-mono text-zinc-600">n/a</span>
+            {% endif %}
+            {% if item.trust.grounding and item.trust.grounding.agent %}
+              <span class="text-zinc-600">— {{ item.trust.grounding.agent }}{% if item.trust.grounding.model %} · {{ item.trust.grounding.model }}{% endif %}</span>
             {% endif %}
           </span>
           {% if sig.D is not none %}

@@ -832,6 +832,13 @@ only overrides when the verifier scores *below* `veto_floor`). This is a permane
 invariant, not an emergent property of the current code — see `_combine_confidence` and
 its regression test in `tests/unit/test_confidence.py`.
 
+**Which agent/model ran the verifier is persisted per-run** — `pipeline_steps.verifier_agent`
+(`executor:agent`, mirroring the primary's `agent` column), `verifier_model`, and
+`verifier_provider` (§14). This is deliberately a real column, not something read back out of
+the *current* pipeline config at display time — a pipeline's `verifier.executor_config.agent`
+can change between when a run executed and when someone looks at it later, and the audit
+trail should reflect what actually ran, not what the config happens to say today.
+
 ---
 
 ### 7. Parallel Groups
@@ -1054,6 +1061,7 @@ Executors are registered by name in `src/executors/__init__.py` and referenced b
 | `model` | No | Model override string, e.g. `anthropic/claude-sonnet-4-6`, `openrouter/...`, `ollama-cloud/...` |
 | `thinking_level` | No | Thinking level override: `low\|medium\|high` etc. |
 | `timeout_seconds` | No | Per-request timeout override (default: 1200) |
+| `trace_max_chars` | No | Overrides the Gateway's `limits.trace_tool_result_max_chars` (default 3000) for this step's `tool_result` trace events only — sent as `traceToolResultMax` on the agent request. Only affects the trace copy recorded/streamed for observability (and what `grounding.max_trace_chars` has available to hand the judge, see §16) — the agent's own conversation always sees the full, untruncated tool output regardless of this setting. Raise it on steps whose tools return long content if grounding or a human reviewing the trace is drawing false conclusions from evidence that was cut off before the Gateway ever sent it to P-Ork. |
 
 Requires `executors.gateway.url` (WebSocket) and `executors.gateway.rest_url` (REST) in `config.yaml`.
 
@@ -1560,7 +1568,10 @@ retry:
 | `duration_ms` | int | |
 | `executed_at` | datetime | |
 | `artifacts` | json, nullable | `{key: reference}` map — references are opaque strings pointing to artifact files on disk. Content is not stored in the DB. |
-| `agent_trace` | json, nullable | Ordered execution trace from the P-Ork Gateway executor — array of `{type, ...}` objects. `type` is one of: `llm_call` (iteration marker), `thinking` (extended thinking block), `text` (response text), `tool_call` (MCP tool invoked with arguments), `tool_result` (MCP tool response, truncated at 3 000 chars). NULL for all other executors (`openclaw`, `human`, `webhook`). |
+| `agent_trace` | json, nullable | Ordered execution trace from the P-Ork Gateway executor — array of `{type, ...}` objects. `type` is one of: `llm_call` (iteration marker), `thinking` (extended thinking block), `text` (response text), `tool_call` (MCP tool invoked with arguments), `tool_result` (MCP tool response). **Not truncated** — the full content the Gateway returns on its final `ok` frame is stored and rendered as-is; only the ephemeral *live* SSE tail (§Live tail) truncates content (at 200 chars) for a fast in-progress preview, never the persisted record. If a `tool_result`'s content looks cut off on a *completed* run, that truncation happened upstream (the Gateway server or the MCP tool itself), not in this column. NULL for all other executors (`openclaw`, `human`, `webhook`). |
+| `verifier_agent` | str, nullable | `executor:agent-name` for the verifier call (mirrors `agent` above), e.g. `gateway:principal-sre`. NULL if no verifier ran, or for rows persisted before this column existed. |
+| `verifier_model` | str, nullable | Actual model used by the verifier call, from executor metadata. NULL if no verifier ran. |
+| `verifier_provider` | str, nullable | Gateway provider key for the verifier call (gateway executor only). NULL if no verifier ran or the verifier used a non-gateway executor. |
 | `input_tokens` | int, nullable | Input tokens consumed by this step's primary executor call. Populated for `gateway` steps; NULL for others. For parallel/fan-out branches, each branch row has its own token count. |
 | `output_tokens` | int, nullable | Output tokens produced by this step's primary executor call. |
 
@@ -1880,6 +1891,8 @@ steps:
 
 **`max_trace_chars` — truncation, not a hallucination.** The transcript handed to the judge truncates each `tool_result`/agent-text event at `max_trace_chars`, with a trailing `…`. A claim whose supporting evidence lands past that cutoff is genuinely invisible to the judge — that shows up looking exactly like "the primary agent is making things up," when actually the trace transcript just didn't include the relevant part. Steps whose tools return long content (a full document read, a large query result) should raise this; the default (1500) is tuned for cheap, short evidence, not long reads.
 
+**There are two independent truncation points, and raising this one alone may not be enough.** `grounding.max_trace_chars` only controls how much of the trace P-Ork *already has* it hands to the judge. The Gateway itself caps each `tool_result` event's content **before P-Ork ever receives it** (`limits.trace_tool_result_max_chars`, default 3000, in the Gateway's own config) — if a tool result was truncated there, no `grounding.max_trace_chars` setting on the P-Ork side can recover the missing part, because it was never sent. Use the primary step's `executor_config.trace_max_chars` (§8, `gateway` executor) to raise the Gateway-side cap for that step, *then* raise `grounding.max_trace_chars` here to match — otherwise you've just moved the same cutoff from the judge's transcript-formatting step to the Gateway's own capture step. Either cutoff being too low produces the identical symptom (a claim that looks unsupported but genuinely wasn't), so if grounding keeps flagging claims you believe are backed by real evidence, check both.
+
 **Soft failure.** Like the verifier, a grounding call that errors or times out logs a warning and records `grounding_score = NULL` with the error captured in the report — it never breaks or delays the step.
 
 **The `grounding-judge` agent contract.** Grounding calls a gateway agent (configured on the **P-Ork Gateway**, not in this repo) whose only job is a constrained cross-reference — it cannot browse or add outside knowledge. It receives:
@@ -1897,7 +1910,9 @@ The judge's prompt is explicit that (1) is *given, trusted input* — a claim th
 - **`reasoning.claims`** — a list of `{ "claim": str, "supported": bool, "evidence": str }`, one per load-bearing claim identified.
 - **`next_step_context`** — unused, `""`.
 
-**Where it surfaces.** Each grounded step's expanded detail panel shows a **"Trust (shadow)"** widget: self-report (S) vs. verifier (V, if any) vs. grounding (G), a divergence flag when `|G − S| ≥ 0.2`, and the per-claim ✓/✗ breakdown with evidence. `pork_step_grounding_score` (see §Metrics) exposes the score distribution for Grafana.
+The persisted `trust_report.grounding` also records **which** agent/model actually judged this run — `agent` (from `grounding.agent` config), plus `model`/`provider` read straight from the judge's own response metadata (both `null` when grounding didn't compute, e.g. an error or no trace).
+
+**Where it surfaces.** Each grounded step's expanded detail panel shows a **"Trust (shadow)"** widget: self-report (S) vs. verifier (V, if any, with its own agent/model shown alongside) vs. grounding (G, with its judging agent/model shown alongside), a divergence flag when `|G − S| ≥ 0.2`, and the per-claim ✓/✗ breakdown with evidence. `pork_step_grounding_score` (see §Metrics) exposes the score distribution for Grafana.
 
 ### Deterministic checks & enforced grounding (Phase 1)
 

@@ -49,6 +49,9 @@ class PipelineStep(Base):
     parsed_output: Mapped[str | None] = mapped_column(Text, nullable=True)       # JSON
     verifier_output: Mapped[str | None] = mapped_column(Text, nullable=True)     # JSON
     verifier_mode: Mapped[str | None] = mapped_column(String, nullable=True)    # "critic" | "independent" (new rows); "reviewer" | "challenger" (historical rows, pre-SPEC-verifier-semantics.md)
+    verifier_agent: Mapped[str | None] = mapped_column(String, nullable=True)    # "executor:agent", mirrors `agent` above; NULL for runs before this column existed or steps with no verifier
+    verifier_model: Mapped[str | None] = mapped_column(String, nullable=True)   # actual model used by the verifier call (from response metadata)
+    verifier_provider: Mapped[str | None] = mapped_column(String, nullable=True)  # gateway provider key (gateway executor only)
     status: Mapped[str] = mapped_column(String, nullable=False)
     primary_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     verifier_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
