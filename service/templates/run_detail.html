@@ -463,7 +463,39 @@
           {% if sig.G is not none and (sig.G - sig.S)|abs >= 0.2 %}
             <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800">S/G divergence</span>
           {% endif %}
+          {% if item.trust.calibration %}
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
+              {% if item.trust.calibration.validated %}bg-indigo-950 text-indigo-400 ring-1 ring-inset ring-indigo-800
+              {% else %}bg-zinc-800 text-zinc-500 ring-1 ring-inset ring-zinc-700{% endif %}">
+              {% if item.trust.calibration.validated %}calibrated{% else %}uncalibrated{% endif %}
+            </span>
+          {% endif %}
         </div>
+        {% if item.trust.calibration %}
+        {% set cal = item.trust.calibration %}
+        <p class="mt-1 text-xs text-zinc-500">
+          {% if cal.validated %}
+            <span class="text-indigo-400">Combined trust came from calibration, not the raw score above:</span>
+            this step/agent/model has actually been correct {{ "%.0f"|format(cal.calibrated * 100) }}% of the time
+            when it self-reports {{ "%.0f"|format(cal.bin.lo * 100) }}–{{ "%.0f"|format(cal.bin.hi * 100) }}%
+            confidence ({{ cal.n }} marked outcomes) — that measured figure replaced the raw
+            {{ "%.0f"|format(cal.raw * 100) }}% self-report/verifier score, <em>before</em> grounding and
+            deterministic checks applied on top of it.
+          {% elif cal.on_uncalibrated == 'escalate' %}
+            <span class="text-red-400">Combined trust was forced to 0% by calibration, not the raw score above:</span>
+            this step/agent/model doesn't have enough track record yet
+            ({{ cal.n }}/{{ cal.n_min }} marked outcomes) to calibrate, and
+            <code class="text-zinc-400">on_uncalibrated: escalate</code> means an unvalidated
+            configuration is treated as untrustworthy on purpose — rather than falling back to the raw
+            {{ "%.0f"|format(cal.raw * 100) }}% self-report/verifier score.
+          {% else %}
+            Calibration is configured for this step but not yet validated
+            ({{ cal.n }}/{{ cal.n_min }} marked outcomes for this exact agent/model combination) —
+            the raw self-report/verifier score above was carried forward unchanged
+            (<code class="text-zinc-400">on_uncalibrated: proceed</code>).
+          {% endif %}
+        </p>
+        {% endif %}
         {% if item.trust.grounding and item.trust.grounding.claims %}
         <div class="mt-2 space-y-1">
           {% for c in item.trust.grounding.claims %}
