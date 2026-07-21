@@ -628,6 +628,31 @@ async def test_deterministic_passed_column_exists_after_create_tables(tmp_path):
     assert "verifier_provider" in columns
 
 
+async def test_verifier_attribution_columns_migrate_onto_a_preexisting_db(tmp_path):
+    """Reproduces a real failure: a DB created before verifier_agent/model/provider
+    existed raised 'no such column' on every run-detail page load after upgrading,
+    because Base.metadata.create_all() only creates missing TABLES — it never adds a
+    new column to a table that already exists. _COLUMN_MIGRATIONS is what's actually
+    responsible for that, and it's easy to add a column to the ORM model (db/models.py)
+    while forgetting to also register it here — this test catches exactly that."""
+    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
+    await create_tables()
+
+    sf = get_session_factory()
+    async with sf() as session:
+        conn = await session.connection()
+        for col in ("verifier_agent", "verifier_model", "verifier_provider"):
+            await conn.exec_driver_sql(f"ALTER TABLE pipeline_steps DROP COLUMN {col}")
+        await session.commit()
+
+    # The exact re-entry point a service restart/upgrade hits against an existing DB.
+    await create_tables()
+
+    async with sf() as session:
+        result = await session.execute(select(PipelineStep))
+        assert result.scalars().all() == []
+
+
 # ---------------------------------------------------------------------------
 # 10. Metric
 # ---------------------------------------------------------------------------
