@@ -82,6 +82,7 @@ def _log_event(run_log: list, level: str, event: str, msg: str, **extra) -> None
 # Rendered with the same Jinja2 context as the primary step, plus:
 #   {{primary_prompt}}   — the rendered prompt that was sent to the primary agent
 #   {{primary_response}} — the primary agent's full JSON response text
+#   {{agent_trace}}      — a formatted transcript of the primary's tool calls + results
 _VERIFIER_PROMPT_TEMPLATE = """\
 You are an independent reviewer assessing the quality and confidence of another \
 agent's analysis.
@@ -96,8 +97,17 @@ Primary agent's response:
 {{primary_response}}
 ---
 
+Execution trace (the primary agent's actual tool calls and results):
+---
+{{agent_trace}}
+---
+
 Review the reasoning above. Assess whether the primary agent's conclusion is \
-well-supported, considers the right evidence, and has appropriate confidence.
+well-supported, considers the right evidence, and has appropriate confidence. Check \
+specific factual claims (a ticket was created, a document was read, a value was found) \
+against the execution trace above — a claim with no matching tool call or result is a \
+real gap, not just a stylistic concern. If the trace is empty, say so explicitly rather \
+than guessing at plausibility.
 
 Return JSON only, no other text:
 {
@@ -1509,12 +1519,20 @@ class PipelineRunner:
                 prompt_template=_VERIFIER_PROMPT_TEMPLATE,
             )
             primary_prompt = Environment().from_string(step.prompt_template).render(**ctx)
+            # Without the trace, a critic can only judge the primary's ACCOUNT of its
+            # work (its self-reported summary/reasoning), never the work itself — it
+            # can't tell "claims a ticket was created" apart from "actually created one".
+            # Same transcript-building grounding already uses, so a claim invisible to
+            # one is invisible to the other for the same reason (see grounding.max_trace_chars).
+            trace = (primary_output.raw_response or {}).get("trace") or []
+            transcript = self._format_trace_for_grounding(trace, max_chars=verifier.max_trace_chars)
             verifier_ctx = {
                 **ctx,
                 "primary_prompt": primary_prompt,
                 "primary_response": json.dumps(
                     primary_output.model_dump(exclude={"raw_response"}), indent=2
                 ),
+                "agent_trace": transcript,
             }
 
         try:

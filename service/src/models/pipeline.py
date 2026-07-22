@@ -31,6 +31,8 @@ class VerifierConfig(BaseModel):
     combination_strategy: Literal["minimum", "veto"] = "minimum"
     veto_floor: float = 0.60        # only used when combination_strategy is "veto"
     trigger: VerifierTriggerConfig = Field(default_factory=VerifierTriggerConfig)
+    max_trace_chars: int = 1500     # only used in "critic" mode — see GroundingConfig.max_trace_chars,
+                                     # same truncation caveat applies (per tool_result/text event)
 
     @field_validator("mode", mode="before")
     @classmethod

@@ -779,13 +779,15 @@ Two verifier **modes** are available:
 
 | Mode | Behaviour |
 |---|---|
-| `critic` (default) | Verifier receives the primary agent's prompt and full response — critiques the reasoning. Its *agreement* correlates with the primary's own errors and carries little signal; its *disagreement* is what's informative. |
-| `independent` | Verifier receives only the original task prompt — executes the same task blind, with no sight of the primary's answer. Its agreement is uncorrelated with the primary's errors, so it's the stronger corroboration signal — prefer it for steps that authorise a side effect. |
+| `critic` (default) | Verifier receives the primary agent's prompt, full response, **and a formatted transcript of the primary's own tool calls** (same trace grounding uses) — critiques the reasoning *and* can check specific claims ("a ticket was created", "a document was read") against actual evidence rather than just judging plausibility. Its *agreement* correlates with the primary's own errors and carries little signal; its *disagreement* is what's informative. |
+| `independent` | Verifier receives only the original task prompt — executes the same task blind, with no sight of the primary's answer or its trace. Its agreement is uncorrelated with the primary's errors, so it's the stronger corroboration signal — prefer it for steps that authorise a side effect. |
 
 > **Renamed from `reviewer`/`challenger`.** Those names still work — parsed as permanent
 > aliases for `critic`/`independent` respectively — so no existing pipeline needs to
 > change. New pipelines should prefer the new names; they describe the *role*
 > (correlated critique vs. blind corroboration) rather than an adversarial framing.
+
+**`verifier.max_trace_chars`** (default 1500, `critic` mode only) caps the transcript the same way `grounding.max_trace_chars` does — same truncation caveat applies: a claim whose evidence lands past the cutoff is invisible to the critic, and if the Gateway itself already truncated that tool result before P-Ork received it (`executor_config.trace_max_chars`, §8), no amount of raising this setting recovers it. See the "two independent truncation points" note under Grounding (§16) — it applies identically here.
 
 See `samples/pipelines/trust-vector-remediation.yaml` for `critic` and `independent`
 used side by side — cheap corroboration on a step that only informs, versus blind
@@ -1923,7 +1925,7 @@ Two things worth knowing about how honest this walkthrough can be:
 
 A **Prompt** disclosure (collapsed by default) now sits above each gateway step's parsed output, showing the actual rendered prompt the agent received — necessary for marking step accuracy honestly, since a grounding claim like "the agent didn't check X" might mean the prompt never asked it to. The verifier pane and the grounding claims section each get their own matching disclosure (`verifier_prompt`, `trust_report.grounding.prompt`) — all three (primary, verifier, grounding judge) are computed from the same executor-level stash (`GatewayExecutor.execute` writes it onto `raw_response["prompt"]` for every call it makes), so seeing one doesn't mean the others are guaranteed present — each is independently `null` if that particular call used a non-gateway executor or predates this fix.
 
-A **Step configuration** panel is always the first thing shown when a step is expanded (before the prompt, before the output) — a plain-language summary of what this step is *set up* to do: confidence threshold and `on_low_confidence`; verifier mode and combination strategy, naming a `veto` floor by its actual number rather than leaving "why didn't this change anything" unexplained; grounding's enforce state; declared deterministic checks by name; calibration's `n_min`/`on_uncalibrated`. Reading top to bottom then gives the setup first, then the prompt/output, then (further down) the Trust panel's "How was this calculated?" for what actually happened *this* run — config, then evidence. Built from the same `trust_report` data as the narrative (`_step_config_summary` in `ui.py`), not a live read of the pipeline's current config.
+A **Step configuration** disclosure sits alongside "How was this calculated?" in the Trust panel — a plain-language summary of what this step is *set up* to do: confidence threshold and `on_low_confidence`; verifier mode and combination strategy, naming a `veto` floor by its actual number rather than leaving "why didn't this change anything" unexplained; grounding's enforce state; declared deterministic checks by name; calibration's `n_min`/`on_uncalibrated`. Built from the same `trust_report` data as the narrative (`_step_config_summary` in `ui.py`), not a live read of the pipeline's current config.
 
 ### Deterministic checks & enforced grounding (Phase 1)
 

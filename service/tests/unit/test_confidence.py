@@ -44,6 +44,10 @@ def test_default_mode_is_critic():
     assert VerifierConfig(executor="x").mode == "critic"
 
 
+def test_default_max_trace_chars_is_1500():
+    assert VerifierConfig(executor="x").max_trace_chars == 1500
+
+
 # ----------------------------------------------------------------------
 # _combine_confidence
 # ----------------------------------------------------------------------
