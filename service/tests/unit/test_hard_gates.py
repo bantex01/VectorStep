@@ -500,7 +500,7 @@ async def test_verifier_only_step_gets_a_shadow_trust_report():
 def test_gate_policy_trust_vector_vs_legacy_confidence():
     trust_vector_report = PipelineRunner._build_trust_report(
         primary_confidence=0.9, effective_confidence=0.9, verifier_confidence=None,
-        verifier_mode=None,
+        verifier_mode=None, verifier_combination_strategy=None, verifier_veto_floor=None,
         grounding_score=0.9, grounding_report={"computed": True},
         deterministic_results=[{"name": "a", "type": "shell", "passed": True, "detail": "", "duration_ms": 1}],
         calibration_report=None,
@@ -511,7 +511,7 @@ def test_gate_policy_trust_vector_vs_legacy_confidence():
 
     legacy_report = PipelineRunner._build_trust_report(
         primary_confidence=0.9, effective_confidence=0.9, verifier_confidence=None,
-        verifier_mode=None,
+        verifier_mode=None, verifier_combination_strategy=None, verifier_veto_floor=None,
         grounding_score=0.4, grounding_report={"computed": True},
         deterministic_results=None,
         calibration_report=None,
@@ -565,6 +565,55 @@ async def test_deterministic_passed_persisted(tmp_path):
     assert plain_row.deterministic_passed is None
 
 
+async def test_rendered_prompt_persisted_when_executor_stashes_it(tmp_path):
+    """The gateway executor stashes the rendered prompt text in raw_response['prompt']
+    (see GatewayExecutor.execute) — _db_save_step must use that for PipelineStep.prompt
+    instead of the executor_config dump, so a reviewer can see exactly what the agent
+    was actually asked, not just which agent/session it used."""
+    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
+    await create_tables()
+    sf = get_session_factory()
+
+    primary_output = _make_output(
+        confidence=0.9, raw_response={"prompt": "Investigate the alert for payment-api."},
+    )
+    runner = PipelineRunner(executors={"gateway": lambda: _StubExecutor(primary_output)}, session_factory=sf)
+    step = StepConfig(
+        name="investigate", executor="gateway", executor_config={"agent": "sre-investigation"}, prompt_template="",
+    )
+    pipeline = PipelineConfig(name="p", trigger=TriggerConfig(), steps=[step])
+
+    await runner.run(pipeline=pipeline, normalised=_make_normalised(), run_id="run-p1")
+
+    async with sf() as session:
+        row = (await session.execute(select(PipelineStep).where(PipelineStep.run_id == "run-p1"))).scalar_one()
+
+    assert row.prompt == "Investigate the alert for payment-api."
+
+
+async def test_prompt_falls_back_to_executor_config_when_not_stashed(tmp_path):
+    """An executor that doesn't stash a rendered prompt (or a step whose executor call
+    failed before returning) still gets the pre-existing executor_config fallback,
+    rather than an empty/broken column."""
+    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
+    await create_tables()
+    sf = get_session_factory()
+
+    primary_output = _make_output(confidence=0.9)  # raw_response={} — no "prompt" key
+    runner = PipelineRunner(executors={"gateway": lambda: _StubExecutor(primary_output)}, session_factory=sf)
+    step = StepConfig(
+        name="notify", executor="gateway", executor_config={"agent": "x"}, prompt_template="",
+    )
+    pipeline = PipelineConfig(name="p", trigger=TriggerConfig(), steps=[step])
+
+    await runner.run(pipeline=pipeline, normalised=_make_normalised(), run_id="run-p2")
+
+    async with sf() as session:
+        row = (await session.execute(select(PipelineStep).where(PipelineStep.run_id == "run-p2"))).scalar_one()
+
+    assert json.loads(row.prompt) == {"agent": "x"}
+
+
 async def test_verifier_agent_model_provider_persisted_to_db(tmp_path):
     """Which agent/model actually ran the verifier must be a real per-run column, not
     something read back out of the pipeline's current config — the config can drift
@@ -578,7 +627,8 @@ async def test_verifier_agent_model_provider_persisted_to_db(tmp_path):
         model="claude-sonnet-5", provider="anthropic",
     )
     verifier_output = LLMOutput(
-        confidence=0.8, summary="ok", next_step_context="", raw_response={},
+        confidence=0.8, summary="ok", next_step_context="",
+        raw_response={"prompt": "You are an independent reviewer... (verifier's own rendered prompt)"},
         model="gpt-5", provider="azure",
     )
     runner = PipelineRunner(
@@ -609,6 +659,7 @@ async def test_verifier_agent_model_provider_persisted_to_db(tmp_path):
     assert row.verifier_agent == "verifier_stub:principal-sre"
     assert row.verifier_model == "gpt-5"
     assert row.verifier_provider == "azure"
+    assert row.verifier_prompt == "You are an independent reviewer... (verifier's own rendered prompt)"
 
 
 async def test_no_verifier_leaves_verifier_attribution_columns_null(tmp_path):
@@ -631,6 +682,7 @@ async def test_no_verifier_leaves_verifier_attribution_columns_null(tmp_path):
     assert row.verifier_agent is None
     assert row.verifier_model is None
     assert row.verifier_provider is None
+    assert row.verifier_prompt is None
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +704,7 @@ async def test_deterministic_passed_column_exists_after_create_tables(tmp_path):
     assert "verifier_agent" in columns
     assert "verifier_model" in columns
     assert "verifier_provider" in columns
+    assert "verifier_prompt" in columns
 
 
 async def test_verifier_attribution_columns_migrate_onto_a_preexisting_db(tmp_path):
@@ -667,7 +720,7 @@ async def test_verifier_attribution_columns_migrate_onto_a_preexisting_db(tmp_pa
     sf = get_session_factory()
     async with sf() as session:
         conn = await session.connection()
-        for col in ("verifier_agent", "verifier_model", "verifier_provider"):
+        for col in ("verifier_agent", "verifier_model", "verifier_provider", "verifier_prompt"):
             await conn.exec_driver_sql(f"ALTER TABLE pipeline_steps DROP COLUMN {col}")
         await session.commit()
 

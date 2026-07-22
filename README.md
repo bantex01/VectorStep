@@ -1555,7 +1555,7 @@ retry:
 | `executor` | str | `openclaw` / `gateway` / `human` / `webhook` |
 | `agent` | str | `executor:agent-name` (e.g. `openclaw:sre-triage`) |
 | `model` | str | Actual model used, from executor metadata |
-| `prompt` | text | Rendered prompt sent to the agent |
+| `prompt` | text | Rendered prompt sent to the agent — the actual, fully-substituted text, not the `{{ }}` template. Populated for `executor: gateway` steps only; other executors don't yet stash their rendered prompt back out, so their rows fall back to a JSON dump of `executor_config` (recognisable by starting with `{`) — the UI's Prompt disclosure hides that fallback rather than showing it as if it were a real prompt. |
 | `raw_output` | json | Full unparsed executor response |
 | `parsed_output` | json | Validated LLMOutput (excluding raw_response) |
 | `status` | str | completed / stopped / escalated / aborted / failed |
@@ -1572,6 +1572,7 @@ retry:
 | `verifier_agent` | str, nullable | `executor:agent-name` for the verifier call (mirrors `agent` above), e.g. `gateway:principal-sre`. NULL if no verifier ran, or for rows persisted before this column existed. |
 | `verifier_model` | str, nullable | Actual model used by the verifier call, from executor metadata. NULL if no verifier ran. |
 | `verifier_provider` | str, nullable | Gateway provider key for the verifier call (gateway executor only). NULL if no verifier ran or the verifier used a non-gateway executor. |
+| `verifier_prompt` | text, nullable | Rendered prompt actually sent to the verifier — for `critic` mode this is the meta-prompt with the primary's own prompt+response embedded; for `independent` mode it's a verbatim copy of the primary's prompt. Gateway executor only; NULL if no verifier ran, the verifier used a non-gateway executor, or the row predates this column. |
 | `input_tokens` | int, nullable | Input tokens consumed by this step's primary executor call. Populated for `gateway` steps; NULL for others. For parallel/fan-out branches, each branch row has its own token count. |
 | `output_tokens` | int, nullable | Output tokens produced by this step's primary executor call. |
 
@@ -1910,11 +1911,17 @@ The judge's prompt is explicit that (1) is *given, trusted input* — a claim th
 - **`reasoning.claims`** — a list of `{ "claim": str, "supported": bool, "evidence": str }`, one per load-bearing claim identified.
 - **`next_step_context`** — unused, `""`.
 
-The persisted `trust_report.grounding` also records **which** agent/model actually judged this run — `agent` (from `grounding.agent` config), plus `model`/`provider` read straight from the judge's own response metadata (both `null` when grounding didn't compute, e.g. an error or no trace).
+The persisted `trust_report.grounding` also records **which** agent/model actually judged this run — `agent` (from `grounding.agent` config), plus `model`/`provider` read straight from the judge's own response metadata (both `null` when grounding didn't compute, e.g. an error or no trace) — and, gateway executor only, `prompt`: the judge's own fully-rendered prompt (the `_GROUNDING_PROMPT_TEMPLATE` with the original task, primary's response, and trace all substituted in), so a reviewer can see exactly what the judge was shown, not just what it concluded.
 
 **Where it surfaces.** Each grounded step's expanded detail panel shows a **"Trust (shadow)"** widget: self-report (S) vs. verifier (V, if any, with its own agent/model shown alongside) vs. grounding (G, with its judging agent/model shown alongside), a divergence flag when `|G − S| ≥ 0.2`, and the per-claim ✓/✗ breakdown with evidence. `pork_step_grounding_score` (see §Metrics) exposes the score distribution for Grafana.
 
 **The Trust panel isn't just for grounded steps.** Any step with a verifier — even with no grounding, deterministic checks, or calibration configured — gets a "Trust (shadow)" panel too, so how S and V combined is never invisible. A **"How was this calculated?"** button reveals a plain-language, numbers-first walkthrough of that specific run: self-report → verifier combine → calibration (if enforced) → grounding (if configured) → deterministic checks (if declared) → the final figure and what it decided. No config keys, just what actually happened on this run — built from the same `trust_report` data, not a re-derivation from the pipeline's current config.
+
+Two things worth knowing about how honest this walkthrough can be:
+- **`V_veto_floor`** is persisted in `trust_report.signals` (alongside `V_mode`) specifically so the narrative can say *why* a verifier's lower score didn't change anything ("this step only lowers confidence below X%") instead of just asserting it did nothing. Rows from before this field existed fall back to vaguer wording rather than inventing a number.
+- **`grounding.enforce`** is persisted per-run for the same reason — grounding computes and reports a score even in pure shadow mode, so its presence alone can't tell you whether it actually gated a given historical run. Rows predating this field say so explicitly ("isn't recorded for this older run") rather than guessing either way.
+
+A **Prompt** disclosure (collapsed by default) now sits above each gateway step's parsed output, showing the actual rendered prompt the agent received — necessary for marking step accuracy honestly, since a grounding claim like "the agent didn't check X" might mean the prompt never asked it to. The verifier pane and the grounding claims section each get their own matching disclosure (`verifier_prompt`, `trust_report.grounding.prompt`) — all three (primary, verifier, grounding judge) are computed from the same executor-level stash (`GatewayExecutor.execute` writes it onto `raw_response["prompt"]` for every call it makes), so seeing one doesn't mean the others are guaranteed present — each is independently `null` if that particular call used a non-gateway executor or predates this fix.
 
 ### Deterministic checks & enforced grounding (Phase 1)
 

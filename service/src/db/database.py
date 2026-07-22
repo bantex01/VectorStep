@@ -70,6 +70,7 @@ _COLUMN_MIGRATIONS = [
     ("pipeline_steps", "verifier_agent", "TEXT"),
     ("pipeline_steps", "verifier_model", "TEXT"),
     ("pipeline_steps", "verifier_provider", "TEXT"),
+    ("pipeline_steps", "verifier_prompt", "TEXT"),
 ]
 
 _INDEX_MIGRATIONS = [

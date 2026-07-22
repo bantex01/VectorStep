@@ -407,6 +407,21 @@
 
     {% if item.pretty or item.verifier_pretty or item.trace %}
     <div x-show="open" x-cloak class="border-t border-zinc-800 divide-y divide-zinc-800">
+      {% if item.step.prompt and not item.step.prompt.startswith('{') %}
+      <div x-data="{ prompt_open: false }" class="px-4 py-3">
+        <button @click="prompt_open = !prompt_open" type="button"
+                class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
+          <svg class="w-3.5 h-3.5 transition-transform" :class="prompt_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+          </svg>
+          <span class="uppercase tracking-wide font-medium">Prompt</span>
+          <span class="text-zinc-600 normal-case">— what the agent was actually asked</span>
+        </button>
+        <div x-show="prompt_open" x-cloak class="mt-3">
+          <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ item.step.prompt }}</pre>
+        </div>
+      </div>
+      {% endif %}
       {% if item.pretty %}
       <div class="px-4 py-4">
         {% if item.verifier_pretty %}
@@ -423,6 +438,21 @@
             <span class="normal-case text-zinc-600 font-normal">— {{ item.step.verifier_agent }}{% if item.step.verifier_model %} · {{ item.step.verifier_model }}{% endif %}</span>
           {% endif %}
         </p>
+        {% if item.step.verifier_prompt %}
+        <div x-data="{ verifier_prompt_open: false }" class="mb-3">
+          <button @click="verifier_prompt_open = !verifier_prompt_open" type="button"
+                  class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
+            <svg class="w-3.5 h-3.5 transition-transform" :class="verifier_prompt_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
+            <span class="uppercase tracking-wide font-medium">Prompt</span>
+            <span class="text-zinc-600 normal-case">— what {{ item.verifier_label|lower }} was actually asked</span>
+          </button>
+          <div x-show="verifier_prompt_open" x-cloak class="mt-3">
+            <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ item.step.verifier_prompt }}</pre>
+          </div>
+        </div>
+        {% endif %}
         <pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.verifier_pretty }}</pre>
       </div>
       {% endif %}
@@ -522,6 +552,21 @@
             (<code class="text-zinc-400">on_uncalibrated: proceed</code>).
           {% endif %}
         </p>
+        {% endif %}
+        {% if item.trust.grounding and item.trust.grounding.prompt %}
+        <div x-data="{ grounding_prompt_open: false }" class="mt-2">
+          <button @click="grounding_prompt_open = !grounding_prompt_open" type="button"
+                  class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
+            <svg class="w-3.5 h-3.5 transition-transform" :class="grounding_prompt_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
+            <span class="uppercase tracking-wide font-medium">Prompt</span>
+            <span class="text-zinc-600 normal-case">— what the grounding judge was actually asked</span>
+          </button>
+          <div x-show="grounding_prompt_open" x-cloak class="mt-3">
+            <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ item.trust.grounding.prompt }}</pre>
+          </div>
+        </div>
         {% endif %}
         {% if item.trust.grounding and item.trust.grounding.claims %}
         <div class="mt-2 space-y-1">

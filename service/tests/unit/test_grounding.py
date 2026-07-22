@@ -153,6 +153,26 @@ async def test_run_grounding_shares_original_task_prompt_with_judge():
     assert captured_ctx["primary_prompt"] == "Alert severity: critical. Investigate."
 
 
+async def test_run_grounding_report_includes_judges_own_rendered_prompt():
+    """The gateway executor stashes its rendered prompt on raw_response['prompt'] — the
+    grounding report must carry that through, so a reviewer can see exactly what the
+    judge itself was asked, not just what it decided."""
+    judge_output = LLMOutput(
+        confidence=0.8, summary="ok", next_step_context="",
+        raw_response={"prompt": "You are a grounding auditor... (judge's own rendered prompt)"},
+    )
+    runner = _runner(executors={"grounding_stub": lambda: _StubExecutor(judge_output)})
+    step = StepConfig(
+        name="investigate", executor="gateway", prompt_template="",
+        grounding=GroundingConfig(executor="grounding_stub"),
+    )
+    primary = _make_output(confidence=0.9, raw_response={"trace": _TOOL_TRACE})
+
+    g, report, tokens = await runner._run_grounding(step=step, ctx={}, primary_output=primary, run_log=[])
+
+    assert report["prompt"] == "You are a grounding auditor... (judge's own rendered prompt)"
+
+
 async def test_run_grounding_excludes_artifacts_but_keeps_other_extra_fields():
     """artifacts (e.g. a full markdown report) is presentation content, not a claim —
     excluding it keeps the grounding call cheap and stops the judge quoting a large
@@ -280,6 +300,8 @@ def test_build_trust_report_shape():
         effective_confidence=0.86,
         verifier_confidence=0.85,
         verifier_mode="critic",
+        verifier_combination_strategy="minimum",
+        verifier_veto_floor=None,
         grounding_score=0.15,
         grounding_report={"computed": True, "claims": []},
         deterministic_results=None,
@@ -288,10 +310,12 @@ def test_build_trust_report_shape():
         gate_policy="legacy_confidence",
     )
 
-    assert report["version"] == 3
+    assert report["version"] == 4
     assert report["mode"] == "shadow"
     assert report["signals"] == {
-        "S": 0.88, "S_after_V": 0.86, "V": 0.85, "V_mode": "critic", "G": 0.15, "C": None, "D": None,
+        "S": 0.88, "S_after_V": 0.86, "V": 0.85, "V_mode": "critic",
+        "V_combination_strategy": "minimum", "V_veto_floor": None,
+        "G": 0.15, "C": None, "D": None,
     }
     assert report["combined_trust"] == 0.86
     assert report["deterministic_checks"] is None

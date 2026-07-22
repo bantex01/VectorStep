@@ -243,15 +243,31 @@ def _confidence_narrative(trust: dict, status: str) -> list[str]:
         s_after_v = sig["S_after_V"]
         blind = sig.get("V_mode") == "independent"
         checker = "A second, blind check (no sight of the primary's answer)" if blind else "A second check that reviewed the primary's own reasoning"
+        veto_floor = sig.get("V_veto_floor")
         if s_after_v < s:
             lines.append(
                 f"{checker} scored it at {v:.0%}. A verifier can only lower or hold "
                 f"confidence, never raise it, so this pulled the working score down to {s_after_v:.0%}."
             )
+        elif v < s:
+            # s_after_v == s despite v < s is only reachable when the veto floor wasn't
+            # tripped — under a plain minimum-of-the-two strategy this branch can't
+            # happen at all, since that always takes the lower value unconditionally.
+            if veto_floor is not None:
+                lines.append(
+                    f"{checker} scored it at {v:.0%} — this step only lowers confidence "
+                    f"when the verifier scores below {veto_floor:.0%}, and {v:.0%} was "
+                    f"above that, so the {s:.0%} confidence stood."
+                )
+            else:
+                lines.append(
+                    f"{checker} scored it at {v:.0%} — not low enough to change anything "
+                    f"here, so the {s:.0%} confidence stood."
+                )
         else:
             lines.append(
-                f"{checker} scored it at {v:.0%} — not low enough to change anything, "
-                f"so the {s:.0%} confidence stood."
+                f"{checker} scored it at {v:.0%} — at or above the {s:.0%} self-report, "
+                f"so there was nothing to pull down."
             )
         seed = s_after_v
 
@@ -283,7 +299,17 @@ def _confidence_narrative(trust: dict, status: str) -> list[str]:
     grounding = trust.get("grounding")
     if grounding and grounding.get("computed"):
         g = grounding["score"]
-        if grounding.get("enforce"):
+        enforce = grounding.get("enforce")
+        if enforce is None:
+            # Historical row from before the grounding report recorded its own enforce
+            # flag — computed and reported either way, so its presence alone can't tell
+            # us whether it actually gated this specific run. Say so rather than guess.
+            lines.append(
+                f"A separate check found {g:.0%} of this run's load-bearing claims "
+                f"supported by its own evidence (whether this affected the final trust "
+                f"isn't recorded for this older run)."
+            )
+        elif enforce:
             if g < seed:
                 lines.append(
                     f"A separate check looked at whether this run's own evidence backs "

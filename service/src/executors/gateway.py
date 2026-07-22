@@ -123,7 +123,13 @@ class GatewayExecutor(BaseExecutor):
         model = result.get("meta", {}).get("agentMeta", {}).get("model")
         logger.info("Gateway response: step=%s model=%s duration=%sms", step.name, model, duration)
 
-        return self._parse_output(result, step.name)
+        output = self._parse_output(result, step.name)
+        # Stashed here (not in a separate return value) so it survives the same
+        # raw_response round-trip everything else does — _db_save_step reads it back
+        # out for PipelineStep.prompt, which otherwise has nothing but this step's own
+        # rendered instructions to reconstruct what the agent was actually asked.
+        output.raw_response["prompt"] = prompt
+        return output
 
     # ------------------------------------------------------------------
     # Internal helpers

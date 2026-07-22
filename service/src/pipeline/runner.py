@@ -799,6 +799,14 @@ class PipelineRunner:
                 effective_confidence=effective_confidence,
                 verifier_confidence=verifier_output.confidence if verifier_output else None,
                 verifier_mode=step.verifier.mode if step.verifier and verifier_output else None,
+                verifier_combination_strategy=(
+                    step.verifier.combination_strategy if step.verifier and verifier_output else None
+                ),
+                verifier_veto_floor=(
+                    step.verifier.veto_floor
+                    if step.verifier and verifier_output and step.verifier.combination_strategy == "veto"
+                    else None
+                ),
                 grounding_score=grounding_score,
                 grounding_report=grounding_report,
                 deterministic_results=deterministic_results,
@@ -1625,6 +1633,7 @@ class PipelineRunner:
                 "score": g,
                 "summary": out.summary,
                 "claims": claims if isinstance(claims, list) else [],
+                "prompt": (out.raw_response or {}).get("prompt"),
             }
             return g, report, _gi + _go
 
@@ -1738,6 +1747,8 @@ class PipelineRunner:
         effective_confidence: float,
         verifier_confidence: float | None,
         verifier_mode: str | None,
+        verifier_combination_strategy: str | None,
+        verifier_veto_floor: float | None,
         grounding_score: float | None,
         grounding_report: dict | None,
         deterministic_results: list[dict] | None,
@@ -1749,13 +1760,15 @@ class PipelineRunner:
             all(r["passed"] for r in deterministic_results) if deterministic_results else None
         )
         return {
-            "version": 3,   # bumped from 2 — calibration is new
+            "version": 4,   # bumped from 3 — V_combination_strategy/V_veto_floor are new
             "mode": "enforced" if gate_policy == "trust_vector" else "shadow",
             "signals": {
                 "S": primary_confidence,
                 "S_after_V": effective_confidence,
                 "V": verifier_confidence,
-                "V_mode": verifier_mode,   # NEW — "critic" | "independent" | null (no verifier ran)
+                "V_mode": verifier_mode,   # "critic" | "independent" | null (no verifier ran)
+                "V_combination_strategy": verifier_combination_strategy,   # NEW — "minimum" | "veto" | null
+                "V_veto_floor": verifier_veto_floor,   # NEW — only set when strategy is "veto"; null otherwise
                 "G": grounding_score,
                 "C": None,                      # consistency — still a later phase
                 "D": deterministic_passed,       # NEW — bool, or null if no checks declared
@@ -1864,6 +1877,12 @@ class PipelineRunner:
                 if _t is not None:
                     _trace = json.dumps(_t)
             _in_tok, _out_tok = self._extract_usage(result.output.raw_response if result.output else {})
+            # The gateway executor stashes the rendered prompt text in raw_response —
+            # use that when present (the actual instructions the agent was given,
+            # needed to judge whether a claim like "the agent didn't check X" is a real
+            # gap or the prompt never asked for X). Other executors don't set this key,
+            # so this falls back to the executor_config dump they've always gotten.
+            _rendered_prompt = (result.output.raw_response or {}).get("prompt") if result.output else None
             session.add(PipelineStep(
                 run_id=run_id,
                 step_name=result.step_name,
@@ -1872,7 +1891,7 @@ class PipelineRunner:
                 agent=f"{step.executor}:{_agent}" if _agent else None,
                 model=result.output.model if result.output else None,
                 provider=result.output.provider if result.output else None,
-                prompt=json.dumps(step.executor_config),
+                prompt=_rendered_prompt if _rendered_prompt else json.dumps(step.executor_config),
                 raw_output=json.dumps(result.output.raw_response) if result.output else None,
                 parsed_output=result.output.model_dump_json(exclude={"raw_response"}) if result.output else None,
                 verifier_output=result.verifier_output.model_dump_json(exclude={"raw_response"}) if result.verifier_output else None,
@@ -1884,6 +1903,10 @@ class PipelineRunner:
                 ),
                 verifier_model=result.verifier_output.model if result.verifier_output else None,
                 verifier_provider=result.verifier_output.provider if result.verifier_output else None,
+                verifier_prompt=(
+                    (result.verifier_output.raw_response or {}).get("prompt")
+                    if result.verifier_output else None
+                ),
                 status=result.status,
                 primary_confidence=result.output.confidence if result.output else None,
                 verifier_confidence=result.verifier_output.confidence if result.verifier_output else None,

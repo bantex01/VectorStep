@@ -31,12 +31,33 @@ def test_verifier_lowering_confidence_is_described():
     assert any("55%" in line and "pulled" in line for line in lines)
 
 
-def test_verifier_not_lowering_confidence_is_described_as_no_change():
+def test_verifier_scoring_higher_than_primary_has_nothing_to_pull_down():
     trust = _trust(signals={"S": 0.85, "S_after_V": 0.85, "V": 0.95, "V_mode": "independent", "G": None, "D": None})
     lines = _confidence_narrative(trust, "completed")
 
     assert any("blind" in line for line in lines)
-    assert any("stood" in line for line in lines)
+    assert any("nothing to pull down" in line for line in lines)
+
+
+def test_verifier_below_veto_floor_not_triggered_names_the_floor():
+    trust = _trust(signals={
+        "S": 0.95, "S_after_V": 0.95, "V": 0.85, "V_mode": "critic",
+        "V_veto_floor": 0.60, "G": None, "D": None,
+    })
+    lines = _confidence_narrative(trust, "completed")
+
+    assert any("60%" in line and "85%" in line and "95%" in line for line in lines)
+
+
+def test_verifier_below_veto_floor_not_triggered_without_floor_recorded():
+    """Historical row predating V_veto_floor — falls back to vaguer phrasing instead
+    of a made-up number."""
+    trust = _trust(signals={
+        "S": 0.95, "S_after_V": 0.95, "V": 0.85, "V_mode": "critic", "G": None, "D": None,
+    })
+    lines = _confidence_narrative(trust, "completed")
+
+    assert any("not low enough" in line for line in lines)
 
 
 def test_calibration_validated_replaces_the_score():
@@ -93,6 +114,17 @@ def test_grounding_shadow_only_is_labelled_as_not_affecting_outcome():
     lines = _confidence_narrative(trust, "completed")
 
     assert any("visibility only" in line for line in lines)
+
+
+def test_grounding_enforce_missing_is_labelled_as_unknown_not_no_effect():
+    """Historical row from before the grounding report recorded its own enforce flag —
+    must not confidently claim 'no effect' when it might have actually gated this run."""
+    trust = _trust(grounding={"computed": True, "score": 0.5})  # no "enforce" key at all
+    lines = _confidence_narrative(trust, "escalated")
+
+    assert any("isn't recorded for this older run" in line for line in lines)
+    assert not any("visibility only" in line for line in lines)
+    assert not any("wasn't configured to affect" in line for line in lines)
 
 
 def test_grounding_not_computed_has_no_effect_note():

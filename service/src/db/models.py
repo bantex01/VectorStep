@@ -52,6 +52,7 @@ class PipelineStep(Base):
     verifier_agent: Mapped[str | None] = mapped_column(String, nullable=True)    # "executor:agent", mirrors `agent` above; NULL for runs before this column existed or steps with no verifier
     verifier_model: Mapped[str | None] = mapped_column(String, nullable=True)   # actual model used by the verifier call (from response metadata)
     verifier_provider: Mapped[str | None] = mapped_column(String, nullable=True)  # gateway provider key (gateway executor only)
+    verifier_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)  # rendered prompt actually sent to the verifier (gateway executor only); NULL if no verifier ran or it didn't stash one
     status: Mapped[str] = mapped_column(String, nullable=False)
     primary_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     verifier_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
