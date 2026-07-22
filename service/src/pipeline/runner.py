@@ -813,6 +813,8 @@ class PipelineRunner:
                 calibration_report=calibration_report,
                 combined_trust=combined_trust,
                 gate_policy=gate_policy,
+                confidence_threshold=step.confidence_threshold,
+                on_low_confidence=step.on_low_confidence,
             )
 
         _in_tok, _out_tok = self._extract_usage(primary_output.raw_response)
@@ -1755,12 +1757,14 @@ class PipelineRunner:
         calibration_report: dict | None,
         combined_trust: float,
         gate_policy: str,
+        confidence_threshold: float,
+        on_low_confidence: str,
     ) -> dict:
         deterministic_passed = (
             all(r["passed"] for r in deterministic_results) if deterministic_results else None
         )
         return {
-            "version": 4,   # bumped from 3 — V_combination_strategy/V_veto_floor are new
+            "version": 5,   # bumped from 4 — gate.confidence_threshold/on_low_confidence are new
             "mode": "enforced" if gate_policy == "trust_vector" else "shadow",
             "signals": {
                 "S": primary_confidence,
@@ -1777,7 +1781,11 @@ class PipelineRunner:
             "grounding": grounding_report,
             "deterministic_checks": deterministic_results,   # NEW — full per-check detail, or null
             "calibration": calibration_report,   # NEW — see calibration.py, or null if not enforced
-            "gate": {"policy": gate_policy},      # "legacy_confidence" | "trust_vector"
+            "gate": {
+                "policy": gate_policy,      # "legacy_confidence" | "trust_vector"
+                "confidence_threshold": confidence_threshold,   # NEW — what combined_trust was compared against
+                "on_low_confidence": on_low_confidence,          # NEW — "escalate" | "abort" | "proceed"
+            },
         }
 
     # ------------------------------------------------------------------

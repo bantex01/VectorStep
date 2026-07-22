@@ -505,6 +505,7 @@ def test_gate_policy_trust_vector_vs_legacy_confidence():
         deterministic_results=[{"name": "a", "type": "shell", "passed": True, "detail": "", "duration_ms": 1}],
         calibration_report=None,
         combined_trust=0.9, gate_policy="trust_vector",
+        confidence_threshold=0.75, on_low_confidence="escalate",
     )
     assert trust_vector_report["gate"]["policy"] == "trust_vector"
     assert trust_vector_report["mode"] == "enforced"
@@ -516,6 +517,7 @@ def test_gate_policy_trust_vector_vs_legacy_confidence():
         deterministic_results=None,
         calibration_report=None,
         combined_trust=0.9, gate_policy="legacy_confidence",
+        confidence_threshold=0.75, on_low_confidence="escalate",
     )
     assert legacy_report["gate"]["policy"] == "legacy_confidence"
     assert legacy_report["mode"] == "shadow"

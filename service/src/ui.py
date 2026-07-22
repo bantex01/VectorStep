@@ -255,9 +255,10 @@ def _confidence_narrative(trust: dict, status: str) -> list[str]:
             # happen at all, since that always takes the lower value unconditionally.
             if veto_floor is not None:
                 lines.append(
-                    f"{checker} scored it at {v:.0%} — this step only lowers confidence "
-                    f"when the verifier scores below {veto_floor:.0%}, and {v:.0%} was "
-                    f"above that, so the {s:.0%} confidence stood."
+                    f"{checker} scored it at {v:.0%}. This step uses a 'veto' rule: the "
+                    f"verifier only overrides the primary's score when it scores below "
+                    f"{veto_floor:.0%} — since {v:.0%} cleared that bar, the {s:.0%} "
+                    f"confidence stood unchanged."
                 )
             else:
                 lines.append(
@@ -352,7 +353,66 @@ def _confidence_narrative(trust: dict, status: str) -> list[str]:
         "stopped": "stopped the pipeline here",
         "failed": "failed",
     }.get(status, status)
-    lines.append(f"Put together, this run's final confidence came out at {combined:.0%}, and the step {outcome}.")
+    threshold = trust.get("gate", {}).get("confidence_threshold")
+    if threshold is not None:
+        cleared = "cleared" if combined >= threshold else "fell short of"
+        lines.append(
+            f"Put together, this run's final confidence came out at {combined:.0%}, "
+            f"which {cleared} this step's {threshold:.0%} threshold — so it {outcome}."
+        )
+    else:
+        lines.append(f"Put together, this run's final confidence came out at {combined:.0%}, and the step {outcome}.")
+    return lines
+
+
+def _step_config_summary(trust: dict) -> list[str]:
+    """Plain-language summary of how this step is set up to be judged — the gate
+    threshold plus whichever of verifier/grounding/deterministic/calibration are
+    configured. Complements _confidence_narrative (what happened this run) with what's
+    configured to happen on every run, so a reviewer has the full picture in one place
+    without going to find the pipeline's YAML."""
+    lines: list[str] = []
+    gate = trust.get("gate") or {}
+    threshold = gate.get("confidence_threshold")
+    if threshold is not None:
+        lines.append(f"Confidence threshold: {threshold:.0%} (on low confidence: {gate.get('on_low_confidence')}).")
+
+    sig = trust["signals"]
+    if sig.get("V") is not None:
+        mode = sig.get("V_mode") or "configured"
+        strategy = sig.get("V_combination_strategy")
+        floor = sig.get("V_veto_floor")
+        if strategy == "veto" and floor is not None:
+            detail = f" (veto rule, floor {floor:.0%})"
+        elif strategy:
+            detail = f" ({strategy} combination)"
+        else:
+            detail = ""
+        lines.append(f"Verifier: {mode}{detail}.")
+
+    grounding = trust.get("grounding")
+    if grounding:
+        agent = grounding.get("agent")
+        enforce = grounding.get("enforce")
+        if enforce is True:
+            lines.append(f"Grounding: enforced (agent: {agent}).")
+        elif enforce is False:
+            lines.append(f"Grounding: shadow only, recorded but not enforced (agent: {agent}).")
+        else:
+            lines.append(f"Grounding: configured (agent: {agent}) — enforcement not recorded for this older run.")
+
+    det = trust.get("deterministic_checks")
+    if det:
+        names = ", ".join(f"{c['name']} ({c['type']})" for c in det)
+        lines.append(f"Deterministic checks: {names}.")
+
+    calibration = trust.get("calibration")
+    if calibration:
+        lines.append(
+            f"Calibration: enforced (needs {calibration['n_min']} marked results; "
+            f"on_uncalibrated: {calibration['on_uncalibrated']})."
+        )
+
     return lines
 
 
@@ -948,6 +1008,7 @@ async def ui_run_detail(request: Request, run_id: str):
                 "trace": trace,
                 "trust": trust,
                 "confidence_narrative": _confidence_narrative(trust, step.status) if trust else None,
+                "step_config_summary": _step_config_summary(trust) if trust else None,
             })
 
     normalised = json.loads(run.normalised_context) if run.normalised_context else {}

@@ -1923,6 +1923,8 @@ Two things worth knowing about how honest this walkthrough can be:
 
 A **Prompt** disclosure (collapsed by default) now sits above each gateway step's parsed output, showing the actual rendered prompt the agent received — necessary for marking step accuracy honestly, since a grounding claim like "the agent didn't check X" might mean the prompt never asked it to. The verifier pane and the grounding claims section each get their own matching disclosure (`verifier_prompt`, `trust_report.grounding.prompt`) — all three (primary, verifier, grounding judge) are computed from the same executor-level stash (`GatewayExecutor.execute` writes it onto `raw_response["prompt"]` for every call it makes), so seeing one doesn't mean the others are guaranteed present — each is independently `null` if that particular call used a non-gateway executor or predates this fix.
 
+A **Step configuration** disclosure sits alongside "How was this calculated?" — a plain-language summary of what this step is *set up* to do (confidence threshold and `on_low_confidence`; verifier mode and combination strategy, naming a `veto` floor by its actual number rather than leaving "why didn't this change anything" unexplained; grounding's enforce state; declared deterministic checks by name; calibration's `n_min`/`on_uncalibrated`), so the config and the specific run's outcome are visible in the same place without needing to go find the pipeline's YAML. Built from the same `trust_report` data as the narrative (`_step_config_summary` in `ui.py`), not a live read of the pipeline's current config.
+
 ### Deterministic checks & enforced grounding (Phase 1)
 
 Phase 0 (above) only ever records G — it never gates. Phase 1 adds two **opt-in per

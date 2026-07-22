@@ -308,9 +308,11 @@ def test_build_trust_report_shape():
         calibration_report=None,
         combined_trust=0.86,
         gate_policy="legacy_confidence",
+        confidence_threshold=0.75,
+        on_low_confidence="escalate",
     )
 
-    assert report["version"] == 4
+    assert report["version"] == 5
     assert report["mode"] == "shadow"
     assert report["signals"] == {
         "S": 0.88, "S_after_V": 0.86, "V": 0.85, "V_mode": "critic",
@@ -319,7 +321,9 @@ def test_build_trust_report_shape():
     }
     assert report["combined_trust"] == 0.86
     assert report["deterministic_checks"] is None
-    assert report["gate"] == {"policy": "legacy_confidence"}
+    assert report["gate"] == {
+        "policy": "legacy_confidence", "confidence_threshold": 0.75, "on_low_confidence": "escalate",
+    }
 
 
 # ---------------------------------------------------------------------------

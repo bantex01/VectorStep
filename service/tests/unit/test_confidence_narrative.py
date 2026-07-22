@@ -47,6 +47,7 @@ def test_verifier_below_veto_floor_not_triggered_names_the_floor():
     lines = _confidence_narrative(trust, "completed")
 
     assert any("60%" in line and "85%" in line and "95%" in line for line in lines)
+    assert any("veto" in line for line in lines)
 
 
 def test_verifier_below_veto_floor_not_triggered_without_floor_recorded():
@@ -151,3 +152,25 @@ def test_deterministic_checks_all_passed_no_effect():
     lines = _confidence_narrative(trust, "completed")
 
     assert any("passed" in line and "no additional effect" in line for line in lines)
+
+
+def test_final_line_states_threshold_when_it_cleared():
+    trust = _trust(combined_trust=0.85, gate={"confidence_threshold": 0.75})
+    lines = _confidence_narrative(trust, "completed")
+
+    assert "85%" in lines[-1] and "75%" in lines[-1] and "cleared" in lines[-1]
+
+
+def test_final_line_states_threshold_when_it_fell_short():
+    trust = _trust(combined_trust=0.5, gate={"confidence_threshold": 0.75})
+    lines = _confidence_narrative(trust, "escalated")
+
+    assert "50%" in lines[-1] and "75%" in lines[-1] and "fell short of" in lines[-1]
+
+
+def test_final_line_falls_back_without_threshold_data():
+    """Historical rows predating gate.confidence_threshold shouldn't invent a number."""
+    lines = _confidence_narrative(_trust(combined_trust=0.5), "escalated")
+
+    assert "50%" in lines[-1]
+    assert "threshold" not in lines[-1]
