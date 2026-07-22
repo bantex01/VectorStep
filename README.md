@@ -1914,6 +1914,8 @@ The persisted `trust_report.grounding` also records **which** agent/model actual
 
 **Where it surfaces.** Each grounded step's expanded detail panel shows a **"Trust (shadow)"** widget: self-report (S) vs. verifier (V, if any, with its own agent/model shown alongside) vs. grounding (G, with its judging agent/model shown alongside), a divergence flag when `|G − S| ≥ 0.2`, and the per-claim ✓/✗ breakdown with evidence. `pork_step_grounding_score` (see §Metrics) exposes the score distribution for Grafana.
 
+**The Trust panel isn't just for grounded steps.** Any step with a verifier — even with no grounding, deterministic checks, or calibration configured — gets a "Trust (shadow)" panel too, so how S and V combined is never invisible. A **"How was this calculated?"** button reveals a plain-language, numbers-first walkthrough of that specific run: self-report → verifier combine → calibration (if enforced) → grounding (if configured) → deterministic checks (if declared) → the final figure and what it decided. No config keys, just what actually happened on this run — built from the same `trust_report` data, not a re-derivation from the pipeline's current config.
+
 ### Deterministic checks & enforced grounding (Phase 1)
 
 Phase 0 (above) only ever records G — it never gates. Phase 1 adds two **opt-in per

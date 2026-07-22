@@ -243,7 +243,7 @@ async def test_run_grounding_no_trace_returns_null_not_zero():
     g, report, tokens = await runner._run_grounding(step=step, ctx={}, primary_output=primary, run_log=[])
 
     assert g is None
-    assert report == {"computed": False, "reason": "no_trace", "agent": "grounding-judge"}
+    assert report == {"computed": False, "reason": "no_trace", "agent": "grounding-judge", "enforce": False}
     assert tokens == 0
 
 

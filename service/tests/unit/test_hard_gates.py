@@ -471,6 +471,32 @@ async def test_core_invariant_no_new_config_means_identical_behaviour():
     assert result.deterministic_passed is None
 
 
+async def test_verifier_only_step_gets_a_shadow_trust_report():
+    """A step with a verifier but no grounding/deterministic_checks/calibration used to
+    get no trust_report at all — meaning the run-detail page's confidence explainer had
+    nothing to show for the most common case of all. Widened so any step with a
+    verifier gets a trust_report too, always in 'shadow' mode since nothing here
+    participates in the gate."""
+    primary_output = _make_output(confidence=0.9)
+    runner = _runner(executors={"gateway": lambda: _StubExecutor(primary_output)})
+    step = StepConfig(
+        name="investigate", executor="gateway", prompt_template="",
+        confidence_threshold=0.5, on_low_confidence="escalate",
+        verifier=VerifierConfig(executor="gateway", trigger=VerifierTriggerConfig(always=True)),
+    )
+    pipeline = PipelineConfig(name="p", trigger=TriggerConfig(), steps=[step])
+
+    result = await runner._run_step_impl(
+        step=step, index=0, pipeline=pipeline, normalised=_make_normalised(),
+        run_id="r1", step_outputs={}, run_log=[],
+    )
+
+    assert result.trust_report is not None
+    assert result.trust_report["mode"] == "shadow"
+    assert result.trust_report["gate"]["policy"] == "legacy_confidence"
+    assert result.trust_report["signals"]["V"] == 0.9
+
+
 def test_gate_policy_trust_vector_vs_legacy_confidence():
     trust_vector_report = PipelineRunner._build_trust_report(
         primary_confidence=0.9, effective_confidence=0.9, verifier_confidence=None,

@@ -792,6 +792,7 @@ class PipelineRunner:
             step.grounding is not None
             or step.deterministic_checks
             or (step.calibration is not None and step.calibration.enforce)
+            or verifier_output is not None
         ):
             trust_report = self._build_trust_report(
                 primary_confidence=primary_output.confidence,
@@ -1560,7 +1561,7 @@ class PipelineRunner:
         if not transcript:
             # No evidence trail (non-gateway step, or a trace with no tool activity):
             # "nothing to check" is null, not zero.
-            return None, {"computed": False, "reason": "no_trace", "agent": grounding.agent}, 0
+            return None, {"computed": False, "reason": "no_trace", "agent": grounding.agent, "enforce": grounding.enforce}, 0
 
         grounding_ctx = {
             **ctx,
@@ -1606,7 +1607,7 @@ class PipelineRunner:
                            f"Grounding failed for {step.name}: {exc}", step=step.name)
                 span.set_status(Status(StatusCode.ERROR))
                 return None, {"computed": False, "reason": "error", "error": str(exc),
-                              "agent": grounding.agent}, 0
+                              "agent": grounding.agent, "enforce": grounding.enforce}, 0
 
             g = max(0.0, min(1.0, float(out.confidence)))
             span.set_attribute("pork.grounding.score", g)
@@ -1620,6 +1621,7 @@ class PipelineRunner:
                 "agent": grounding.agent,
                 "model": out.model,
                 "provider": out.provider,
+                "enforce": grounding.enforce,
                 "score": g,
                 "summary": out.summary,
                 "claims": claims if isinstance(claims, list) else [],

@@ -226,6 +226,110 @@ def _calibration_recommendation(bucket) -> str | None:
     return None
 
 
+def _confidence_narrative(trust: dict, status: str) -> list[str]:
+    """Plain-language, numbers-first walkthrough of how this ONE run's trust score was
+    derived — S -> verifier combine -> calibration -> grounding -> deterministic checks
+    -> final gate decision. No config keys or jargon; every figure is real data from
+    this run, not a description of how the mechanism works in general."""
+    sig = trust["signals"]
+    lines: list[str] = []
+
+    s = sig["S"]
+    lines.append(f"This step's agent reported {s:.0%} confidence in its own answer.")
+
+    seed = s
+    if sig.get("V") is not None:
+        v = sig["V"]
+        s_after_v = sig["S_after_V"]
+        blind = sig.get("V_mode") == "independent"
+        checker = "A second, blind check (no sight of the primary's answer)" if blind else "A second check that reviewed the primary's own reasoning"
+        if s_after_v < s:
+            lines.append(
+                f"{checker} scored it at {v:.0%}. A verifier can only lower or hold "
+                f"confidence, never raise it, so this pulled the working score down to {s_after_v:.0%}."
+            )
+        else:
+            lines.append(
+                f"{checker} scored it at {v:.0%} — not low enough to change anything, "
+                f"so the {s:.0%} confidence stood."
+            )
+        seed = s_after_v
+
+    calibration = trust.get("calibration")
+    if calibration:
+        n, n_min = calibration["n"], calibration["n_min"]
+        if calibration["validated"]:
+            calibrated = calibration["calibrated"]
+            lines.append(
+                f"This exact combination of step, agent, and model has a track record: "
+                f"based on {n} past marked results, it's actually correct about "
+                f"{calibrated:.0%} of the time when it reports around this confidence "
+                f"level. That measured figure replaced the {seed:.0%} score above."
+            )
+            seed = calibrated
+        elif calibration["on_uncalibrated"] == "escalate":
+            lines.append(
+                f"This combination doesn't have enough history yet to trust "
+                f"({n}/{n_min} marked results) — since it's configured to play it safe "
+                f"until proven, this run's confidence was treated as 0%."
+            )
+            seed = 0.0
+        else:
+            lines.append(
+                f"This combination doesn't have enough history yet to calibrate "
+                f"({n}/{n_min} marked results), so the {seed:.0%} score above was used as-is."
+            )
+
+    grounding = trust.get("grounding")
+    if grounding and grounding.get("computed"):
+        g = grounding["score"]
+        if grounding.get("enforce"):
+            if g < seed:
+                lines.append(
+                    f"A separate check looked at whether this run's own evidence backs "
+                    f"up what it claimed, and found only {g:.0%} of the load-bearing "
+                    f"claims supported — this capped the confidence at {g:.0%}."
+                )
+                seed = g
+            else:
+                lines.append(
+                    f"A separate check found {g:.0%} of this run's load-bearing claims "
+                    f"supported by its own evidence — at or above the confidence already "
+                    f"reached, so it didn't change anything."
+                )
+        else:
+            lines.append(
+                f"A separate check found {g:.0%} of this run's load-bearing claims "
+                f"supported by its own evidence — recorded for visibility only, it "
+                f"wasn't configured to affect this run's outcome."
+            )
+    elif grounding and not grounding.get("computed"):
+        lines.append("A grounding check was configured but couldn't complete this run, so it had no effect.")
+
+    det = trust.get("deterministic_checks")
+    if det:
+        failed = [c["name"] for c in det if not c["passed"]]
+        if failed:
+            lines.append(
+                f"A hard, automated check failed ({', '.join(failed)}) — this overrides "
+                f"everything above and forces the confidence straight to 0%."
+            )
+            seed = 0.0
+        else:
+            lines.append("All of this run's automated checks passed — no additional effect on the confidence above.")
+
+    combined = trust["combined_trust"]
+    outcome = {
+        "completed": "completed normally",
+        "escalated": "was escalated for a human to review",
+        "aborted": "was aborted",
+        "stopped": "stopped the pipeline here",
+        "failed": "failed",
+    }.get(status, status)
+    lines.append(f"Put together, this run's final confidence came out at {combined:.0%}, and the step {outcome}.")
+    return lines
+
+
 _TIME_RANGES = {
     "24h": (timedelta(hours=24), "24 hours"),
     "7d": (timedelta(days=7), "7 days"),
@@ -817,6 +921,7 @@ async def ui_run_detail(request: Request, run_id: str):
                 "verifier_label": verifier_label,
                 "trace": trace,
                 "trust": trust,
+                "confidence_narrative": _confidence_narrative(trust, step.status) if trust else None,
             })
 
     normalised = json.loads(run.normalised_context) if run.normalised_context else {}
