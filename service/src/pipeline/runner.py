@@ -1661,6 +1661,7 @@ class PipelineRunner:
                 "summary": out.summary,
                 "claims": claims if isinstance(claims, list) else [],
                 "prompt": (out.raw_response or {}).get("prompt"),
+                "raw_output": (out.raw_response or {}).get("response_text"),
             }
             return g, report, _gi + _go
 

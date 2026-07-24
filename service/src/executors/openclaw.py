@@ -238,7 +238,7 @@ class OpenClawExecutor(BaseExecutor):
         )
 
         try:
-            return LLMOutput(
+            output = LLMOutput(
                 **parsed,
                 model=model,
                 raw_response=raw,
@@ -248,3 +248,9 @@ class OpenClawExecutor(BaseExecutor):
                 f"Step '{step_name}': agent JSON does not match LLMOutput schema: {exc}\n"
                 f"Received: {parsed}"
             ) from exc
+
+        # The exact payload text that parsed successfully — mirrors GatewayExecutor's
+        # stash so a caller (e.g. grounding's report) can show "what the agent
+        # actually replied", not just the structured fields we kept.
+        output.raw_response["response_text"] = text
+        return output

@@ -295,7 +295,7 @@ class GatewayExecutor(BaseExecutor):
         provider = agent_meta.get("provider")
 
         try:
-            return LLMOutput(
+            output = LLMOutput(
                 **parsed,
                 model=model,
                 provider=provider,
@@ -306,3 +306,9 @@ class GatewayExecutor(BaseExecutor):
                 f"Step '{step_name}': agent JSON does not match LLMOutput schema: {exc}\n"
                 f"Received: {parsed}"
             ) from exc
+
+        # The exact payload text that parsed successfully — stashed the same way
+        # `execute()` stashes `prompt`, so a caller (e.g. grounding's report) can show
+        # "what the agent actually replied", not just the structured fields we kept.
+        output.raw_response["response_text"] = text
+        return output

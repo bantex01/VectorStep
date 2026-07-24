@@ -118,7 +118,7 @@ async def test_run_grounding_extracts_score_and_claims():
         summary="3 of 4 claims supported",
         next_step_context="",
         reasoning={"claims": [{"claim": "pool exhaustion", "supported": True, "evidence": "pool-wait metric"}]},
-        raw_response={},
+        raw_response={"response_text": '{"confidence": 0.9, "summary": "3 of 4 claims supported", ...}'},
         model="gpt-5",
         provider="azure",
     )
@@ -135,6 +135,7 @@ async def test_run_grounding_extracts_score_and_claims():
     assert report["computed"] is True
     assert report["claims"] == [{"claim": "pool exhaustion", "supported": True, "evidence": "pool-wait metric"}]
     assert report["agent"] == "grounding-judge"
+    assert report["raw_output"] == '{"confidence": 0.9, "summary": "3 of 4 claims supported", ...}'
     assert report["model"] == "gpt-5"
     assert report["provider"] == "azure"
 
