@@ -8,7 +8,7 @@ from jinja2 import Environment, Undefined
 from ..models.llm import LLMOutput
 from ..models.pipeline import StepConfig
 from ..tracing import gen_ai_attrs_from_meta, tracer
-from .base import BaseExecutor
+from .base import BaseExecutor, LLMParseError
 
 logger = logging.getLogger(__name__)
 
@@ -223,9 +223,10 @@ class OpenClawExecutor(BaseExecutor):
 
         if parsed is None:
             last_text = payloads[-1].get("text", "")
-            raise RuntimeError(
+            raise LLMParseError(
                 f"Step '{step_name}': no payload contained valid JSON. "
-                f"Last payload: {last_text[:500]}"
+                f"Last payload: {last_text[:500]}",
+                raw_text=last_text,
             )
 
         # Extract model from response metadata — more reliable than agent self-report

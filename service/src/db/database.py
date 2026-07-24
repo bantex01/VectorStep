@@ -125,3 +125,8 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
     assert _session_factory is not None, "Database not initialised — call init_db() first"
     return _session_factory
+
+
+def get_engine():
+    assert _engine is not None, "Database not initialised — call init_db() first"
+    return _engine

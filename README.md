@@ -12,6 +12,8 @@ The service is designed to be:
 
 Primary use case is observability automation (alert triage, Grafana investigation, bounded remediation) but the design is intentionally general purpose.
 
+> **New to the trust vector (S/V/G/D) and calibration?** See [`CONFIDENCE-EXPLAINED.md`](CONFIDENCE-EXPLAINED.md) for a plain-language walkthrough of how confidence is derived and every knob that affects it, before diving into the technical reference below ("Verifier Trigger Configuration", "Grounding (shadow mode)", "Deterministic checks & enforced grounding", "Calibration").
+
 ---
 
 ## Tech Stack
@@ -1565,7 +1567,7 @@ retry:
 | `verifier_confidence` | float, nullable | Verifier agent confidence (if verifier ran) |
 | `effective_confidence` | float | Confidence used for threshold gate (post-combination) |
 | `grounding_score` | float, nullable | Shadow-mode grounding score **G** ∈ [0,1] — the fraction of the step's load-bearing claims a blind grounding judge found supported by evidence in the step's own execution trace. NULL when grounding wasn't configured for the step, or when it had no trace to check against. Never gates — see [§16 Grounding (shadow mode)](#grounding-shadow-mode). |
-| `trust_report` | json, nullable | Per-step TrustReport: the trust vector `{S, S_after_V, V, V_mode, G, C, D}`, `combined_trust`, `gate.policy` (`legacy_confidence` / `trust_vector`), and — for grounding — the per-claim support breakdown, and — for deterministic checks — the full per-check detail. Populated for steps with a `grounding:` block, `deterministic_checks:`, and/or `calibration: {enforce: true}`; `mode` is `"shadow"` when recorded-only or `"enforced"` when any mechanism actually participated in the gate. See [Deterministic checks & enforced grounding (Phase 1)](#deterministic-checks--enforced-grounding-phase-1). A `calibration` sub-key (bucket/bin/n/n_min/validated/raw/calibrated/on_uncalibrated) is present only for a step with `calibration: {enforce: true}` — see [Calibration (Phase 3)](#calibration-phase-3). |
+| `trust_report` | json, nullable | Per-step TrustReport: the trust vector `{S, S_after_V, V, V_mode, V_combination_strategy, V_veto_floor, G, C, D}`, `combined_trust`, `gate` (`{policy, confidence_threshold, on_low_confidence}` — `policy` is `legacy_confidence` / `trust_vector`), and — for grounding — the per-claim support breakdown, and — for deterministic checks — the full per-check detail. Populated for steps with a **verifier**, a `grounding:` block, `deterministic_checks:`, and/or `calibration: {enforce: true}` — i.e. any mechanism beyond the plain single-confidence gate, not just the trust-vector ones; `mode` is `"shadow"` when recorded-only or `"enforced"` when grounding/deterministic/calibration actually participated in the gate (a verifier-only step is always `"shadow"`, since the verifier's downward-only combine has always been part of the legacy gate). See [Deterministic checks & enforced grounding (Phase 1)](#deterministic-checks--enforced-grounding-phase-1). A `calibration` sub-key (bucket/bin/n/n_min/validated/raw/calibrated/on_uncalibrated) is present only for a step with `calibration: {enforce: true}` — see [Calibration (Phase 3)](#calibration-phase-3). |
 | `deterministic_passed` | bool, nullable | Whole-step pass/fail across all declared deterministic checks — `True` only if every check passed. NULL when no `deterministic_checks:` were declared. Full per-check detail lives in `trust_report.deterministic_checks`. |
 | `duration_ms` | int | |
 | `executed_at` | datetime | |
@@ -1896,7 +1898,7 @@ steps:
 
 **There are two independent truncation points, and raising this one alone may not be enough.** `grounding.max_trace_chars` only controls how much of the trace P-Ork *already has* it hands to the judge. The Gateway itself caps each `tool_result` event's content **before P-Ork ever receives it** (`limits.trace_tool_result_max_chars`, default 3000, in the Gateway's own config) — if a tool result was truncated there, no `grounding.max_trace_chars` setting on the P-Ork side can recover the missing part, because it was never sent. Use the primary step's `executor_config.trace_max_chars` (§8, `gateway` executor) to raise the Gateway-side cap for that step, *then* raise `grounding.max_trace_chars` here to match — otherwise you've just moved the same cutoff from the judge's transcript-formatting step to the Gateway's own capture step. Either cutoff being too low produces the identical symptom (a claim that looks unsupported but genuinely wasn't), so if grounding keeps flagging claims you believe are backed by real evidence, check both.
 
-**Soft failure.** Like the verifier, a grounding call that errors or times out logs a warning and records `grounding_score = NULL` with the error captured in the report — it never breaks or delays the step.
+**Soft failure.** Like the verifier, a grounding call that errors or times out logs a warning and records `grounding_score = NULL` with the error captured in the report — it never breaks or delays the step. When the failure is specifically the judge's own output not parsing as JSON — most commonly because a step with many load-bearing claims produced a per-claim evidence list long enough to hit the judge agent's output-length ceiling mid-generation — the report's `raw_output` field carries the judge's full, untruncated text (not just the 500-character snippet in the log/exception message), so a reviewer can tell "genuinely truncated" apart from "malformed from the start."
 
 **The `grounding-judge` agent contract.** Grounding calls a gateway agent (configured on the **P-Ork Gateway**, not in this repo) whose only job is a constrained cross-reference — it cannot browse or add outside knowledge. It receives:
 
@@ -1915,7 +1917,7 @@ The judge's prompt is explicit that (1) is *given, trusted input* — a claim th
 
 The persisted `trust_report.grounding` also records **which** agent/model actually judged this run — `agent` (from `grounding.agent` config), plus `model`/`provider` read straight from the judge's own response metadata (both `null` when grounding didn't compute, e.g. an error or no trace) — and, gateway executor only, `prompt`: the judge's own fully-rendered prompt (the `_GROUNDING_PROMPT_TEMPLATE` with the original task, primary's response, and trace all substituted in), so a reviewer can see exactly what the judge was shown, not just what it concluded.
 
-**Where it surfaces.** Each grounded step's expanded detail panel shows a **"Trust (shadow)"** widget: self-report (S) vs. verifier (V, if any, with its own agent/model shown alongside) vs. grounding (G, with its judging agent/model shown alongside), a divergence flag when `|G − S| ≥ 0.2`, and the per-claim ✓/✗ breakdown with evidence. `pork_step_grounding_score` (see §Metrics) exposes the score distribution for Grafana.
+**Where it surfaces.** Each grounded step's expanded detail panel shows a **"Trust (shadow)"** widget: self-report (S) vs. verifier (V, if any, with its own agent/model shown alongside) vs. grounding (G, with its judging agent/model shown alongside), a divergence flag when `|G − S| ≥ 0.2`, the judge's own one-sentence verdict (`trust_report.grounding.summary`, e.g. *"3 of 4 load-bearing claims are supported by tool results; the root-cause claim is not."*), and the per-claim ✓/✗ breakdown with evidence. `pork_step_grounding_score` (see §Metrics) exposes the score distribution for Grafana.
 
 **The Trust panel isn't just for grounded steps.** Any step with a verifier — even with no grounding, deterministic checks, or calibration configured — gets a "Trust (shadow)" panel too, so how S and V combined is never invisible. A **"How was this calculated?"** button reveals a plain-language, numbers-first walkthrough of that specific run: self-report → verifier combine → calibration (if enforced) → grounding (if configured) → deterministic checks (if declared) → the final figure and what it decided. No config keys, just what actually happened on this run — built from the same `trust_report` data, not a re-derivation from the pipeline's current config.
 
@@ -2332,6 +2334,21 @@ pip install -r requirements-dev.txt
 cd service
 pytest
 ```
+
+By default the suite runs against SQLite — a fresh per-test temp-file DB, no setup
+required. To run the same tests against Postgres instead (exercising the
+Postgres-only migration branch in `create_tables()`), point `PORK_TEST_DATABASE_URL`
+at a throwaway database:
+
+```bash
+createdb pork_test
+PORK_TEST_DATABASE_URL=postgresql+asyncpg://localhost:5432/pork_test pytest
+```
+
+Isolation on Postgres is via a `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`
+reset around each test (see `tests/conftest.py`'s `db` fixture) rather than a fresh
+file, since there's no per-test temp file on a shared server. CI
+(`.github/workflows/tests.yml`) runs both backends on every push.
 
 ---
 

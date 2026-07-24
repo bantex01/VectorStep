@@ -586,6 +586,9 @@
           </div>
         </div>
         {% endif %}
+        {% if item.trust.grounding and item.trust.grounding.computed and item.trust.grounding.summary %}
+        <p class="mt-2 text-xs text-zinc-400">{{ item.trust.grounding.summary }}</p>
+        {% endif %}
         {% if item.trust.grounding and item.trust.grounding.claims %}
         <div class="mt-2 space-y-1">
           {% for c in item.trust.grounding.claims %}

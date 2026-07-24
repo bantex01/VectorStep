@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..artifacts.store import ArtifactStore
 from ..db.models import PipelineRun, PipelineStep
-from ..executors.base import BaseExecutor
+from ..executors.base import BaseExecutor, LLMParseError
 from ..models.context import NormalisedContext
 from ..models.llm import LLMOutput
 from .. import run_events
@@ -1634,8 +1634,15 @@ class PipelineRunner:
                 _log_event(run_log, "warn", "grounding_failed",
                            f"Grounding failed for {step.name}: {exc}", step=step.name)
                 span.set_status(Status(StatusCode.ERROR))
-                return None, {"computed": False, "reason": "error", "error": str(exc),
-                              "agent": grounding.agent, "enforce": grounding.enforce}, 0
+                error_report = {"computed": False, "reason": "error", "error": str(exc),
+                                 "agent": grounding.agent, "enforce": grounding.enforce}
+                if isinstance(exc, LLMParseError):
+                    # The judge's own JSON failed to parse — persist the full,
+                    # untruncated text it actually returned (not just the message's
+                    # 500-char snippet) so a human can tell "truncated mid-output"
+                    # apart from "malformed from the start".
+                    error_report["raw_output"] = exc.raw_text
+                return None, error_report, 0
 
             g = max(0.0, min(1.0, float(out.confidence)))
             span.set_attribute("pork.grounding.score", g)

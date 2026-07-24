@@ -10,7 +10,7 @@ from ..models.pipeline import StepConfig
 from .. import run_events
 from ..tracing import gen_ai_attrs_from_meta, inject_traceparent, tracer
 from ..utils import utc_now
-from .base import BaseExecutor
+from .base import BaseExecutor, LLMParseError
 
 logger = logging.getLogger(__name__)
 
@@ -284,9 +284,10 @@ class GatewayExecutor(BaseExecutor):
 
         if parsed is None:
             last_text = payloads[-1].get("text", "")
-            raise RuntimeError(
+            raise LLMParseError(
                 f"Step '{step_name}': no payload contained valid JSON. "
-                f"Last payload: {last_text[:500]}"
+                f"Last payload: {last_text[:500]}",
+                raw_text=last_text,
             )
 
         agent_meta = result.get("meta", {}).get("agentMeta", {})

@@ -1,0 +1,48 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: pytest (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        backend: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pork
+          POSTGRES_PASSWORD: pork
+          POSTGRES_DB: pork_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U pork"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests (sqlite)
+        if: matrix.backend == 'sqlite'
+        working-directory: service
+        run: pytest
+
+      - name: Run tests (postgres)
+        if: matrix.backend == 'postgres'
+        working-directory: service
+        env:
+          PORK_TEST_DATABASE_URL: postgresql+asyncpg://pork:pork@localhost:5432/pork_test
+        run: pytest

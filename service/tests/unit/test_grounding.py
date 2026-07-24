@@ -4,10 +4,11 @@ persistence, migration, and the pork_step_grounding_score metric."""
 import json
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 
-from src.db.database import create_tables, get_session_factory, init_db
+from src.db.database import create_tables, get_session_factory
 from src.db.models import PipelineStep
+from src.executors.base import LLMParseError
 from src.metrics import MetricsData, PorkCollector, fetch_metrics_data
 from src.models.context import NormalisedContext
 from src.models.llm import LLMOutput
@@ -30,6 +31,17 @@ class _StubExecutor:
 class _RaisingExecutor:
     async def execute(self, step, ctx):
         raise RuntimeError("gateway unreachable")
+
+
+class _ParseErrorExecutor:
+    async def execute(self, step, ctx):
+        raise LLMParseError(
+            "Step 'investigate:grounding': no payload contained valid JSON. "
+            "Last payload: {\"confidence\": 1.0, \"summary\": \"...",
+            raw_text='{"confidence": 1.0, "summary": "All 12 load-bearing claims are '
+                     'supported...", "reasoning": {"claims": [{"claim": "The service doc '
+                     'was found.", "supported": true, "evidence": "atlassian__getConfluenceP',
+        )
 
 
 def _make_normalised(**kwargs) -> NormalisedContext:
@@ -288,6 +300,28 @@ async def test_run_grounding_soft_fails_on_executor_error():
     assert "gateway unreachable" in report["error"]
     assert tokens == 0
     assert any(e["event"] == "grounding_failed" for e in run_log)
+    assert "raw_output" not in report
+
+
+async def test_run_grounding_captures_raw_output_on_parse_error():
+    """A judge response that fails LLMOutput/JSON parsing (e.g. truncated mid-claim
+    because the judge hit its output-length ceiling) should persist the full raw text
+    it actually returned, not just the exception's truncated message — otherwise
+    there's no way to tell 'truncated' apart from 'malformed from the start'."""
+    runner = _runner(executors={"grounding_stub": lambda: _ParseErrorExecutor()})
+    step = StepConfig(
+        name="investigate", executor="gateway", prompt_template="",
+        grounding=GroundingConfig(executor="grounding_stub"),
+    )
+    primary = _make_output(raw_response={"trace": _TOOL_TRACE})
+
+    g, report, tokens = await runner._run_grounding(step=step, ctx={}, primary_output=primary, run_log=[])
+
+    assert g is None
+    assert report["computed"] is False
+    assert report["reason"] == "error"
+    assert report["raw_output"].startswith('{"confidence": 1.0')
+    assert tokens == 0
 
 
 # ---------------------------------------------------------------------------
@@ -379,9 +413,7 @@ async def test_step_without_grounding_block_leaves_fields_none():
 # 7. Persistence
 # ---------------------------------------------------------------------------
 
-async def test_grounding_score_and_trust_report_persisted(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_grounding_score_and_trust_report_persisted(db):
     sf = get_session_factory()
 
     primary_output = _make_output(confidence=0.9, raw_response={"trace": _TOOL_TRACE})
@@ -428,16 +460,15 @@ async def test_grounding_score_and_trust_report_persisted(tmp_path):
 # 8. Migration
 # ---------------------------------------------------------------------------
 
-async def test_grounding_columns_exist_after_create_tables(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_grounding_columns_exist_after_create_tables(db):
     await create_tables()  # idempotent, mirrors test_database_migrations.py
 
     sf = get_session_factory()
     async with sf() as session:
         conn = await session.connection()
-        columns_result = await conn.exec_driver_sql("PRAGMA table_info(pipeline_steps)")
-        columns = {row[1] for row in columns_result.fetchall()}
+        columns = await conn.run_sync(
+            lambda c: {col["name"] for col in inspect(c).get_columns("pipeline_steps")}
+        )
 
     assert "grounding_score" in columns
     assert "trust_report" in columns
@@ -477,9 +508,7 @@ def test_collect_emits_pork_step_grounding_score():
     assert count_sample.value == 2
 
 
-async def test_fetch_metrics_data_excludes_null_and_testing_stage_grounding(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_fetch_metrics_data_excludes_null_and_testing_stage_grounding(db):
     sf = get_session_factory()
 
     from src.db.models import PipelineRun

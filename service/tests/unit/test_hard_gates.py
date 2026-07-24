@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 
-from src.db.database import create_tables, get_session_factory, init_db
+from src.db.database import create_tables, get_session_factory
 from src.db.models import PipelineStep
 from src.executors import human
 from src.metrics import MetricsData, PorkCollector, fetch_metrics_data
@@ -527,9 +527,7 @@ def test_gate_policy_trust_vector_vs_legacy_confidence():
 # 8. Persistence
 # ---------------------------------------------------------------------------
 
-async def test_deterministic_passed_persisted(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_deterministic_passed_persisted(db):
     sf = get_session_factory()
 
     failing_output = _make_output(confidence=0.95)
@@ -567,13 +565,11 @@ async def test_deterministic_passed_persisted(tmp_path):
     assert plain_row.deterministic_passed is None
 
 
-async def test_rendered_prompt_persisted_when_executor_stashes_it(tmp_path):
+async def test_rendered_prompt_persisted_when_executor_stashes_it(db):
     """The gateway executor stashes the rendered prompt text in raw_response['prompt']
     (see GatewayExecutor.execute) — _db_save_step must use that for PipelineStep.prompt
     instead of the executor_config dump, so a reviewer can see exactly what the agent
     was actually asked, not just which agent/session it used."""
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
     sf = get_session_factory()
 
     primary_output = _make_output(
@@ -593,12 +589,10 @@ async def test_rendered_prompt_persisted_when_executor_stashes_it(tmp_path):
     assert row.prompt == "Investigate the alert for payment-api."
 
 
-async def test_prompt_falls_back_to_executor_config_when_not_stashed(tmp_path):
+async def test_prompt_falls_back_to_executor_config_when_not_stashed(db):
     """An executor that doesn't stash a rendered prompt (or a step whose executor call
     failed before returning) still gets the pre-existing executor_config fallback,
     rather than an empty/broken column."""
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
     sf = get_session_factory()
 
     primary_output = _make_output(confidence=0.9)  # raw_response={} — no "prompt" key
@@ -616,12 +610,10 @@ async def test_prompt_falls_back_to_executor_config_when_not_stashed(tmp_path):
     assert json.loads(row.prompt) == {"agent": "x"}
 
 
-async def test_verifier_agent_model_provider_persisted_to_db(tmp_path):
+async def test_verifier_agent_model_provider_persisted_to_db(db):
     """Which agent/model actually ran the verifier must be a real per-run column, not
     something read back out of the pipeline's current config — the config can drift
     from what a historical run actually executed."""
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
     sf = get_session_factory()
 
     primary_output = LLMOutput(
@@ -664,9 +656,7 @@ async def test_verifier_agent_model_provider_persisted_to_db(tmp_path):
     assert row.verifier_prompt == "You are an independent reviewer... (verifier's own rendered prompt)"
 
 
-async def test_no_verifier_leaves_verifier_attribution_columns_null(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_no_verifier_leaves_verifier_attribution_columns_null(db):
     sf = get_session_factory()
 
     primary_output = _make_output(confidence=0.9)
@@ -691,16 +681,15 @@ async def test_no_verifier_leaves_verifier_attribution_columns_null(tmp_path):
 # 9. Migration
 # ---------------------------------------------------------------------------
 
-async def test_deterministic_passed_column_exists_after_create_tables(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_deterministic_passed_column_exists_after_create_tables(db):
     await create_tables()  # idempotent
 
     sf = get_session_factory()
     async with sf() as session:
         conn = await session.connection()
-        columns_result = await conn.exec_driver_sql("PRAGMA table_info(pipeline_steps)")
-        columns = {row[1] for row in columns_result.fetchall()}
+        columns = await conn.run_sync(
+            lambda c: {col["name"] for col in inspect(c).get_columns("pipeline_steps")}
+        )
 
     assert "deterministic_passed" in columns
     assert "verifier_agent" in columns
@@ -709,16 +698,13 @@ async def test_deterministic_passed_column_exists_after_create_tables(tmp_path):
     assert "verifier_prompt" in columns
 
 
-async def test_verifier_attribution_columns_migrate_onto_a_preexisting_db(tmp_path):
+async def test_verifier_attribution_columns_migrate_onto_a_preexisting_db(db):
     """Reproduces a real failure: a DB created before verifier_agent/model/provider
     existed raised 'no such column' on every run-detail page load after upgrading,
     because Base.metadata.create_all() only creates missing TABLES — it never adds a
     new column to a table that already exists. _COLUMN_MIGRATIONS is what's actually
     responsible for that, and it's easy to add a column to the ORM model (db/models.py)
     while forgetting to also register it here — this test catches exactly that."""
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
-
     sf = get_session_factory()
     async with sf() as session:
         conn = await session.connection()
@@ -760,9 +746,7 @@ def test_collect_emits_pork_step_deterministic_check_total():
     assert by_outcome["failed"] == 1
 
 
-async def test_fetch_metrics_data_deterministic_check_counts_excludes_null_and_testing(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_fetch_metrics_data_deterministic_check_counts_excludes_null_and_testing(db):
     sf = get_session_factory()
 
     from src.db.models import PipelineRun

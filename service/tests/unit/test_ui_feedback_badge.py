@@ -3,10 +3,11 @@
 what it was marked as, without needing to open the run."""
 from datetime import datetime
 
+import httpx
+import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
-from src.db.database import create_tables, get_session_factory, init_db
+from src.db.database import get_session_factory
 from src.db.models import PipelineRun, RunFeedback
 from src.models.pipeline import PipelineConfig, StepConfig, TriggerConfig
 from src.ui import _feedback_by_run_id
@@ -14,12 +15,16 @@ from src.ui import router as ui_router
 
 app = FastAPI()
 app.include_router(ui_router)
-client = TestClient(app)
 
 
-async def _seed(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+@pytest.fixture
+async def client():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+async def _seed():
     sf = get_session_factory()
     async with sf() as session:
         session.add(PipelineRun(
@@ -46,8 +51,8 @@ async def _seed(tmp_path):
     return sf
 
 
-async def test_feedback_by_run_id_returns_only_marked_runs(tmp_path):
-    sf = await _seed(tmp_path)
+async def test_feedback_by_run_id_returns_only_marked_runs(db):
+    sf = await _seed()
     async with sf() as session:
         result = await _feedback_by_run_id(
             session, ["r-correct", "r-partial", "r-incorrect", "r-unmarked"]
@@ -56,16 +61,16 @@ async def test_feedback_by_run_id_returns_only_marked_runs(tmp_path):
     assert "r-unmarked" not in result
 
 
-async def test_feedback_by_run_id_empty_list_returns_empty_dict(tmp_path):
-    sf = await _seed(tmp_path)
+async def test_feedback_by_run_id_empty_list_returns_empty_dict(db):
+    sf = await _seed()
     async with sf() as session:
         assert await _feedback_by_run_id(session, []) == {}
 
 
-async def test_runs_page_shows_all_four_badge_states(tmp_path):
-    await _seed(tmp_path)
+async def test_runs_page_shows_all_four_badge_states(db, client):
+    await _seed()
 
-    resp = client.get("/ui/runs")
+    resp = await client.get("/ui/runs")
 
     assert resp.status_code == 200
     body = resp.text
@@ -75,23 +80,23 @@ async def test_runs_page_shows_all_four_badge_states(tmp_path):
     assert body.count('title="Not yet marked"') == 1
 
 
-async def test_dashboard_recent_runs_shows_badges(tmp_path):
-    await _seed(tmp_path)
+async def test_dashboard_recent_runs_shows_badges(db, client):
+    await _seed()
 
-    resp = client.get("/ui/")
+    resp = await client.get("/ui/")
 
     assert resp.status_code == 200
     assert 'title="Marked correct"' in resp.text
     assert 'title="Not yet marked"' in resp.text
 
 
-async def test_pipeline_detail_recent_runs_shows_badges(tmp_path):
-    await _seed(tmp_path)
+async def test_pipeline_detail_recent_runs_shows_badges(tmp_path, db, client):
+    await _seed()
     pipeline = PipelineConfig(name="p", trigger=TriggerConfig(), steps=[StepConfig(name="s", executor="human")])
     app.state.pipelines = [pipeline]
     app.state.pipeline_dir = str(tmp_path)
 
-    resp = client.get("/ui/pipelines/p")
+    resp = await client.get("/ui/pipelines/p")
 
     assert resp.status_code == 200
     assert 'title="Marked correct"' in resp.text

@@ -3,22 +3,27 @@ surfaces, the stage filter on /ui/runs, and production-only exclusion on rollup
 surfaces (stat cards, pipeline list success rate, pipeline detail totals)."""
 from datetime import datetime
 
+import httpx
+import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
-from src.db.database import create_tables, get_session_factory, init_db
+from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep
 from src.models.pipeline import PipelineConfig, StepConfig, TriggerConfig
 from src.ui import router as ui_router
 
 app = FastAPI()
 app.include_router(ui_router)
-client = TestClient(app)
 
 
-async def _seed(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+@pytest.fixture
+async def client():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+async def _seed():
     sf = get_session_factory()
     async with sf() as session:
         session.add(PipelineRun(
@@ -45,61 +50,61 @@ async def _seed(tmp_path):
     return sf
 
 
-async def test_runs_page_shows_testing_badge_only_on_testing_run(tmp_path):
-    await _seed(tmp_path)
-    resp = client.get("/ui/runs")
+async def test_runs_page_shows_testing_badge_only_on_testing_run(db, client):
+    await _seed()
+    resp = await client.get("/ui/runs")
     assert resp.status_code == 200
     assert resp.text.count(">TESTING<") == 1
 
 
-async def test_runs_page_stage_filter_shows_only_testing(tmp_path):
-    await _seed(tmp_path)
-    resp = client.get("/ui/runs?stage=testing")
+async def test_runs_page_stage_filter_shows_only_testing(db, client):
+    await _seed()
+    resp = await client.get("/ui/runs?stage=testing")
     assert resp.status_code == 200
     # Only the testing run should appear in the (browse) list — one row, one badge.
     assert resp.text.count(">TESTING<") == 1
     assert resp.text.count("<tr class=\"hover:bg-zinc-800 transition-colors\">") == 1
 
 
-async def test_runs_page_stage_filter_production_excludes_testing_run(tmp_path):
-    await _seed(tmp_path)
-    resp = client.get("/ui/runs?stage=production")
+async def test_runs_page_stage_filter_production_excludes_testing_run(db, client):
+    await _seed()
+    resp = await client.get("/ui/runs?stage=production")
     assert resp.status_code == 200
     assert ">TESTING<" not in resp.text
     assert resp.text.count("<tr class=\"hover:bg-zinc-800 transition-colors\">") == 1
 
 
-async def test_runs_page_stat_cards_exclude_testing_run(tmp_path):
-    await _seed(tmp_path)
-    resp = client.get("/ui/runs")
+async def test_runs_page_stat_cards_exclude_testing_run(db, client):
+    await _seed()
+    resp = await client.get("/ui/runs")
     assert resp.status_code == 200
     # "Runs" stat card = total_matching, scoped to production only -> 1, not 2.
     idx = resp.text.find("Runs</p>")
     assert ">1<" in resp.text[idx:idx + 200]
 
 
-async def test_dashboard_recent_runs_shows_testing_badge(tmp_path):
-    await _seed(tmp_path)
-    resp = client.get("/ui/")
+async def test_dashboard_recent_runs_shows_testing_badge(db, client):
+    await _seed()
+    resp = await client.get("/ui/")
     assert resp.status_code == 200
     assert ">TESTING<" in resp.text
 
 
-async def test_dashboard_counts_exclude_testing_run(tmp_path):
-    await _seed(tmp_path)
-    resp = client.get("/ui/")
+async def test_dashboard_counts_exclude_testing_run(db, client):
+    await _seed()
+    resp = await client.get("/ui/")
     assert resp.status_code == 200
     # counts_all/counts_24h are production-only -> 1 run total, not 2.
     assert "1 all time" in resp.text
 
 
-async def test_pipeline_detail_shows_stage_badge_and_excludes_testing_from_totals(tmp_path):
-    await _seed(tmp_path)
+async def test_pipeline_detail_shows_stage_badge_and_excludes_testing_from_totals(tmp_path, db, client):
+    await _seed()
     pipeline = PipelineConfig(name="p", trigger=TriggerConfig(), steps=[StepConfig(name="s", executor="gateway")])
     app.state.pipelines = [pipeline]
     app.state.pipeline_dir = str(tmp_path)
 
-    resp = client.get("/ui/pipelines/p")
+    resp = await client.get("/ui/pipelines/p")
 
     assert resp.status_code == 200
     # Pipeline-level badge (from in-memory PipelineConfig.stage, default "testing")
@@ -110,13 +115,13 @@ async def test_pipeline_detail_shows_stage_badge_and_excludes_testing_from_total
     assert "1" in resp.text[idx:idx + 60]
 
 
-async def test_pipelines_list_shows_stage_badge(tmp_path):
-    await _seed(tmp_path)
+async def test_pipelines_list_shows_stage_badge(db, client):
+    await _seed()
 
     pipeline = PipelineConfig(name="p", trigger=TriggerConfig(), steps=[StepConfig(name="s", executor="gateway")])
     app.state.pipelines = [pipeline]
 
-    resp = client.get("/ui/pipelines")
+    resp = await client.get("/ui/pipelines")
 
     assert resp.status_code == 200
     assert ">TESTING<" in resp.text

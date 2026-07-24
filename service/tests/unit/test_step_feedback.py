@@ -2,23 +2,27 @@
 the Steps Insights rollup, and the pork_step_feedback_total metric."""
 from datetime import datetime
 
-from fastapi.testclient import TestClient
+import httpx
+import pytest
 
-from src.db.database import create_tables, get_session_factory, init_db
+from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep, StepFeedback
 from src.main import app
 from src.metrics import MetricsData, PorkCollector, fetch_metrics_data
 
-client = TestClient(app)
+
+@pytest.fixture
+async def client():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
 
 
 def _find_family(families, sample_name):
     return next(f for f in families if any(s.name == sample_name for s in f.samples))
 
 
-async def _seed_run_with_step(tmp_path, step_name="triage", run_id="run-1", stage="production"):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def _seed_run_with_step(step_name="triage", run_id="run-1", stage="production"):
     sf = get_session_factory()
     async with sf() as session:
         session.add(PipelineRun(
@@ -40,10 +44,10 @@ async def _seed_run_with_step(tmp_path, step_name="triage", run_id="run-1", stag
 # Endpoints
 # ---------------------------------------------------------------------------
 
-async def test_post_valid_outcome_creates_row(tmp_path):
-    await _seed_run_with_step(tmp_path)
+async def test_post_valid_outcome_creates_row(db, client):
+    await _seed_run_with_step()
 
-    resp = client.post("/runs/run-1/steps/triage/feedback", json={"outcome": "correct", "notes": "looks right"})
+    resp = await client.post("/runs/run-1/steps/triage/feedback", json={"outcome": "correct", "notes": "looks right"})
 
     assert resp.status_code == 200
     body = resp.json()
@@ -61,11 +65,11 @@ async def test_post_valid_outcome_creates_row(tmp_path):
     assert rows[0].outcome == "correct"
 
 
-async def test_post_again_upserts(tmp_path):
-    await _seed_run_with_step(tmp_path)
+async def test_post_again_upserts(db, client):
+    await _seed_run_with_step()
 
-    client.post("/runs/run-1/steps/triage/feedback", json={"outcome": "correct"})
-    resp = client.post("/runs/run-1/steps/triage/feedback", json={"outcome": "incorrect", "notes": "changed my mind"})
+    await client.post("/runs/run-1/steps/triage/feedback", json={"outcome": "correct"})
+    resp = await client.post("/runs/run-1/steps/triage/feedback", json={"outcome": "incorrect", "notes": "changed my mind"})
 
     assert resp.status_code == 200
     assert resp.json()["outcome"] == "incorrect"
@@ -80,51 +84,51 @@ async def test_post_again_upserts(tmp_path):
     assert rows[0].notes == "changed my mind"
 
 
-async def test_post_invalid_outcome_returns_400(tmp_path):
-    await _seed_run_with_step(tmp_path)
+async def test_post_invalid_outcome_returns_400(db, client):
+    await _seed_run_with_step()
 
-    resp = client.post("/runs/run-1/steps/triage/feedback", json={"outcome": "maybe"})
+    resp = await client.post("/runs/run-1/steps/triage/feedback", json={"outcome": "maybe"})
 
     assert resp.status_code == 400
 
 
-async def test_post_unknown_step_returns_404(tmp_path):
-    await _seed_run_with_step(tmp_path)
+async def test_post_unknown_step_returns_404(db, client):
+    await _seed_run_with_step()
 
-    resp = client.post("/runs/run-1/steps/nonexistent/feedback", json={"outcome": "correct"})
+    resp = await client.post("/runs/run-1/steps/nonexistent/feedback", json={"outcome": "correct"})
 
     assert resp.status_code == 404
 
 
-async def test_get_unknown_step_returns_null_feedback(tmp_path):
-    await _seed_run_with_step(tmp_path)
+async def test_get_unknown_step_returns_null_feedback(db, client):
+    await _seed_run_with_step()
 
-    resp = client.get("/runs/run-1/steps/nonexistent/feedback")
+    resp = await client.get("/runs/run-1/steps/nonexistent/feedback")
 
     assert resp.status_code == 200
     assert resp.json() == {"feedback": None}
 
 
-async def test_fanout_branch_name_with_slash(tmp_path):
-    await _seed_run_with_step(tmp_path, step_name="triage/0")
+async def test_fanout_branch_name_with_slash(db, client):
+    await _seed_run_with_step(step_name="triage/0")
 
-    resp = client.post("/runs/run-1/steps/triage/0/feedback", json={"outcome": "partial"})
+    resp = await client.post("/runs/run-1/steps/triage/0/feedback", json={"outcome": "partial"})
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["step_name"] == "triage/0"
     assert body["outcome"] == "partial"
 
-    get_resp = client.get("/runs/run-1/steps/triage/0/feedback")
+    get_resp = await client.get("/runs/run-1/steps/triage/0/feedback")
     assert get_resp.status_code == 200
     assert get_resp.json()["feedback"]["outcome"] == "partial"
 
 
-async def test_get_returns_stored_feedback_after_post(tmp_path):
-    await _seed_run_with_step(tmp_path)
-    client.post("/runs/run-1/steps/triage/feedback", json={"outcome": "correct", "notes": "n"})
+async def test_get_returns_stored_feedback_after_post(db, client):
+    await _seed_run_with_step()
+    await client.post("/runs/run-1/steps/triage/feedback", json={"outcome": "correct", "notes": "n"})
 
-    resp = client.get("/runs/run-1/steps/triage/feedback")
+    resp = await client.get("/runs/run-1/steps/triage/feedback")
 
     assert resp.status_code == 200
     fb = resp.json()["feedback"]
@@ -138,9 +142,7 @@ async def test_get_returns_stored_feedback_after_post(tmp_path):
 # Rollup — Steps Insights
 # ---------------------------------------------------------------------------
 
-async def test_steps_insights_rollup_includes_accuracy(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_steps_insights_rollup_includes_accuracy(db, client):
     sf = get_session_factory()
     async with sf() as session:
         session.add(PipelineRun(
@@ -158,9 +160,6 @@ async def test_steps_insights_rollup_includes_accuracy(tmp_path):
             executor="gateway", agent="agent-x", model="claude-sonnet-5", provider="anthropic",
             prompt="", status="completed", executed_at=datetime(2026, 1, 1),
         ))
-        session.add(StepFeedback(id="fb-a", step_id="step-a", run_id="run-prod", pipeline_name="p", step_name="triage", outcome="correct"))
-        session.add(StepFeedback(id="fb-b", step_id="step-b", run_id="run-prod", pipeline_name="p", step_name="investigate", outcome="incorrect"))
-
         # Testing-stage run — must be excluded from the rollup.
         session.add(PipelineRun(
             id="run-test", pipeline_name="p", source="generic", status="completed",
@@ -172,10 +171,17 @@ async def test_steps_insights_rollup_includes_accuracy(tmp_path):
             executor="gateway", agent="agent-x", model="claude-sonnet-5", provider="anthropic",
             prompt="", status="completed", executed_at=datetime(2026, 1, 1),
         ))
+        # Flush the runs/steps before adding feedback rows that FK-reference them —
+        # Postgres enforces the FK within the same flush; SQLite doesn't, so this
+        # ordering requirement is silent there (see test_calibration.py's _seed_step
+        # for the same pattern).
+        await session.flush()
+        session.add(StepFeedback(id="fb-a", step_id="step-a", run_id="run-prod", pipeline_name="p", step_name="triage", outcome="correct"))
+        session.add(StepFeedback(id="fb-b", step_id="step-b", run_id="run-prod", pipeline_name="p", step_name="investigate", outcome="incorrect"))
         session.add(StepFeedback(id="fb-c", step_id="step-c", run_id="run-test", pipeline_name="p", step_name="triage", outcome="incorrect"))
         await session.commit()
 
-    resp = client.get("/ui/insights/steps?time_range=all")
+    resp = await client.get("/ui/insights/steps?time_range=all")
 
     assert resp.status_code == 200
     body = resp.text
@@ -211,9 +217,7 @@ def test_collect_emits_pork_step_feedback_total():
     assert by_outcome["incorrect"][1]["provider"] == ""
 
 
-async def test_fetch_metrics_data_excludes_testing_stage_step_feedback(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_fetch_metrics_data_excludes_testing_stage_step_feedback(db):
     sf = get_session_factory()
     async with sf() as session:
         session.add(PipelineRun(
@@ -234,6 +238,7 @@ async def test_fetch_metrics_data_excludes_testing_stage_step_feedback(tmp_path)
             executor="gateway", agent="agent-x", model="m", provider="anthropic",
             prompt="", status="completed", executed_at=datetime(2026, 1, 1),
         ))
+        await session.flush()  # see test_steps_insights_rollup_includes_accuracy
         session.add(StepFeedback(id="fb-prod", step_id="step-prod", run_id="run-prod", pipeline_name="p", step_name="triage", outcome="correct"))
         session.add(StepFeedback(id="fb-test", step_id="step-test", run_id="run-test", pipeline_name="p", step_name="triage", outcome="incorrect"))
         await session.commit()

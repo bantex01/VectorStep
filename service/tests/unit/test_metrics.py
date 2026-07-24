@@ -2,7 +2,7 @@
 pork_pipeline_feedback_total, and pork_human_approvals_pending."""
 from datetime import datetime
 
-from src.db.database import create_tables, init_db, get_session_factory
+from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep, RunFeedback
 from src.executors import human
 from src.metrics import MetricsData, PorkCollector, fetch_metrics_data
@@ -63,9 +63,7 @@ def test_collect_buckets_null_team_and_model_as_empty_string():
     assert family.samples[0].labels["provider"] == ""
 
 
-async def test_fetch_metrics_data_excludes_steps_without_tokens(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_fetch_metrics_data_excludes_steps_without_tokens(db):
     session_factory = get_session_factory()
 
     async with session_factory() as session:
@@ -93,9 +91,7 @@ async def test_fetch_metrics_data_excludes_steps_without_tokens(tmp_path):
     assert (input_sum, output_sum) == (100, 50)
 
 
-async def test_fetch_metrics_data_sums_across_steps(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_fetch_metrics_data_sums_across_steps(db):
     session_factory = get_session_factory()
 
     async with session_factory() as session:
@@ -143,9 +139,7 @@ def test_collect_buckets_null_team_in_human_decisions():
     assert family.samples[0].labels["team"] == ""
 
 
-async def test_fetch_metrics_data_derives_decision_from_primary_confidence(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_fetch_metrics_data_derives_decision_from_primary_confidence(db):
     session_factory = get_session_factory()
 
     async with session_factory() as session:
@@ -195,9 +189,7 @@ def test_collect_emits_pipeline_feedback_total():
     assert by_outcome == {"correct": 5, "incorrect": 2}
 
 
-async def test_fetch_metrics_data_counts_feedback_by_pipeline_and_outcome(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_fetch_metrics_data_counts_feedback_by_pipeline_and_outcome(db):
     session_factory = get_session_factory()
 
     async with session_factory() as session:
@@ -224,9 +216,7 @@ async def test_fetch_metrics_data_counts_feedback_by_pipeline_and_outcome(tmp_pa
 # stage=testing exclusion — every DB-derived series in fetch_metrics_data
 # ---------------------------------------------------------------------------
 
-async def test_fetch_metrics_data_excludes_testing_runs(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_fetch_metrics_data_excludes_testing_runs(db):
     session_factory = get_session_factory()
 
     async with session_factory() as session:

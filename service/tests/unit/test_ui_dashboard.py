@@ -2,18 +2,24 @@
 per-team breakdown / accuracy / token columns."""
 from datetime import datetime
 
+import httpx
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 import src.ui as ui
-from src.db.database import create_tables, init_db, get_session_factory
+from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep, RunFeedback
 from src.ui import router as ui_router
 
 app = FastAPI()
 app.include_router(ui_router)
-client = TestClient(app)
+
+
+@pytest.fixture
+async def client():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
 
 
 @pytest.fixture(autouse=True)
@@ -22,32 +28,26 @@ def _reset_team_count():
     ui.configure(team_count=0)
 
 
-async def test_dashboard_empty_state_renders(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_dashboard_empty_state_renders(db, client):
     ui.configure(team_count=0)
 
-    resp = client.get("/ui/")
+    resp = await client.get("/ui/")
 
     assert resp.status_code == 200
     assert "No runs in the last 7 days" in resp.text
 
 
-async def test_dashboard_shows_configured_team_count(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_dashboard_shows_configured_team_count(db, client):
     ui.configure(team_count=3)
 
-    resp = client.get("/ui/")
+    resp = await client.get("/ui/")
 
     assert resp.status_code == 200
     idx = resp.text.find("Teams</p>")
     assert ">3<" in resp.text[idx:idx + 100]
 
 
-async def test_dashboard_pipeline_activity_shows_team_accuracy_tokens(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_dashboard_pipeline_activity_shows_team_accuracy_tokens(db, client):
     sf = get_session_factory()
 
     async with sf() as session:
@@ -64,7 +64,7 @@ async def test_dashboard_pipeline_activity_shows_team_accuracy_tokens(tmp_path):
         session.add(RunFeedback(id="fb1", run_id="r1", pipeline_name="approval-test", outcome="correct"))
         await session.commit()
 
-    resp = client.get("/ui/")
+    resp = await client.get("/ui/")
     body = resp.text
 
     assert resp.status_code == 200
@@ -73,9 +73,7 @@ async def test_dashboard_pipeline_activity_shows_team_accuracy_tokens(tmp_path):
     assert "150" in body  # 100 input + 50 output tokens
 
 
-async def test_dashboard_unattributed_team_bucketed(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def test_dashboard_unattributed_team_bucketed(db, client):
     sf = get_session_factory()
 
     async with sf() as session:
@@ -86,7 +84,7 @@ async def test_dashboard_unattributed_team_bucketed(tmp_path):
         ))
         await session.commit()
 
-    resp = client.get("/ui/")
+    resp = await client.get("/ui/")
 
     assert resp.status_code == 200
     assert "unattributed: 1" in resp.text

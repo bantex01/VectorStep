@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 
-from src.db.database import create_tables, get_session_factory, init_db
+from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep, StepFeedback, RunFeedback
 from src.models.context import NormalisedContext
 from src.models.llm import LLMOutput
@@ -45,9 +45,7 @@ def _make_output(confidence=0.9, model=None, provider=None) -> LLMOutput:
     )
 
 
-async def _init(tmp_path):
-    init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-    await create_tables()
+async def _init():
     return get_session_factory()
 
 
@@ -92,8 +90,8 @@ async def _seed_run_feedback(sf, run_id: str, outcome: str):
 # compute_calibration_buckets — label precedence
 # ---------------------------------------------------------------------------
 
-async def test_human_feedback_used_as_label(tmp_path):
-    sf = await _init(tmp_path)
+async def test_human_feedback_used_as_label(db):
+    sf = await _init()
     await _seed_run(sf, "r1")
     await _seed_step(sf, "r1", "investigate", effective_confidence=0.9, step_feedback="correct")
 
@@ -106,8 +104,8 @@ async def test_human_feedback_used_as_label(tmp_path):
     assert bin_.mean_label == 1.0
 
 
-async def test_deterministic_failure_labels_zero_without_step_feedback(tmp_path):
-    sf = await _init(tmp_path)
+async def test_deterministic_failure_labels_zero_without_step_feedback(db):
+    sf = await _init()
     await _seed_run(sf, "r1")
     await _seed_run(sf, "r2")
     await _seed_step(sf, "r1", "investigate", effective_confidence=0.9, deterministic_passed=False, index=0)
@@ -121,8 +119,8 @@ async def test_deterministic_failure_labels_zero_without_step_feedback(tmp_path)
     assert bucket.lookup(0.9).mean_label == 0.0
 
 
-async def test_run_feedback_fallback_used_only_when_no_step_level_label(tmp_path):
-    sf = await _init(tmp_path)
+async def test_run_feedback_fallback_used_only_when_no_step_level_label(db):
+    sf = await _init()
     await _seed_run(sf, "r1")
     await _seed_run(sf, "r2")
     # r1's step has neither StepFeedback nor a failed deterministic check -> falls back to RunFeedback.
@@ -142,8 +140,8 @@ async def test_run_feedback_fallback_used_only_when_no_step_level_label(tmp_path
     assert bucket.lookup(0.9).mean_label == 0.5
 
 
-async def test_step_execution_with_no_label_source_is_excluded(tmp_path):
-    sf = await _init(tmp_path)
+async def test_step_execution_with_no_label_source_is_excluded(db):
+    sf = await _init()
     await _seed_run(sf, "r1")
     await _seed_step(sf, "r1", "investigate", effective_confidence=0.9, index=0)  # no feedback of any kind
 
@@ -156,8 +154,8 @@ async def test_step_execution_with_no_label_source_is_excluded(tmp_path):
 # compute_calibration_buckets — binning + validation boundary
 # ---------------------------------------------------------------------------
 
-async def test_binning_computes_correct_n_and_mean_per_bin(tmp_path):
-    sf = await _init(tmp_path)
+async def test_binning_computes_correct_n_and_mean_per_bin(db):
+    sf = await _init()
     for i, (predicted, outcome) in enumerate([(0.2, "correct"), (0.3, "incorrect"), (0.7, "correct")]):
         run_id = f"r{i}"
         await _seed_run(sf, run_id)
@@ -174,8 +172,8 @@ async def test_binning_computes_correct_n_and_mean_per_bin(tmp_path):
     assert hi_bin.n == 1 and hi_bin.mean_label == 1.0
 
 
-async def test_validated_flips_at_n_min_boundary(tmp_path):
-    sf = await _init(tmp_path)
+async def test_validated_flips_at_n_min_boundary(db):
+    sf = await _init()
     for i in range(5):
         run_id = f"r{i}"
         await _seed_run(sf, run_id)
@@ -192,8 +190,8 @@ async def test_validated_flips_at_n_min_boundary(tmp_path):
     assert bin_at_5_of_6.validated is False
 
 
-async def test_fan_out_branches_collapse_into_one_bucket(tmp_path):
-    sf = await _init(tmp_path)
+async def test_fan_out_branches_collapse_into_one_bucket(db):
+    sf = await _init()
     await _seed_run(sf, "r1")
     await _seed_step(sf, "r1", "triage/0", effective_confidence=0.9, step_feedback="correct", index=0)
     await _seed_step(sf, "r1", "triage/1", effective_confidence=0.8, step_feedback="incorrect", index=1)
@@ -205,8 +203,8 @@ async def test_fan_out_branches_collapse_into_one_bucket(tmp_path):
     assert not any(k[0] == "triage/0" or k[0] == "triage/1" for k in buckets)
 
 
-async def test_bin_width_not_evenly_dividing_one_raises(tmp_path):
-    sf = await _init(tmp_path)
+async def test_bin_width_not_evenly_dividing_one_raises(db):
+    sf = await _init()
     with pytest.raises(AssertionError):
         await compute_calibration_buckets(sf, bin_width=0.3, n_min=1)
 
@@ -215,8 +213,8 @@ async def test_bin_width_not_evenly_dividing_one_raises(tmp_path):
 # CalibrationCache
 # ---------------------------------------------------------------------------
 
-async def test_cache_reuses_within_ttl(tmp_path, monkeypatch):
-    sf = await _init(tmp_path)
+async def test_cache_reuses_within_ttl(db, monkeypatch):
+    sf = await _init()
     call_count = 0
     original = calibration_module.compute_calibration_buckets
 
@@ -234,8 +232,8 @@ async def test_cache_reuses_within_ttl(tmp_path, monkeypatch):
     assert call_count == 1
 
 
-async def test_cache_refetches_after_ttl_expires(tmp_path, monkeypatch):
-    sf = await _init(tmp_path)
+async def test_cache_refetches_after_ttl_expires(db, monkeypatch):
+    sf = await _init()
     call_count = 0
     original = calibration_module.compute_calibration_buckets
 
@@ -261,8 +259,8 @@ async def test_cache_refetches_after_ttl_expires(tmp_path, monkeypatch):
     assert call_count == 2
 
 
-async def test_cache_get_missing_bucket_returns_none(tmp_path):
-    sf = await _init(tmp_path)
+async def test_cache_get_missing_bucket_returns_none(db):
+    sf = await _init()
     cache = CalibrationCache(sf, ttl_seconds=1000)
 
     result = await cache.get("does-not-exist", None, None, None)
@@ -274,8 +272,8 @@ async def test_cache_get_missing_bucket_returns_none(tmp_path):
 # Gate integration (the critical tests — do not skip)
 # ---------------------------------------------------------------------------
 
-async def test_enforced_validated_bucket_overrides_raw_trust_and_escalates(tmp_path):
-    sf = await _init(tmp_path)
+async def test_enforced_validated_bucket_overrides_raw_trust_and_escalates(db):
+    sf = await _init()
     agent_key = "gateway:sre-investigation"
     for i, label in enumerate(["incorrect", "incorrect", "partial"]):
         run_id = f"hist{i}"
@@ -309,8 +307,8 @@ async def test_enforced_validated_bucket_overrides_raw_trust_and_escalates(tmp_p
     assert result.status == "escalated"
 
 
-async def test_enforced_unvalidated_bucket_default_proceed_is_advisory_only(tmp_path):
-    sf = await _init(tmp_path)  # no history at all for this bucket
+async def test_enforced_unvalidated_bucket_default_proceed_is_advisory_only(db):
+    sf = await _init()  # no history at all for this bucket
 
     primary_output = _make_output(confidence=0.9, model="claude-sonnet-5", provider="anthropic")
     runner = PipelineRunner(
@@ -334,8 +332,8 @@ async def test_enforced_unvalidated_bucket_default_proceed_is_advisory_only(tmp_
     assert result.status == "completed"
 
 
-async def test_enforced_unvalidated_bucket_escalate_policy_forces_zero(tmp_path):
-    sf = await _init(tmp_path)  # no history at all for this bucket
+async def test_enforced_unvalidated_bucket_escalate_policy_forces_zero(db):
+    sf = await _init()  # no history at all for this bucket
 
     primary_output = _make_output(confidence=0.9, model="claude-sonnet-5", provider="anthropic")
     runner = PipelineRunner(
@@ -358,8 +356,8 @@ async def test_enforced_unvalidated_bucket_escalate_policy_forces_zero(tmp_path)
     assert result.status == "escalated"
 
 
-async def test_no_calibration_block_is_byte_for_byte_unchanged(tmp_path):
-    sf = await _init(tmp_path)
+async def test_no_calibration_block_is_byte_for_byte_unchanged(db):
+    sf = await _init()
 
     primary_output = _make_output(confidence=0.9, model="claude-sonnet-5", provider="anthropic")
     runner = PipelineRunner(
@@ -381,8 +379,8 @@ async def test_no_calibration_block_is_byte_for_byte_unchanged(tmp_path):
     assert result.status == "completed"
 
 
-async def test_calibration_seeds_combined_trust_before_grounding_min(tmp_path):
-    sf = await _init(tmp_path)
+async def test_calibration_seeds_combined_trust_before_grounding_min(db):
+    sf = await _init()
     agent_key = "gateway:sre-investigation"
     for i, label in enumerate(["incorrect", "partial", "correct"]):
         run_id = f"hist{i}"
@@ -424,8 +422,8 @@ async def test_calibration_seeds_combined_trust_before_grounding_min(tmp_path):
 # TrustReport shape
 # ---------------------------------------------------------------------------
 
-async def test_trust_report_calibration_shape_for_enforced_step(tmp_path):
-    sf = await _init(tmp_path)
+async def test_trust_report_calibration_shape_for_enforced_step(db):
+    sf = await _init()
     agent_key = "gateway:sre-investigation"
     for i in range(3):
         run_id = f"hist{i}"
@@ -468,8 +466,8 @@ async def test_trust_report_calibration_shape_for_enforced_step(tmp_path):
     assert calib["on_uncalibrated"] == "proceed"
 
 
-async def test_trust_report_calibration_absent_for_non_enforced_step(tmp_path):
-    sf = await _init(tmp_path)
+async def test_trust_report_calibration_absent_for_non_enforced_step(db):
+    sf = await _init()
 
     primary_output = _make_output(confidence=0.9, model="claude-sonnet-5", provider="anthropic")
     grounding_output = LLMOutput(confidence=0.9, summary="ok", next_step_context="", raw_response={})
