@@ -1628,13 +1628,21 @@ class PipelineRunner:
                 coro = executor.execute(grounding_step, grounding_ctx)
                 out = await asyncio.wait_for(coro, timeout=grounding.timeout_seconds)
             except Exception as exc:
+                # asyncio.TimeoutError (raised by the wait_for above, not by the
+                # executor) carries no message of its own — str(exc) is '', which
+                # renders as a blank, useless "failed: " line. Give it one.
+                error_message = (
+                    f"grounding call timed out after {grounding.timeout_seconds}s"
+                    if isinstance(exc, asyncio.TimeoutError) else str(exc)
+                )
                 logger.warning(
-                    "Grounding pass for step '%s' failed: %s — recording G=null", step.name, exc
+                    "Grounding pass for step '%s' failed: %s — recording G=null",
+                    step.name, error_message,
                 )
                 _log_event(run_log, "warn", "grounding_failed",
-                           f"Grounding failed for {step.name}: {exc}", step=step.name)
+                           f"Grounding failed for {step.name}: {error_message}", step=step.name)
                 span.set_status(Status(StatusCode.ERROR))
-                error_report = {"computed": False, "reason": "error", "error": str(exc),
+                error_report = {"computed": False, "reason": "error", "error": error_message,
                                  "agent": grounding.agent, "enforce": grounding.enforce}
                 if isinstance(exc, LLMParseError):
                     # The judge's own JSON failed to parse — persist the full,

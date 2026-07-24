@@ -1,6 +1,7 @@
 """Tests for shadow-mode grounding (SPEC-grounding-shadow.md): trace formatting,
 _run_grounding, _build_trust_report, the shadow-means-no-gate-change guarantee,
 persistence, migration, and the pork_step_grounding_score metric."""
+import asyncio
 import json
 from datetime import datetime
 
@@ -31,6 +32,11 @@ class _StubExecutor:
 class _RaisingExecutor:
     async def execute(self, step, ctx):
         raise RuntimeError("gateway unreachable")
+
+
+class _HangingExecutor:
+    async def execute(self, step, ctx):
+        await asyncio.sleep(3600)
 
 
 class _ParseErrorExecutor:
@@ -302,6 +308,29 @@ async def test_run_grounding_soft_fails_on_executor_error():
     assert tokens == 0
     assert any(e["event"] == "grounding_failed" for e in run_log)
     assert "raw_output" not in report
+
+
+async def test_run_grounding_timeout_produces_a_real_message_not_a_blank_one():
+    """asyncio.TimeoutError (raised by the wait_for wrapping the judge call, not by
+    the executor itself) carries no message of its own — str(exc) == '' — which used
+    to produce a useless blank 'failed: ' log line and error report. It must now say
+    it timed out, and after how long."""
+    runner = _runner(executors={"grounding_stub": lambda: _HangingExecutor()})
+    step = StepConfig(
+        name="investigate", executor="gateway", prompt_template="",
+        grounding=GroundingConfig(executor="grounding_stub", timeout_seconds=1),
+    )
+    primary = _make_output(raw_response={"trace": _TOOL_TRACE})
+    run_log: list = []
+
+    g, report, tokens = await runner._run_grounding(step=step, ctx={}, primary_output=primary, run_log=run_log)
+
+    assert g is None
+    assert report["computed"] is False
+    assert report["error"] == "grounding call timed out after 1s"
+    assert tokens == 0
+    failed_event = next(e for e in run_log if e["event"] == "grounding_failed")
+    assert "timed out after 1s" in failed_event["msg"]
 
 
 async def test_run_grounding_captures_raw_output_on_parse_error():
