@@ -1968,7 +1968,7 @@ check types:
   deterministic_checks:
     - type: shell
       name: still_breaching
-      run: "curl -s 'http://prometheus/api/v1/query?query=rate(http_5xx[5m])' | jq '.data.result[0].value[1]'"
+      run: "curl -s 'http://prometheus/api/v1/query?query=rate(http_5xx{service=\"{{ labels.service }}\"}[5m])' | jq '.data.result[0].value[1]'"
       expect: "result | float > 0.02"     # bare Jinja2 bool expr — same convention as `when:`,
                                           # NOT wrapped in {{ }}. Sees `result` (stdout, stripped)
                                           # and `exit_code`, plus the normal step context.
@@ -1984,6 +1984,8 @@ check types:
       name: dashboard_resolves
       url: "https://grafana.example.com/api/dashboards/uid/{{ steps.investigate.dashboard_uid }}"
       method: GET
+      headers:
+        Authorization: "Bearer {{ steps.investigate.grafana_token }}"
       expect: "response.status_code == 200"   # sees `response` = {status_code, body}
   ```
 - **`human`** — ask a person to approve/reject, reusing the *existing* human-approval
@@ -1996,6 +1998,21 @@ check types:
       message: "Auto-remediate {{ steps.investigate.summary }}? Approve to proceed."
       timeout_seconds: 300               # default
   ```
+
+**Any prior step's output is available to every check type**, via the same
+`{{ steps.step_name.field }}` context `prompt_template` uses (§5) — `shell.run`,
+`webhook.url`/`webhook.headers`/`webhook.payload`, and `human.message` are all
+Jinja2-rendered against it before use; `expect` (`shell`/`webhook`) already sees the
+full step context too since it's evaluated the same way `when:` is.
+
+**`shell.run` quotes every interpolated value.** A step's output is agent-generated,
+not operator-controlled, and `shell` checks run unsandboxed (see below) — so a value
+containing shell metacharacters (`;`, `|`, `` $(...) ``, quotes) must not be able to
+break out of the command the pipeline author actually wrote. Every `{{ }}` substitution
+in `run` is passed through `shlex.quote` before insertion, so `{{ steps.investigate.summary }}`
+is always treated as one literal argument, never as additional shell syntax, regardless
+of what the agent put in `summary`. This only affects *interpolated values* — the command
+template itself (the literal text you wrote in `run:`) is untouched.
 
 **Fail-closed, universally.** A check that cannot be evaluated — a shell command
 errors or times out, a webhook is unreachable, a human approval times out — is
@@ -2045,7 +2062,10 @@ a `Checks (D)` PASS/FAIL chip, and a per-check ✓/✗ list (name, type, detail)
 Grafana.
 
 See `samples/pipelines/trust-vector-remediation.yaml` for a complete worked example of
-enforced grounding and a deterministic check gating a side-effecting step.
+enforced grounding and a deterministic check gating a side-effecting step, or
+`samples/pipelines/deterministic-checks-step-context.yaml` for a smaller, focused
+example of all three check types (`shell`/`webhook`/`human`) reading a prior step's
+structured output as template variables.
 
 ### Calibration (Phase 3)
 

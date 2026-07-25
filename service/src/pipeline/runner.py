@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -1709,8 +1710,19 @@ class PipelineRunner:
         return results
 
     async def _eval_shell_check(self, check: ShellCheckConfig, ctx: dict) -> tuple[bool, str]:
+        # `finalize` shell-quotes every interpolated {{ }} value (shlex.quote) so a
+        # step's output — agent-generated, not operator-controlled — can't break out
+        # of the command the pipeline author wrote via embedded shell metacharacters
+        # (;, |, $(...), quotes). The command template itself is trusted git-controlled
+        # YAML; a step's output value is data and must be treated as such, never as
+        # shell syntax, even though the command *as authored* still runs unsandboxed
+        # (see README's "Unsandboxed by design" note — that's about the operator's own
+        # command, not about giving arbitrary injected values a free pass).
+        env = Environment(undefined=Undefined, finalize=lambda v: shlex.quote(str(v)))
+        command = env.from_string(check.run).render(**ctx)
+
         proc = await asyncio.create_subprocess_shell(
-            check.run,
+            command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1745,7 +1757,10 @@ class PipelineRunner:
             return obj
 
         url = self._resolve_env(env.from_string(check.url).render(**ctx))
-        headers = {k: self._resolve_env(v) for k, v in check.headers.items()}
+        headers = {
+            k: self._resolve_env(env.from_string(v).render(**ctx))
+            for k, v in check.headers.items()
+        }
         payload = _render(check.payload)
 
         async with httpx.AsyncClient(timeout=check.timeout_seconds) as client:

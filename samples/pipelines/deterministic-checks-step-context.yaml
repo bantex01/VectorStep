@@ -1,0 +1,112 @@
+# Sample: deterministic checks (D) reading a prior step's structured output as
+# template variables — the same {{ steps.step_name.field }} syntax prompt_template
+# uses everywhere else (README §5). All three check types support this:
+#
+#   shell.run              — Jinja2-rendered before the command runs. Every
+#                             interpolated {{ }} value is automatically shell-quoted
+#                             (shlex.quote), so dashboard_uid below is safe to use
+#                             directly even though it's agent-generated, not
+#                             operator-written — it can't break out of the command
+#                             via embedded shell metacharacters.
+#   webhook.url/.headers/.payload  — all Jinja2-rendered against the step context.
+#   human.message           — Jinja2-rendered against the step context.
+#   expect (shell/webhook)  — evaluated with the full step context already merged
+#                             in alongside `result`/`exit_code` or `response`, so
+#                             it can reference steps.*, vars, labels, etc. too.
+#
+# See README "Deterministic checks & enforced grounding (Phase 1)".
+#
+# Replace agent names, URLs, and the Jira/Grafana details with your own.
+
+name: deterministic-checks-step-context
+description: Deterministic checks (shell/webhook/human) reading a prior step's structured output — dashboard_uid, jira_ticket — as template variables
+version: 1
+stage: testing   # flip to production once you're happy — see README §3c
+
+trigger:
+  match:
+    test: deterministic-checks-step-context
+
+context_template:
+  include:
+    - summary
+    - labels.service
+
+steps:
+  - name: investigate
+    executor: gateway
+    executor_config:
+      agent: sre-investigation
+    confidence_threshold: 0.60
+    on_low_confidence: escalate
+    prompt_template: |
+      Investigate {{labels.service}}: {{summary}}
+
+      Look up the Grafana dashboard and raise (or find) the Jira ticket for this
+      incident. Respond with ONLY this JSON:
+      {
+        "confidence": 0.0,
+        "summary": "One sentence root-cause summary",
+        "next_step_context": "Brief for the next step",
+        "dashboard_uid": "the Grafana dashboard uid you found",
+        "jira_ticket": "the Jira ticket key, e.g. OC-123"
+      }
+
+  - name: verify-and-remediate
+    executor: gateway
+    executor_config:
+      agent: incident-remediation
+    confidence_threshold: 0.75
+    on_low_confidence: escalate
+    prompt_template: |
+      Investigation: {{steps.investigate.summary}}
+      Dashboard: {{steps.investigate.dashboard_uid}}
+      Ticket: {{steps.investigate.jira_ticket}}
+
+      Decide whether to remediate. Respond with ONLY this JSON:
+      {
+        "confidence": 0.0,
+        "summary": "One sentence: the recommended action",
+        "next_step_context": ""
+      }
+
+    # Every check below reaches back into `investigate`'s output.
+    deterministic_checks:
+      # shell — dashboard_uid came from the agent, not from this YAML, but it's
+      # still safe to interpolate directly: the {{ }} substitution is shell-quoted
+      # automatically, so it's always treated as one literal argument to jq/curl,
+      # never as additional shell syntax.
+      - type: shell
+        name: dashboard_has_recent_data
+        run: "curl -s 'https://grafana.example.com/api/datasources/proxy/1/query?dashboardUid={{ steps.investigate.dashboard_uid }}' | jq '.data.result | length'"
+        expect: "result | int > 0 and steps.investigate.confidence > 0.5"
+        timeout_seconds: 30
+
+      # webhook — url/payload could already reference steps.*; headers now can too.
+      # The auth token itself still comes from an env var, never from a step's
+      # output — a step's value is untrusted agent output, not a secret.
+      - type: webhook
+        name: ticket_exists
+        url: "https://jira.example.com/rest/api/2/issue/{{ steps.investigate.jira_ticket }}"
+        method: GET
+        headers:
+          Authorization: "Bearer ${JIRA_API_TOKEN}"
+          X-Correlation-Id: "{{ pipeline_run_id }}:{{ steps.investigate.jira_ticket }}"
+        expect: "response.status_code == 200"
+
+      # human — message has always supported this; included here for completeness.
+      - type: human
+        name: sre_signoff
+        message: |
+          Auto-remediate {{labels.service}}?
+          Root cause: {{steps.investigate.summary}}
+          Dashboard: {{steps.investigate.dashboard_uid}}
+          Ticket: {{steps.investigate.jira_ticket}}
+        timeout_seconds: 300
+
+notifications:
+  escalate:
+    - channel: log
+      template: "ESCALATED: {{pipeline_name}} — {{step_summary}}"
+      config:
+        level: error

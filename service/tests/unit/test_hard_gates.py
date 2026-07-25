@@ -159,6 +159,33 @@ async def test_eval_shell_check_timeout_kills_process_and_fails():
     assert "timed out" in detail
 
 
+async def test_eval_shell_check_renders_step_context_into_command():
+    runner = _runner()
+    check = ShellCheckConfig(name="x", run="echo {{ steps.investigate.dashboard_uid }}")
+    ctx = {"steps": {"investigate": {"dashboard_uid": "abc123"}}}
+
+    passed, detail = await runner._eval_shell_check(check, ctx)
+
+    assert passed is True
+    assert "abc123" in detail
+
+
+async def test_eval_shell_check_quotes_interpolated_values_against_injection():
+    """A step's output is agent-generated, not operator-controlled — a value
+    containing shell metacharacters must not be able to break out of the command
+    the pipeline author wrote. shlex.quote wraps the interpolated value so `$(...)`
+    stays literal text instead of being run as command substitution."""
+    runner = _runner()
+    check = ShellCheckConfig(name="x", run="echo {{ steps.investigate.payload }}")
+    ctx = {"steps": {"investigate": {"payload": "$(id)"}}}
+
+    passed, detail = await runner._eval_shell_check(check, ctx)
+
+    assert passed is True
+    assert "uid=" not in detail       # `id` must NOT have actually executed
+    assert "$(id)" in detail          # the value came through as literal text
+
+
 # ---------------------------------------------------------------------------
 # 3. _eval_webhook_check
 # ---------------------------------------------------------------------------
@@ -199,6 +226,29 @@ async def test_eval_webhook_check_custom_expect_against_body():
         passed, _ = await runner._eval_webhook_check(check, {})
 
     assert passed is True
+
+
+async def test_eval_webhook_check_renders_step_context_into_headers():
+    runner = _runner()
+    check = WebhookCheckConfig(
+        name="x", url="https://example.com/check",
+        headers={"X-Ticket": "{{ steps.investigate.jira_ticket }}"},
+    )
+    ctx = {"steps": {"investigate": {"jira_ticket": "OC-42"}}}
+
+    captured = {}
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json = MagicMock(return_value={"ok": True})
+
+    async def fake_request(self, method, url, json=None, headers=None):
+        captured["headers"] = headers
+        return mock_response
+
+    with patch.object(httpx.AsyncClient, "request", new=fake_request):
+        await runner._eval_webhook_check(check, ctx)
+
+    assert captured["headers"]["X-Ticket"] == "OC-42"
 
 
 async def test_eval_webhook_check_connection_error_fails_without_propagating_past_the_runner():
