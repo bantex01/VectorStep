@@ -12,6 +12,8 @@ The service is designed to be:
 
 Primary use case is observability automation (alert triage, Grafana investigation, bounded remediation) but the design is intentionally general purpose.
 
+> **Authoring/inspecting pipelines from an MCP client?** See [§15e](#15e-the-p-ork-service-mcp) — the companion **P-Ork Service MCP** (a separate repo) exposes pipeline/step authoring, run inspection, and operational + judged-accuracy analytics as MCP tools for Claude Code/Desktop, over this service's JSON API (§15c/§15d).
+
 > **New to the trust vector (S/V/G/D) and calibration?** See [`CONFIDENCE-EXPLAINED.md`](CONFIDENCE-EXPLAINED.md) for a plain-language walkthrough of how confidence is derived and every knob that affects it, before diving into the technical reference below ("Verifier Trigger Configuration", "Grounding (shadow mode)", "Deterministic checks & enforced grounding", "Calibration").
 
 ---
@@ -67,6 +69,8 @@ service/
 │   ├── tracing.py              # OpenTelemetry tracing setup + span helpers (see §15b)
 │   ├── gateway.py              # Lightweight helper for calling OpenClaw Gateway WS API
 │   ├── ui.py                   # UI routes (pipeline/agent/step library, run history)
+│   ├── analytics.py             # Shared rollup queries — feeds both /ui/insights/* and /stats/* JSON (see §15c)
+│   ├── config_writer.py        # Atomic validated-write path for pipeline/step YAML (see §15d)
 │   ├── normaliser/
 │   │   ├── base.py             # BaseParser abstract class
 │   │   ├── alertmanager.py     # Alertmanager-specific parser
@@ -1625,7 +1629,8 @@ kill -HUP <uvicorn-pid>
 GET /schedules
 # → {"schedules": [{"pipeline": "...", "cron": "...", "next_run": "..."}]}
 
-# List runs — newest first. Filters: ?status=escalated, ?pipeline=alert-triage-critical, ?team=payments
+# List runs — newest first. Filters: ?status=escalated, ?pipeline=alert-triage-critical,
+# ?team=payments, ?stage=production|testing
 # Pagination: ?limit=50&offset=0 (max 200)
 GET /runs
 # → {"runs": [{id, pipeline_name, source, status, team, stage, triggered_at, completed_at}, ...]}
@@ -1673,12 +1678,16 @@ POST /pipelines/{name}/run
 # Server-Sent Events stream for live run tailing (see §UI / Live tail)
 GET /ui/runs/{run_id}/stream
 
-# List loaded pipelines
+# List loaded pipelines — now includes stage and tags alongside name/description/version
 GET /pipelines
 
 # Prometheus metrics — runs/steps by status, step duration histograms, verifier veto rate
 GET /metrics
 ```
+
+See §15c for the pipeline/step-library/agent read + analytics endpoints and
+§15d for the write/validate/delete endpoints — both added for the
+[P-Ork Service MCP](#15e-the-p-ork-service-mcp) (a separate repo).
 
 ### 15a. Prometheus Metrics
 
@@ -1781,6 +1790,129 @@ these extra params. Once the P-Ork Gateway adds its own OTel instrumentation, it
 LLM/tool-call spans will automatically nest under the corresponding `gen_ai.*` span —
 giving one connected trace from webhook → pipeline → step → individual LLM/tool calls,
 with no further changes needed on the P-Ork side.
+
+### 15c. Pipeline/Step/Agent Read + Analytics Endpoints
+
+Added so the [P-Ork Service MCP](#15e-the-p-ork-service-mcp) can author and inspect
+pipelines without importing this codebase. The analytics endpoints share their
+aggregation queries with the `/ui/insights/*` pages (`src/analytics.py`), so the
+numbers they return can never drift from what the UI shows for the same data.
+
+```bash
+# Full resolved pipeline config (.model_dump()) plus the raw YAML text from disk
+GET /pipelines/{name}
+# → {"config": {...}, "yaml": "name: ...\n..."}  — 404 if unknown
+
+# Library step summaries: name, description, tags, executor, agent
+GET /steps
+# → {"steps": [{"name": "...", "description": "...", "tags": [...], "executor": "...", "agent": "..."}]}
+
+# Full step config plus raw YAML from the (gitignored) step library directory
+GET /steps/{name}
+# → {"config": {...}, "yaml": "..."}  — 404 if unknown
+
+# Agents merged across OpenClaw + P-Ork Gateway backends — read-only. A down
+# backend contributes an empty slice plus an 'errors' entry, never a 500.
+GET /agents
+# → {"agents": [{"name": "...", "executor": "openclaw"|"gateway", "model": "..."}], "errors": {}}
+
+# Operational + judged-accuracy stats for one pipeline. time_range: 24h|7d|30d|all
+# (default 7d). stage: production|testing|all (default production, matching every
+# other rollup in the app — see §3c).
+GET /pipelines/{name}/stats?time_range=7d&stage=production
+# → {"pipeline_name", "runs_total", "status_counts": {...}, "success_rate",
+#     "tokens": {"input", "output", "total"}, "duration_seconds": {"avg", "p95"},
+#     "accuracy": {"correct", "partial", "incorrect", "total", "correct_pct"}, "teams": [...]}
+# success_rate = completed ÷ terminal runs (excludes still-running); accuracy is the
+# separate *judged* rollup from RunFeedback — null/zeroed when nothing's been graded,
+# which is not the same as "0% accurate". 404 if the pipeline name is unknown.
+
+# The same per-pipeline payload as above, for every pipeline with a run in range —
+# the JSON behind the /ui/insights/pipelines table. Rank client-side to answer
+# "which pipeline fails most / costs most / is least accurate".
+GET /stats/pipelines?time_range=7d&stage=production
+# → {"pipelines": [{...}, ...]}
+
+# Same stats shape as /pipelines/{name}/stats, aggregated per library step
+# across every pipeline that uses it (avg_input_tokens/avg_output_tokens instead
+# of 'teams'). 404 if the step name is unknown to the library.
+GET /steps/{name}/stats?time_range=7d&stage=production
+```
+
+### 15d. Pipeline/Step Write, Validate, and Delete Endpoints
+
+All raw-YAML in (the YAML's own `name:` field is authoritative — never taken
+from the URL for create), Pydantic-validated, and written with an **atomic
+validated-rollback**: a candidate directory state (the real files plus the
+one new/changed/removed entry) is fully reloaded in memory first; only if
+that succeeds does the real file get written (temp file + `os.replace`).
+This is what catches a step-library change that would silently break some
+*other* pipeline's `use:` resolution — the live config and registry are left
+completely untouched on any failure (`src/config_writer.py`).
+
+```bash
+# Create a new pipeline. 409 (collision) if service/pipelines/{name}.yaml already
+# exists, unless overwrite=true. 400 on validation failure.
+POST /pipelines
+# body: {"yaml": "name: ...\n...", "overwrite": false}
+# → {"config": {...}, "committed": false, "note": "..."}
+# committed is always false: the file is written and reloaded, but this is a
+# git-controlled directory — you still need to `git add`/`git commit` yourself.
+
+# Update an existing pipeline. 404 if absent. The URL name and the YAML's own
+# name: must agree — 400 if they differ (a rename is a delete + create).
+PUT /pipelines/{name}
+# body: {"yaml": "name: ...\n..."}
+
+# Delete a pipeline's YAML. 404 if absent. Returns the deleted YAML so the
+# deletion is auditable/recoverable, then reloads.
+DELETE /pipelines/{name}
+# → {"deleted": "...", "yaml": "...", "committed": false, "note": "..."}
+
+# Validate a candidate pipeline YAML WITHOUT writing anything — the safe
+# iterate loop before POST/PUT above.
+POST /pipelines/validate
+# body: {"yaml": "..."}
+# → {"valid": true, "errors": []}  or  {"valid": false, "errors": [{"loc": [...], "msg": "..."}]}
+
+# Same four operations for the step library (service/steps/ — gitignored, so
+# 'committed' is always false and nothing here is ever tracked in git). Updating
+# or deleting a step also re-validates every pipeline that references it via
+# 'use:' — a step change/removal that would break one fails with a
+# reload_failed error and nothing is written/removed.
+POST   /steps            # body: {"yaml": "...", "overwrite": false}
+PUT    /steps/{name}     # body: {"yaml": "..."}
+DELETE /steps/{name}
+POST   /steps/validate   # body: {"yaml": "..."}
+```
+
+**Error shape.** All of the above return FastAPI's standard `{"detail": ...}`
+on failure; for write/delete failures `detail` is `{"type": "validation" |
+"not_found" | "collision" | "reload_failed", "message": "...", ...}` — the
+explicit `type` lets a caller (like the MCP) distinguish e.g. a plain
+validation error from a write that would break another pipeline's
+resolution, both of which can otherwise show up as the same status code.
+
+**Secrets.** `${ENV_VAR}` placeholders in a submitted YAML are preserved
+verbatim — these endpoints never resolve or inline an environment value into
+a stored file.
+
+### 15e. The P-Ork Service MCP
+
+The endpoints in §15c/§15d exist to back **P-Ork Service MCP**, a separate,
+standalone repository (sibling to this one — see the project's `P-Ork*`
+naming convention) that exposes them as
+[MCP](https://modelcontextprotocol.io) tools for Claude Code/Desktop: pipeline
+and step-library authoring (with the same server-side validation this
+service uses), run/step inspection, the operational + judged-accuracy
+analytics above, and manual run/feedback actions.
+
+It is a thin `httpx` client — the **only** coupling between the two repos is
+this HTTP API; the MCP has no import-level dependency on this codebase and
+does not touch the database or YAML files directly. It holds one bearer
+token (`PORK_WEBHOOK_TOKEN`) sent on every call, required only where this
+service already requires it. See that repo's README for configuration
+(`PORK_BASE_URL`, `PORK_WEBHOOK_TOKEN`) and its tool list.
 
 ---
 

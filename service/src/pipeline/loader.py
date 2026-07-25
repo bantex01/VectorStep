@@ -30,6 +30,37 @@ def _warn_correlated_critic_on_gated_steps(pipeline: PipelineConfig) -> None:
             )
 
 
+def load_step_library_from_raw(
+    raw_by_filename: dict[str, str],
+    log_success: bool = True,
+) -> dict[str, dict]:
+    """Core of load_step_library, decoupled from the filesystem.
+
+    Takes {filename: yaml_text} instead of scanning a directory, so a caller
+    that wants to validate a *candidate* directory state — the real files
+    plus one new/changed entry, without writing it to disk first — can build
+    that dict and pass it straight through (see main.py's atomic-validated-
+    write path, SPEC-pork-service-mcp.md §2.9/§5c). Raises on the first
+    invalid file, same as load_step_library.
+    """
+    library: dict[str, dict] = {}
+    for filename in sorted(raw_by_filename):
+        content = raw_by_filename[filename]
+        try:
+            raw = yaml.safe_load(content)
+            if not isinstance(raw, dict):
+                logger.warning("Step library file %s is not a YAML mapping — skipped", filename)
+                continue
+            step = LibraryStepConfig.model_validate(raw)
+            library[step.name] = raw
+            if log_success:
+                logger.info("Loaded library step: %s (from %s)", step.name, filename)
+        except Exception as exc:
+            logger.error("Failed to load step library file %s: %s", filename, exc)
+            raise
+    return library
+
+
 def load_step_library(steps_dir: str | Path) -> dict[str, dict]:
     """Load all YAML step definitions from the library directory.
 
@@ -43,20 +74,8 @@ def load_step_library(steps_dir: str | Path) -> dict[str, dict]:
         logger.debug("Step library directory not found: %s — library disabled", steps_dir)
         return {}
 
-    library: dict[str, dict] = {}
-    for path in sorted(steps_dir.glob("*.yaml")):
-        try:
-            raw = yaml.safe_load(path.read_text())
-            if not isinstance(raw, dict):
-                logger.warning("Step library file %s is not a YAML mapping — skipped", path.name)
-                continue
-            step = LibraryStepConfig.model_validate(raw)
-            library[step.name] = raw
-            logger.info("Loaded library step: %s (from %s)", step.name, path.name)
-        except Exception as exc:
-            logger.error("Failed to load step library file %s: %s", path.name, exc)
-            raise
-
+    raw_by_filename = {path.name: path.read_text() for path in steps_dir.glob("*.yaml")}
+    library = load_step_library_from_raw(raw_by_filename)
     logger.info("Loaded %d library step(s) from %s", len(library), steps_dir)
     return library
 
@@ -123,6 +142,39 @@ def _resolve_step_references(raw_steps: list, library: dict[str, dict]) -> list:
     return resolved
 
 
+# Public name for callers outside this module (e.g. config_writer.py's
+# validate-only dry run, which needs to resolve 'use:' refs the same way
+# load_pipelines_from_raw does without going through the full loader).
+resolve_step_references = _resolve_step_references
+
+
+def load_pipelines_from_raw(
+    raw_by_filename: dict[str, str],
+    step_library: dict[str, dict] | None = None,
+    log_success: bool = True,
+) -> list[PipelineConfig]:
+    """Core of load_pipelines, decoupled from the filesystem — see
+    load_step_library_from_raw's docstring for why (candidate-directory
+    validation ahead of an atomic write, without touching disk first).
+    Raises on the first invalid file, same as load_pipelines."""
+    pipelines: list[PipelineConfig] = []
+    for filename in sorted(raw_by_filename):
+        content = raw_by_filename[filename]
+        try:
+            raw = yaml.safe_load(content)
+            if step_library and isinstance(raw.get("steps"), list):
+                raw["steps"] = _resolve_step_references(raw["steps"], step_library)
+            pipeline = PipelineConfig.model_validate(raw)
+            _warn_correlated_critic_on_gated_steps(pipeline)
+            pipelines.append(pipeline)
+            if log_success:
+                logger.info("Loaded pipeline config: %s (from %s)", pipeline.name, filename)
+        except Exception as exc:
+            logger.error("Failed to load pipeline config %s: %s", filename, exc)
+            raise
+    return pipelines
+
+
 def load_pipelines(
     config_dir: str | Path,
     step_library: dict[str, dict] | None = None,
@@ -140,19 +192,7 @@ def load_pipelines(
     if not config_dir.is_dir():
         raise ValueError(f"Pipeline config directory not found: {config_dir}")
 
-    pipelines: list[PipelineConfig] = []
-    for path in sorted(config_dir.glob("*.yaml")):
-        try:
-            raw = yaml.safe_load(path.read_text())
-            if step_library and isinstance(raw.get("steps"), list):
-                raw["steps"] = _resolve_step_references(raw["steps"], step_library)
-            pipeline = PipelineConfig.model_validate(raw)
-            _warn_correlated_critic_on_gated_steps(pipeline)
-            pipelines.append(pipeline)
-            logger.info("Loaded pipeline config: %s (from %s)", pipeline.name, path.name)
-        except Exception as exc:
-            logger.error("Failed to load pipeline config %s: %s", path.name, exc)
-            raise
-
+    raw_by_filename = {path.name: path.read_text() for path in config_dir.glob("*.yaml")}
+    pipelines = load_pipelines_from_raw(raw_by_filename, step_library=step_library)
     logger.info("Loaded %d pipeline config(s) from %s", len(pipelines), config_dir)
     return pipelines

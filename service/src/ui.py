@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
+from .analytics import _pipeline_rollup, _production_only, _step_rollup, _time_range_cutoff
 from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 from .executors.human import pending_count as _pending_approval_count
@@ -34,13 +35,8 @@ templates = Jinja2Templates(
 
 
 # ── Template helpers ──────────────────────────────────────────────────────────
-
-def _production_only(q):
-    """Scope a PipelineRun-touching query to stage=production — applied to every
-    aggregate/rollup surface (dashboard cards, insights, success/accuracy bars).
-    Browse/list surfaces (the runs list, recent-runs tables) stay unfiltered and
-    show a stage badge instead — see stage_badge() in templates/_macros.html."""
-    return q.where(PipelineRun.stage == "production")
+# _production_only / _time_range_cutoff now live in analytics.py (imported above)
+# so the JSON /stats endpoints and these HTML pages share one implementation.
 
 
 def _status_classes(status: str) -> str:
@@ -414,22 +410,6 @@ def _step_config_summary(trust: dict) -> list[str]:
         )
 
     return lines
-
-
-_TIME_RANGES = {
-    "24h": (timedelta(hours=24), "24 hours"),
-    "7d": (timedelta(days=7), "7 days"),
-    "30d": (timedelta(days=30), "30 days"),
-}
-
-
-def _time_range_cutoff(time_range: str) -> tuple[datetime | None, str]:
-    """Map 24h|7d|30d|all to (cutoff_datetime_or_None, label) for the Insights pages."""
-    delta_label = _TIME_RANGES.get(time_range)
-    if delta_label is None:
-        return None, "all time"
-    delta, label = delta_label
-    return utc_now() - delta, label
 
 
 def _ts_resolution(time_range: str) -> str:
@@ -1573,82 +1553,31 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
     cutoff, range_label = _time_range_cutoff(time_range)
     sf = get_session_factory()
 
-    # Every query below is a rollup for this insights page — scoped to production.
+    # Per-pipeline run/token/duration/team/feedback rollup — shared with the
+    # /pipelines/{name}/stats and /stats/pipelines JSON endpoints (analytics.py)
+    # so this page and those endpoints can never disagree.
+    rollup = await _pipeline_rollup(sf, time_range, "production")
+    run_counts = {name: r["runs_total"] for name, r in rollup.items()}
+    failed_counts = {name: r["status_counts"].get("failed", 0) for name, r in rollup.items()}
+    token_totals = {name: (r["tokens"]["input"], r["tokens"]["output"]) for name, r in rollup.items()}
+    teams_by_pipeline: dict[str, list[str]] = {name: list(r["teams"]) for name, r in rollup.items()}
+    avg_duration_by_pipeline = {
+        name: r["duration_seconds"]["avg"] for name, r in rollup.items()
+        if r["duration_seconds"]["avg"] is not None
+    }
+    status_counts_by_pipeline: dict[str, dict[str, int]] = {name: dict(r["status_counts"]) for name, r in rollup.items()}
+    feedback_raw: dict[str, dict[str, int]] = {
+        name: {
+            "correct": r["accuracy"]["correct"],
+            "partial": r["accuracy"]["partial"],
+            "incorrect": r["accuracy"]["incorrect"],
+        }
+        for name, r in rollup.items()
+    }
+
+    # Per-run rows — needed for the timeseries/recent-runs drilldown, which the
+    # shared rollup (aggregated) doesn't expose at this granularity.
     async with sf() as session:
-        q = _production_only(
-            select(PipelineRun.pipeline_name, func.count().label("n")).group_by(PipelineRun.pipeline_name)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        run_counts = dict(rows.all())
-
-        q = _production_only(
-            select(PipelineRun.pipeline_name, func.count().label("n"))
-            .where(PipelineRun.status == "failed")
-            .group_by(PipelineRun.pipeline_name)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        failed_counts = dict(rows.all())
-
-        q = _production_only(
-            select(
-                PipelineRun.pipeline_name,
-                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
-                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
-            )
-            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-            .where(PipelineStep.input_tokens.is_not(None))
-            .group_by(PipelineRun.pipeline_name)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        token_totals = {name: (i, o) for name, i, o in rows.all()}
-
-        q = _production_only(
-            select(PipelineRun.pipeline_name, PipelineRun.team)
-            .distinct()
-            .group_by(PipelineRun.pipeline_name, PipelineRun.team)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        teams_by_pipeline: dict[str, list[str]] = defaultdict(list)
-        for name, team in rows.all():
-            teams_by_pipeline[name].append(team or "Unattributed")
-
-        # No duration column on pipeline_runs — compute from timestamps in Python
-        # (same approach _format_duration already uses) rather than a cross-dialect
-        # SQL timestamp-diff. Only terminal runs (completed_at set) count.
-        q = _production_only(
-            select(PipelineRun.pipeline_name, PipelineRun.triggered_at, PipelineRun.completed_at)
-            .where(PipelineRun.completed_at.is_not(None))
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        durations_by_pipeline: dict[str, list[float]] = defaultdict(list)
-        for name, triggered_at, completed_at in rows.all():
-            secs = (completed_at.replace(tzinfo=None) - triggered_at.replace(tzinfo=None)).total_seconds()
-            if secs >= 0:
-                durations_by_pipeline[name].append(secs)
-
-        # Status breakdown per pipeline (for drilldown status bar)
-        q = _production_only(
-            select(PipelineRun.pipeline_name, PipelineRun.status, func.count().label("n"))
-            .group_by(PipelineRun.pipeline_name, PipelineRun.status)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        status_counts_by_pipeline: dict[str, dict[str, int]] = defaultdict(dict)
-        for name, status, n in rows.all():
-            status_counts_by_pipeline[name][status] = n
-
-        # All runs in range — used for per-pipeline timeseries and recent-runs list
         q = _production_only(
             select(
                 PipelineRun.id,
@@ -1664,28 +1593,10 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         all_runs_raw = rows.all()
 
-        # Feedback per pipeline scoped to the same time range (via run date)
-        fb_q = _production_only(
-            select(RunFeedback.pipeline_name, RunFeedback.outcome, func.count().label("n"))
-            .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
-            .group_by(RunFeedback.pipeline_name, RunFeedback.outcome)
-        )
-        if cutoff:
-            fb_q = fb_q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(fb_q)
-        feedback_raw: dict[str, dict[str, int]] = {}
-        for name, outcome, n in rows.all():
-            if name not in feedback_raw:
-                feedback_raw[name] = {"correct": 0, "partial": 0, "incorrect": 0}
-            feedback_raw[name][outcome] = n
-
     step_combo = await _fetch_step_agent_model_combo(cutoff)
 
     # ── Per-pipeline aggregates ───────────────────────────────────────────────
-
-    avg_duration_by_pipeline = {
-        name: sum(secs) / len(secs) for name, secs in durations_by_pipeline.items() if secs
-    }
+    # avg_duration_by_pipeline comes from the shared rollup above.
 
     now = utc_now()
     resolution = _ts_resolution(time_range)
@@ -1797,7 +1708,12 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
 
     # ── Headline stats ────────────────────────────────────────────────────────
 
-    all_durations_flat = [s for sl in durations_by_pipeline.values() for s in sl]
+    all_durations_flat = []
+    for r in all_runs_raw:
+        if r.completed_at:
+            secs = (r.completed_at.replace(tzinfo=None) - r.triggered_at.replace(tzinfo=None)).total_seconds()
+            if secs >= 0:
+                all_durations_flat.append(secs)
     min_duration_secs = min(all_durations_flat) if all_durations_flat else None
     overall_avg_duration_secs = (sum(all_durations_flat) / len(all_durations_flat)) if all_durations_flat else None
     max_duration_secs = max(all_durations_flat) if all_durations_flat else None
@@ -1862,74 +1778,23 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
     cutoff, range_label = _time_range_cutoff(time_range)
     sf = get_session_factory()
 
-    # Every query below is a rollup for this insights page — scoped to production.
+    # Per-step run/token/duration rollup — shared with the /steps/{name}/stats
+    # JSON endpoint (analytics.py) so this page and that endpoint can never
+    # disagree.
+    rollup = await _step_rollup(sf, time_range, "production")
+    run_counts = {name: r["runs_total"] for name, r in rollup.items()}
+    failed_counts = {name: r["status_counts"].get("failed", 0) for name, r in rollup.items()}
+    token_totals = {name: (r["tokens"]["input"], r["tokens"]["output"]) for name, r in rollup.items()}
+    avg_duration_by_step = {
+        name: r["duration_seconds"]["avg"] for name, r in rollup.items()
+        if r["duration_seconds"]["avg"] is not None
+    }
+    status_counts_by_step: dict[str, dict[str, int]] = {name: dict(r["status_counts"]) for name, r in rollup.items()}
+
+    # Per-step-execution rows and the finer (step, agent, model, provider) feedback
+    # breakdown below stay as page-specific queries — granularity the shared
+    # rollup (aggregated to step_name only) doesn't expose.
     async with sf() as session:
-        q = _production_only(
-            select(PipelineStep.step_name, func.count().label("n"))
-            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-            .group_by(PipelineStep.step_name)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        run_counts = dict(rows.all())
-
-        q = _production_only(
-            select(PipelineStep.step_name, func.count().label("n"))
-            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-            .where(PipelineStep.status == "failed")
-            .group_by(PipelineStep.step_name)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        failed_counts = dict(rows.all())
-
-        q = _production_only(
-            select(
-                PipelineStep.step_name,
-                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
-                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
-            )
-            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-            .group_by(PipelineStep.step_name)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        token_totals = {name: (i, o) for name, i, o in rows.all()}
-
-        q = _production_only(
-            select(PipelineStep.step_name, func.avg(PipelineStep.duration_ms))
-            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-            .group_by(PipelineStep.step_name)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        avg_duration_by_step = {name: ms / 1000 for name, ms in rows.all() if ms is not None}
-
-        q = _production_only(
-            select(func.avg(PipelineStep.duration_ms))
-            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        overall_avg_duration_ms = (await session.execute(q)).scalar()
-        overall_avg_duration_secs = overall_avg_duration_ms / 1000 if overall_avg_duration_ms is not None else None
-
-        q = _production_only(
-            select(PipelineStep.step_name, PipelineStep.status, func.count().label("n"))
-            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-            .group_by(PipelineStep.step_name, PipelineStep.status)
-        )
-        if cutoff:
-            q = q.where(PipelineRun.triggered_at >= cutoff)
-        rows = await session.execute(q)
-        status_counts_by_step: dict[str, dict[str, int]] = defaultdict(dict)
-        for name, status, n in rows.all():
-            status_counts_by_step[name][status] = n
-
         # All step executions in range — used for per-step timeseries and recent-list
         q = _production_only(
             select(
@@ -1961,6 +1826,11 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
         if cutoff:
             q = q.where(PipelineRun.triggered_at >= cutoff)
         step_feedback_rows = (await session.execute(q)).all()
+
+    _all_step_durations_secs = [r.duration_ms / 1000 for r in all_steps_raw if r.duration_ms is not None]
+    overall_avg_duration_secs = (
+        sum(_all_step_durations_secs) / len(_all_step_durations_secs) if _all_step_durations_secs else None
+    )
 
     # step_combo: (pipeline_name, step_name, agent, qualified_model) -> counters, shared
     # with the Pipelines Insights drilldown (see _fetch_step_agent_model_combo).
@@ -3497,6 +3367,20 @@ def _read_pipeline_yaml(pipeline_dir: str, pipeline_name: str) -> str | None:
                 content = f.read()
             data = yaml.safe_load(content)
             if isinstance(data, dict) and data.get("name") == pipeline_name:
+                return content
+        except Exception:
+            continue
+    return None
+
+
+def _read_step_yaml(steps_dir: str, step_name: str) -> str | None:
+    """Same lookup as _read_pipeline_yaml, for the step library directory."""
+    for path in glob.glob(os.path.join(steps_dir, "*.yaml")):
+        try:
+            with open(path) as f:
+                content = f.read()
+            data = yaml.safe_load(content)
+            if isinstance(data, dict) and data.get("name") == step_name:
                 return content
         except Exception:
             continue

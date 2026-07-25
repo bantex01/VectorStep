@@ -16,6 +16,17 @@ from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
+from .analytics import get_pipeline_stats as _get_pipeline_stats
+from .analytics import get_step_stats as _get_step_stats
+from .analytics import list_pipeline_stats as _list_pipeline_stats
+from .config_writer import (
+    delete_pipeline_yaml,
+    delete_step_yaml,
+    validate_pipeline_yaml,
+    validate_step_yaml,
+    write_pipeline_yaml,
+    write_step_yaml,
+)
 from .db.database import create_tables, get_session_factory, init_db, mark_interrupted_runs
 from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 import functools
@@ -32,6 +43,7 @@ from .notifications.log import LogNotifier
 from .notifications.telegram import TelegramNotifier
 from .pipeline import PipelineRunner, load_pipelines, load_step_library, resolve_pipeline
 from .tracing import setup_tracing, shutdown_tracing
+from .ui import _fetch_openclaw_agents, _fetch_pork_gateway_agents, _read_pipeline_yaml, _read_step_yaml
 from .ui import configure as configure_ui
 from .ui import router as ui_router
 from .utils import utc_now
@@ -778,10 +790,219 @@ async def metrics():
 async def list_pipelines():
     return {
         "pipelines": [
-            {"name": p.name, "description": p.description, "version": p.version}
+            {
+                "name": p.name,
+                "description": p.description,
+                "version": p.version,
+                "stage": p.stage,
+                "tags": p.tags,
+            }
             for p in _pipelines
         ]
     }
+
+
+@app.get("/pipelines/{name}")
+async def get_pipeline(name: str):
+    """Full resolved pipeline config plus the raw YAML text read from disk.
+
+    The resolved config has 'use:' step-library references already merged in;
+    the raw YAML is what's actually on disk (comments, 'use:' refs, etc.)."""
+    pipeline = next((p for p in _pipelines if p.name == name), None)
+    if pipeline is None:
+        raise HTTPException(status_code=404, detail=f"Pipeline '{name}' not found")
+    raw_yaml = _read_pipeline_yaml(_pipeline_dir, name)
+    return {"config": pipeline.model_dump(), "yaml": raw_yaml}
+
+
+@app.get("/steps")
+async def list_steps():
+    """Library step summaries — name, description, tags, executor, agent."""
+    return {
+        "steps": [
+            {
+                "name": raw.get("name"),
+                "description": raw.get("description", ""),
+                "tags": raw.get("tags", []),
+                "executor": raw.get("executor"),
+                "agent": (raw.get("executor_config") or {}).get("agent"),
+            }
+            for raw in sorted(_step_library.values(), key=lambda s: s.get("name", ""))
+        ]
+    }
+
+
+@app.get("/steps/{name}")
+async def get_step(name: str):
+    """Full step config plus the raw YAML text read from the (gitignored)
+    step library directory."""
+    raw = _step_library.get(name)
+    if raw is None:
+        raise HTTPException(status_code=404, detail=f"Step '{name}' not found")
+    raw_yaml = _read_step_yaml(_step_library_dir, name)
+    return {"config": raw, "yaml": raw_yaml}
+
+
+@app.get("/agents")
+async def list_agents():
+    """Agent names/executor/model merged across the OpenClaw and P-Ork Gateway
+    backends — read-only, for pipeline authoring. Each backend fails soft: a
+    down gateway contributes an empty slice plus an entry in 'errors' rather
+    than failing the whole call (mirrors the /ui/agents page)."""
+    (oc_agents, oc_error), (gw_agents, gw_error) = await asyncio.gather(
+        _fetch_openclaw_agents(), _fetch_pork_gateway_agents(),
+    )
+    agents = [
+        {"name": a.get("id") or a.get("name"), "executor": "openclaw", "model": a.get("model")}
+        for a in oc_agents
+    ] + [
+        {"name": a.get("id") or a.get("name"), "executor": "gateway", "model": a.get("model")}
+        for a in gw_agents
+    ]
+    errors = {}
+    if oc_error:
+        errors["openclaw"] = oc_error
+    if gw_error:
+        errors["gateway"] = gw_error
+    return {"agents": agents, "errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# Write / validate / delete — pipelines and step library (§5c)
+# ---------------------------------------------------------------------------
+# All raw-YAML in, server-side Pydantic validation, atomic validated-rollback
+# write (config_writer.py implements §2.9). A successful write/delete
+# triggers the normal _do_reload() to refresh the live registry — safe to do
+# unconditionally since the candidate reload already proved it will succeed.
+
+def _raise_for_write_result(result) -> None:
+    if result.ok:
+        return
+    status = {"validation": 400, "not_found": 404, "collision": 409, "reload_failed": 500}.get(result.error_type, 500)
+    # Carry the error type explicitly rather than making callers (e.g. the
+    # MCP's error mapping) guess it from status code + message text — several
+    # distinct failure reasons (validation vs. reload_failed) can both be a
+    # 500 with no fixed wording.
+    detail = {"type": result.error_type, "message": result.error_message, **result.error_detail}
+    raise HTTPException(status_code=status, detail=detail)
+
+
+@app.post("/pipelines")
+async def create_pipeline(request: Request):
+    """Create a new pipeline from a raw YAML string. The YAML's own 'name:'
+    field is authoritative (not taken from the URL). 409 if a pipeline with
+    that name already exists, unless overwrite=true. service/pipelines/ is
+    git-controlled — this writes and reloads but does not commit."""
+    body = await request.json()
+    yaml_text = body.get("yaml")
+    if not isinstance(yaml_text, str):
+        raise HTTPException(status_code=400, detail="Body must include a 'yaml' string field")
+    overwrite = bool(body.get("overwrite", False))
+
+    result = write_pipeline_yaml(_pipeline_dir, yaml_text, _step_library, url_name=None, overwrite=overwrite)
+    _raise_for_write_result(result)
+    _do_reload()
+    return {"config": result.config, "committed": False,
+            "note": "File written and reloaded; commit it in git to persist."}
+
+
+@app.put("/pipelines/{name}")
+async def update_pipeline(name: str, request: Request):
+    """Update an existing pipeline (404 if absent) from a raw YAML string.
+    The URL name and the YAML's 'name:' field must agree — renaming a
+    pipeline is a delete + create, not a PUT."""
+    body = await request.json()
+    yaml_text = body.get("yaml")
+    if not isinstance(yaml_text, str):
+        raise HTTPException(status_code=400, detail="Body must include a 'yaml' string field")
+
+    result = write_pipeline_yaml(_pipeline_dir, yaml_text, _step_library, url_name=name, overwrite=False)
+    _raise_for_write_result(result)
+    _do_reload()
+    return {"config": result.config, "committed": False,
+            "note": "File written and reloaded; commit it in git to persist."}
+
+
+@app.delete("/pipelines/{name}")
+async def delete_pipeline(name: str):
+    """Delete a pipeline's YAML. 404 if absent. Returns the deleted YAML in
+    the response so the deletion is auditable/recoverable, then reloads."""
+    result = delete_pipeline_yaml(_pipeline_dir, name)
+    _raise_for_write_result(result)
+    _do_reload()
+    return {"deleted": name, "yaml": result.config["yaml"], "committed": False,
+            "note": "File removed and reloaded; the deletion itself is not a git commit."}
+
+
+@app.post("/pipelines/validate")
+async def validate_pipeline_endpoint(request: Request):
+    """Validate a candidate pipeline YAML without writing it — the safe
+    iterate loop before create_pipeline/update_pipeline."""
+    body = await request.json()
+    yaml_text = body.get("yaml")
+    if not isinstance(yaml_text, str):
+        raise HTTPException(status_code=400, detail="Body must include a 'yaml' string field")
+    valid, errors = validate_pipeline_yaml(yaml_text, _step_library)
+    return {"valid": valid, "errors": errors}
+
+
+@app.post("/steps")
+async def create_step(request: Request):
+    """Create a new step-library entry from a raw YAML string. Same
+    name-authoritative / overwrite semantics as create_pipeline. Note:
+    service/steps/ is gitignored — nothing here is ever committed."""
+    body = await request.json()
+    yaml_text = body.get("yaml")
+    if not isinstance(yaml_text, str):
+        raise HTTPException(status_code=400, detail="Body must include a 'yaml' string field")
+    overwrite = bool(body.get("overwrite", False))
+
+    result = write_step_yaml(_step_library_dir, _pipeline_dir, yaml_text, url_name=None, overwrite=overwrite)
+    _raise_for_write_result(result)
+    _do_reload()
+    return {"config": result.config, "committed": False,
+            "note": "service/steps/ is gitignored — this file will never be committed."}
+
+
+@app.put("/steps/{name}")
+async def update_step(name: str, request: Request):
+    """Update an existing step-library entry (404 if absent). URL name and
+    YAML 'name:' must agree. Also re-validates every pipeline against the
+    candidate step library, since a step change can break another
+    pipeline's 'use:' resolution."""
+    body = await request.json()
+    yaml_text = body.get("yaml")
+    if not isinstance(yaml_text, str):
+        raise HTTPException(status_code=400, detail="Body must include a 'yaml' string field")
+
+    result = write_step_yaml(_step_library_dir, _pipeline_dir, yaml_text, url_name=name, overwrite=False)
+    _raise_for_write_result(result)
+    _do_reload()
+    return {"config": result.config, "committed": False,
+            "note": "service/steps/ is gitignored — this file will never be committed."}
+
+
+@app.delete("/steps/{name}")
+async def delete_step(name: str):
+    """Delete a step-library entry. 404 if absent. Refuses (reload_failed)
+    if any pipeline still references it via 'use:'. Returns the deleted
+    YAML for audit."""
+    result = delete_step_yaml(_step_library_dir, _pipeline_dir, name)
+    _raise_for_write_result(result)
+    _do_reload()
+    return {"deleted": name, "yaml": result.config["yaml"], "committed": False,
+            "note": "service/steps/ is gitignored — the deletion itself was never tracked in git."}
+
+
+@app.post("/steps/validate")
+async def validate_step_endpoint(request: Request):
+    """Validate a candidate step-library YAML without writing it."""
+    body = await request.json()
+    yaml_text = body.get("yaml")
+    if not isinstance(yaml_text, str):
+        raise HTTPException(status_code=400, detail="Body must include a 'yaml' string field")
+    valid, errors = validate_step_yaml(yaml_text)
+    return {"valid": valid, "errors": errors}
 
 
 @app.post("/reload")
@@ -819,6 +1040,52 @@ async def list_schedules():
 
 
 # ---------------------------------------------------------------------------
+# Analytics — operational + judged-accuracy stats (service/src/analytics.py)
+# ---------------------------------------------------------------------------
+# Production-scoped by default (see analytics._scope_stage); pass
+# stage=testing|all to widen. time_range matches the /ui/insights/* pages
+# (24h|7d|30d|all). These are the JSON counterpart of /ui/insights/pipelines
+# and /ui/insights/steps — same underlying queries, so the numbers can't drift.
+
+def _validate_stage(stage: str) -> None:
+    if stage not in ("production", "testing", "all"):
+        raise HTTPException(status_code=400, detail="stage must be one of: production, testing, all")
+
+
+@app.get("/pipelines/{name}/stats")
+async def get_pipeline_stats_endpoint(
+    name: str,
+    time_range: str = Query(default="7d"),
+    stage: str = Query(default="production"),
+):
+    if not any(p.name == name for p in _pipelines):
+        raise HTTPException(status_code=404, detail=f"Pipeline '{name}' not found")
+    _validate_stage(stage)
+    return await _get_pipeline_stats(get_session_factory(), name, time_range=time_range, stage=stage)
+
+
+@app.get("/stats/pipelines")
+async def list_pipeline_stats_endpoint(
+    time_range: str = Query(default="7d"),
+    stage: str = Query(default="production"),
+):
+    _validate_stage(stage)
+    return {"pipelines": await _list_pipeline_stats(get_session_factory(), time_range=time_range, stage=stage)}
+
+
+@app.get("/steps/{name}/stats")
+async def get_step_stats_endpoint(
+    name: str,
+    time_range: str = Query(default="7d"),
+    stage: str = Query(default="production"),
+):
+    if name not in _step_library:
+        raise HTTPException(status_code=404, detail=f"Step '{name}' not found")
+    _validate_stage(stage)
+    return await _get_step_stats(get_session_factory(), name, time_range=time_range, stage=stage)
+
+
+# ---------------------------------------------------------------------------
 # Runs API
 # ---------------------------------------------------------------------------
 
@@ -833,6 +1100,14 @@ def _format_step(step: PipelineStep) -> dict:
         "primary_confidence": step.primary_confidence,
         "verifier_confidence": step.verifier_confidence,
         "effective_confidence": step.effective_confidence,
+        "grounding_score": step.grounding_score,
+        "deterministic_passed": step.deterministic_passed,
+        "trust_report": json.loads(step.trust_report) if step.trust_report else None,
+        "verifier_mode": step.verifier_mode,
+        "verifier_agent": step.verifier_agent,
+        "verifier_model": step.verifier_model,
+        "input_tokens": step.input_tokens,
+        "output_tokens": step.output_tokens,
         "duration_ms": step.duration_ms,
         "executed_at": step.executed_at.isoformat(),
         "parsed_output": json.loads(step.parsed_output) if step.parsed_output else None,
@@ -866,9 +1141,12 @@ async def list_runs(
     status: str | None = Query(default=None),
     pipeline: str | None = Query(default=None),
     team: str | None = Query(default=None),
+    stage: str | None = Query(default=None),
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
 ):
+    if stage is not None and stage not in ("production", "testing"):
+        raise HTTPException(status_code=400, detail="stage must be one of: production, testing")
     session_factory = get_session_factory()
     async with session_factory() as session:
         q = select(PipelineRun).order_by(PipelineRun.triggered_at.desc())
@@ -878,6 +1156,8 @@ async def list_runs(
             q = q.where(PipelineRun.pipeline_name == pipeline)
         if team:
             q = q.where(PipelineRun.team == team)
+        if stage:
+            q = q.where(PipelineRun.stage == stage)
         q = q.limit(limit).offset(offset)
         result = await session.execute(q)
         runs = result.scalars().all()
