@@ -545,7 +545,10 @@ async def _fetch_step_agent_model_combo(
         c["input_tokens"] += in_tok
         c["output_tokens"] += out_tok
         if avg_dur_ms is not None:
-            c["duration_sum_ms"] += avg_dur_ms * n
+            # Postgres/asyncpg returns avg(integer_column) as decimal.Decimal, not
+            # float (SQLite returns a plain float) — cast so this doesn't crash
+            # mixing Decimal into a float accumulator.
+            c["duration_sum_ms"] += float(avg_dur_ms) * n
             c["duration_n"] += n
     return combo
 
