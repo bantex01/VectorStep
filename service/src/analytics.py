@@ -381,3 +381,114 @@ async def get_step_stats(
     it first. Returns an all-zero payload if the step has no executions in range."""
     rollup = await _step_rollup(session_factory, time_range, stage, step_name=step_name)
     return rollup.get(step_name) or _empty_step_stats(step_name, time_range, stage)
+
+
+# ── Per-(agent, model, provider) breakdown ────────────────────────────────────
+
+async def get_step_model_breakdown(
+    session_factory: async_sessionmaker,
+    step_name: str,
+    time_range: str = "7d",
+    stage: str = "production",
+) -> list[dict]:
+    """Per (agent, model, provider) rollup for one library step — the same
+    dimension the /ui/insights/steps drilldown already breaks a step down by
+    (see ui.py's pipeline_breakdown_by_step / _fetch_step_agent_model_combo),
+    exposed as its own stat. get_step_stats blends every model/agent this
+    step has ever run under into one number; this un-blends it so "which
+    model performs best for this step" can actually be answered — success
+    rate, avg tokens, avg duration, and judged accuracy broken out per
+    (agent, model) combination rather than averaged together.
+
+    Sorted by runs_total descending. A combination with few runs can look
+    artificially good/bad — check runs_total before trusting its numbers."""
+    cutoff, _ = _time_range_cutoff(time_range)
+
+    def _scope(q):
+        q = _scope_stage(q, stage)
+        if cutoff:
+            q = q.where(PipelineRun.triggered_at >= cutoff)
+        return q.where(PipelineStep.step_name == step_name)
+
+    async with session_factory() as session:
+        status_rows = (await session.execute(_scope(
+            select(
+                PipelineStep.agent, PipelineStep.provider, PipelineStep.model,
+                PipelineStep.status, func.count().label("n"),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .group_by(PipelineStep.agent, PipelineStep.provider, PipelineStep.model, PipelineStep.status)
+        ))).all()
+
+        # SUM (not AVG) of integer columns, then divide in Python — Postgres/
+        # asyncpg returns avg(integer) as decimal.Decimal, which doesn't mix
+        # with float accumulators (see the _fetch_step_agent_model_combo fix).
+        # func.count(duration_ms) (not func.count()) counts only non-null
+        # durations, so the average below isn't skewed by rows with no timing.
+        token_duration_rows = (await session.execute(_scope(
+            select(
+                PipelineStep.agent, PipelineStep.provider, PipelineStep.model,
+                func.coalesce(func.sum(PipelineStep.input_tokens), 0),
+                func.coalesce(func.sum(PipelineStep.output_tokens), 0),
+                func.coalesce(func.sum(PipelineStep.duration_ms), 0),
+                func.count(PipelineStep.duration_ms),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .group_by(PipelineStep.agent, PipelineStep.provider, PipelineStep.model)
+        ))).all()
+
+        feedback_rows = (await session.execute(_scope(
+            select(
+                PipelineStep.agent, PipelineStep.provider, PipelineStep.model,
+                StepFeedback.outcome, func.count().label("n"),
+            )
+            .join(StepFeedback, StepFeedback.step_id == PipelineStep.id)
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .group_by(PipelineStep.agent, PipelineStep.provider, PipelineStep.model, StepFeedback.outcome)
+        ))).all()
+
+    status_counts: dict[tuple, dict[str, int]] = defaultdict(lambda: {s: 0 for s in ALL_STEP_STATUSES})
+    keys: set[tuple] = set()
+    for agent, provider, model, status, n in status_rows:
+        key = (agent, provider, model)
+        keys.add(key)
+        status_counts[key][status] = status_counts[key].get(status, 0) + n
+
+    token_duration = {
+        (agent, provider, model): (i, o, d_sum, d_n)
+        for agent, provider, model, i, o, d_sum, d_n in token_duration_rows
+    }
+    keys.update(token_duration)
+
+    feedback: dict[tuple, dict[str, int]] = defaultdict(lambda: {"correct": 0, "partial": 0, "incorrect": 0})
+    for agent, provider, model, outcome, n in feedback_rows:
+        feedback[(agent, provider, model)][outcome] = n
+    keys.update(feedback)
+
+    result = []
+    for key in keys:
+        agent, provider, model = key
+        sc = status_counts.get(key) or {s: 0 for s in ALL_STEP_STATUSES}
+        runs_total = sum(sc.values())
+        success_rate = round(sc.get("completed", 0) / runs_total, 4) if runs_total else None
+
+        inp, out, dur_sum, dur_n = token_duration.get(key, (0, 0, 0, 0))
+        avg_duration = (dur_sum / dur_n / 1000) if dur_n else None
+
+        fb = feedback.get(key, {})
+
+        result.append({
+            "agent": agent,
+            "provider": provider,
+            "model": model,
+            "runs_total": runs_total,
+            "status_counts": dict(sc),
+            "success_rate": success_rate,
+            "avg_input_tokens": round(inp / runs_total) if runs_total else None,
+            "avg_output_tokens": round(out / runs_total) if runs_total else None,
+            "avg_duration_seconds": avg_duration,
+            "accuracy": _accuracy_from_counts(fb.get("correct", 0), fb.get("partial", 0), fb.get("incorrect", 0)),
+        })
+
+    result.sort(key=lambda r: r["runs_total"], reverse=True)
+    return result

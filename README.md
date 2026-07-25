@@ -1837,6 +1837,17 @@ GET /stats/pipelines?time_range=7d&stage=production
 # across every pipeline that uses it (avg_input_tokens/avg_output_tokens instead
 # of 'teams'). 404 if the step name is unknown to the library.
 GET /steps/{name}/stats?time_range=7d&stage=production
+
+# Per (agent, model, provider) breakdown for one step — un-blends the single
+# aggregate above so "which model performs best for this step" can actually be
+# answered (success rate, avg tokens, avg duration, judged accuracy per model,
+# instead of averaged across every model the step has ever run under). Same
+# rows as the existing /ui/insights/steps drilldown's per-agent/model table.
+# 404 if the step name is unknown to the library.
+GET /steps/{name}/models?time_range=7d&stage=production
+# → {"step_name": "...", "breakdown": [{"agent", "provider", "model", "runs_total",
+#     "status_counts", "success_rate", "avg_input_tokens", "avg_output_tokens",
+#     "avg_duration_seconds", "accuracy": {...}}, ...]}  — sorted by runs_total desc
 ```
 
 ### 15d. Pipeline/Step Write, Validate, and Delete Endpoints

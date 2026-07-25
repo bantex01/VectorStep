@@ -17,6 +17,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from .analytics import get_pipeline_stats as _get_pipeline_stats
+from .analytics import get_step_model_breakdown as _get_step_model_breakdown
 from .analytics import get_step_stats as _get_step_stats
 from .analytics import list_pipeline_stats as _list_pipeline_stats
 from .config_writer import (
@@ -1083,6 +1084,23 @@ async def get_step_stats_endpoint(
         raise HTTPException(status_code=404, detail=f"Step '{name}' not found")
     _validate_stage(stage)
     return await _get_step_stats(get_session_factory(), name, time_range=time_range, stage=stage)
+
+
+@app.get("/steps/{name}/models")
+async def get_step_model_breakdown_endpoint(
+    name: str,
+    time_range: str = Query(default="7d"),
+    stage: str = Query(default="production"),
+):
+    """Per (agent, model, provider) rollup for one step — un-blends
+    get_step_stats' single aggregate so callers can compare which
+    agent/model performs best on success rate, tokens, duration, and judged
+    accuracy. See analytics.get_step_model_breakdown."""
+    if name not in _step_library:
+        raise HTTPException(status_code=404, detail=f"Step '{name}' not found")
+    _validate_stage(stage)
+    breakdown = await _get_step_model_breakdown(get_session_factory(), name, time_range=time_range, stage=stage)
+    return {"step_name": name, "breakdown": breakdown}
 
 
 # ---------------------------------------------------------------------------
