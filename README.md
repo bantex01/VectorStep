@@ -1848,6 +1848,17 @@ GET /steps/{name}/models?time_range=7d&stage=production
 # → {"step_name": "...", "breakdown": [{"agent", "provider", "model", "runs_total",
 #     "status_counts", "success_rate", "avg_input_tokens", "avg_output_tokens",
 #     "avg_duration_seconds", "accuracy": {...}}, ...]}  — sorted by runs_total desc
+
+# Calibration bins for one step, per (agent, model, provider) — the same data
+# behind the /ui/insights/steps calibration bins (pipeline/calibration.py),
+# exposed as its own stat. NOT time_range/stage scoped — always the step's
+# full production history, since calibration is a track-record measurement
+# (windowing it would defeat the point). 404 if the step name is unknown.
+GET /steps/{name}/calibration?bin_width=0.1&n_min=20
+# → {"step_name": "...", "buckets": [{"agent", "provider", "model", "total_n",
+#     "bins": [{"lo", "hi", "n", "mean_label", "validated"}, ...] (always 1/bin_width bins),
+#     "recommendation": "runs scoring ~90% here are only 75% correct..." or null
+#   }, ...]}  — sorted by total_n desc
 ```
 
 ### 15d. Pipeline/Step Write, Validate, and Delete Endpoints

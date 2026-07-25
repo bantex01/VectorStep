@@ -11,9 +11,14 @@ from src.models.context import NormalisedContext
 from src.models.llm import LLMOutput
 from src.models.pipeline import CalibrationConfig, GroundingConfig, PipelineConfig, StepConfig, TriggerConfig
 from src.pipeline import calibration as calibration_module
-from src.pipeline.calibration import CalibrationBin, CalibrationBucket, CalibrationCache, compute_calibration_buckets
+from src.pipeline.calibration import (
+    CalibrationBin,
+    CalibrationBucket,
+    CalibrationCache,
+    calibration_recommendation,
+    compute_calibration_buckets,
+)
 from src.pipeline.runner import PipelineRunner
-from src.ui import _calibration_recommendation
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +500,7 @@ async def test_trust_report_calibration_absent_for_non_enforced_step(db):
 
 
 # ---------------------------------------------------------------------------
-# UI — _calibration_recommendation
+# calibration_recommendation
 # ---------------------------------------------------------------------------
 
 def _bucket_with_bins(bins: list[CalibrationBin]) -> CalibrationBucket:
@@ -506,21 +511,21 @@ def test_recommendation_none_when_no_validated_bins():
     bucket = _bucket_with_bins([
         CalibrationBin(lo=0.0, hi=0.5, n=2, mean_label=0.0, validated=False),
     ])
-    assert _calibration_recommendation(bucket) is None
+    assert calibration_recommendation(bucket) is None
 
 
 def test_recommendation_none_when_validated_bins_close_to_diagonal():
     bucket = _bucket_with_bins([
         CalibrationBin(lo=0.5, hi=1.0, n=20, mean_label=0.72, validated=True),  # midpoint 0.75, diff 0.03
     ])
-    assert _calibration_recommendation(bucket) is None
+    assert calibration_recommendation(bucket) is None
 
 
 def test_recommendation_returned_for_divergent_validated_bin():
     bucket = _bucket_with_bins([
         CalibrationBin(lo=0.5, hi=0.9, n=40, mean_label=0.5, validated=True),  # midpoint 0.7, diff 0.2
     ])
-    msg = _calibration_recommendation(bucket)
+    msg = calibration_recommendation(bucket)
     assert msg is not None
     assert "70%" in msg
     assert "50%" in msg

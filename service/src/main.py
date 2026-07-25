@@ -17,6 +17,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from .analytics import get_pipeline_stats as _get_pipeline_stats
+from .analytics import get_step_calibration as _get_step_calibration
 from .analytics import get_step_model_breakdown as _get_step_model_breakdown
 from .analytics import get_step_stats as _get_step_stats
 from .analytics import list_pipeline_stats as _list_pipeline_stats
@@ -1101,6 +1102,22 @@ async def get_step_model_breakdown_endpoint(
     _validate_stage(stage)
     breakdown = await _get_step_model_breakdown(get_session_factory(), name, time_range=time_range, stage=stage)
     return {"step_name": name, "breakdown": breakdown}
+
+
+@app.get("/steps/{name}/calibration")
+async def get_step_calibration_endpoint(
+    name: str,
+    bin_width: float = Query(default=0.1),
+    n_min: int = Query(default=20),
+):
+    """Calibration bins for one step, per (agent, model, provider) — the same
+    data behind the /ui/insights/steps calibration bins. Always computed over
+    the step's full production history (not time_range/stage scoped — see
+    analytics.get_step_calibration for why). 404 if the step name is unknown."""
+    if name not in _step_library:
+        raise HTTPException(status_code=404, detail=f"Step '{name}' not found")
+    buckets = await _get_step_calibration(get_session_factory(), name, bin_width=bin_width, n_min=n_min)
+    return {"step_name": name, "buckets": buckets}
 
 
 # ---------------------------------------------------------------------------

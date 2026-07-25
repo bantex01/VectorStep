@@ -204,24 +204,6 @@ def _qualified_model(provider: str | None, model: str | None) -> str:
     return f"{provider}/{model}"
 
 
-def _calibration_recommendation(bucket) -> str | None:
-    """Flag the first validated bin whose predicted score and observed accuracy diverge
-    by >= 15 points — the exact style of recommendation CONFIDENCE-REDESIGN.md §4.3 uses
-    as its own worked example. Returns None if every validated bin looks fine (or there
-    are no validated bins yet)."""
-    for b in bucket.bins:
-        if not b.validated:
-            continue
-        midpoint = (b.lo + b.hi) / 2
-        if abs(b.mean_label - midpoint) >= 0.15:
-            return (
-                f"runs scoring ~{round(midpoint * 100)}% in this configuration are only "
-                f"{round(b.mean_label * 100)}% correct ({b.n} marked) — consider raising "
-                f"the threshold, changing model, or adding grounding/deterministic checks."
-            )
-    return None
-
-
 def _confidence_narrative(trust: dict, status: str) -> list[str]:
     """Plain-language, numbers-first walkthrough of how this ONE run's trust score was
     derived — S -> verifier combine -> calibration -> grounding -> deterministic checks
@@ -1839,7 +1821,7 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
     # with the Pipelines Insights drilldown (see _fetch_step_agent_model_combo).
     step_combo = await _fetch_step_agent_model_combo(cutoff)
 
-    from .pipeline.calibration import compute_calibration_buckets
+    from .pipeline.calibration import calibration_recommendation, compute_calibration_buckets
 
     calibration_buckets = await compute_calibration_buckets(sf)
 
@@ -1891,7 +1873,7 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
         avg_duration_secs = (c["duration_sum_ms"] / c["duration_n"] / 1000) if c["duration_n"] else None
         fb = feedback_by_combo.get((step_name, agent, _qualified_model(provider, model)))
         bucket = calibration_buckets.get((step_name, agent, model, provider))
-        calibration_summary = _calibration_recommendation(bucket) if bucket else None
+        calibration_summary = calibration_recommendation(bucket) if bucket else None
         pipeline_breakdown_by_step[step_name].append({
             "pipeline_name": pipeline_name,
             "agent": agent,

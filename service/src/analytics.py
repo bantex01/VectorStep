@@ -23,6 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
+from .pipeline.calibration import calibration_recommendation, compute_calibration_buckets
 from .utils import utc_now
 
 # Every value ever assigned to PipelineRun.status. "deduplicated" is deliberately
@@ -491,4 +492,51 @@ async def get_step_model_breakdown(
         })
 
     result.sort(key=lambda r: r["runs_total"], reverse=True)
+    return result
+
+
+# ── Calibration ────────────────────────────────────────────────────────────────
+
+async def get_step_calibration(
+    session_factory: async_sessionmaker,
+    step_name: str,
+    bin_width: float = 0.1,
+    n_min: int = 20,
+) -> list[dict]:
+    """Calibration bins for one step, broken out per (agent, model, provider)
+    combination — the same data behind the /ui/insights/steps page's
+    calibration bins (pipeline.calibration.compute_calibration_buckets),
+    exposed as its own stat instead of only being visible in the UI.
+
+    Unlike the other functions in this module, this is NOT time_range/stage
+    scoped: it's always computed over the step's entire production history
+    (compute_calibration_buckets' own scoping), because calibration measures
+    a real-world track record — windowing it to "the last 7 days" or mixing
+    in stage=testing runs would defeat the purpose of a track record.
+
+    Each bucket's `bins` covers the full confidence range in `bin_width`-wide
+    buckets (default 10 bins of width 0.1); a bin is `validated` once it has
+    `n_min` labelled samples — below that, treat its `mean_label` as noise,
+    not a fact. `recommendation` flags a validated bin whose predicted score
+    and observed accuracy diverge by >= 15 points, or is null if every
+    validated bin looks fine (or none are validated yet)."""
+    all_buckets = await compute_calibration_buckets(session_factory, bin_width=bin_width, n_min=n_min)
+
+    result = []
+    for (bucket_step_name, agent, model, provider), bucket in all_buckets.items():
+        if bucket_step_name != step_name:
+            continue
+        result.append({
+            "agent": agent,
+            "provider": provider,
+            "model": model,
+            "total_n": bucket.total_n,
+            "bins": [
+                {"lo": b.lo, "hi": b.hi, "n": b.n, "mean_label": b.mean_label, "validated": b.validated}
+                for b in bucket.bins
+            ],
+            "recommendation": calibration_recommendation(bucket),
+        })
+
+    result.sort(key=lambda r: r["total_n"], reverse=True)
     return result

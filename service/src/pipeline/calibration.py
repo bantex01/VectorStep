@@ -107,6 +107,24 @@ async def compute_calibration_buckets(
     return buckets
 
 
+def calibration_recommendation(bucket: CalibrationBucket) -> str | None:
+    """Flag the first validated bin whose predicted score and observed accuracy diverge
+    by >= 15 points — the exact style of recommendation CONFIDENCE-REDESIGN.md §4.3 uses
+    as its own worked example. Returns None if every validated bin looks fine (or there
+    are no validated bins yet)."""
+    for b in bucket.bins:
+        if not b.validated:
+            continue
+        midpoint = (b.lo + b.hi) / 2
+        if abs(b.mean_label - midpoint) >= 0.15:
+            return (
+                f"runs scoring ~{round(midpoint * 100)}% in this configuration are only "
+                f"{round(b.mean_label * 100)}% correct ({b.n} marked) — consider raising "
+                f"the threshold, changing model, or adding grounding/deterministic checks."
+            )
+    return None
+
+
 class CalibrationCache:
     """Not a source of truth — a short-TTL in-memory cache over
     compute_calibration_buckets(), so an enforced step's gate doesn't re-scan the DB on
