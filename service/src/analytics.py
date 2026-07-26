@@ -15,16 +15,40 @@ Every rollup here is production-scoped by default and accepts an explicit
 `stage` to widen or narrow that (see `_scope_stage`).
 """
 
+import difflib
 import math
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
+from .db.models import (
+    AgentVersionSnapshot,
+    PipelineRun,
+    PipelineStep,
+    RunFeedback,
+    StepFeedback,
+    StepPromptVersion,
+)
 from .pipeline.calibration import calibration_recommendation, compute_calibration_buckets
 from .utils import utc_now
+
+_DIFF_LINE_CAP = 200
+
+
+def _unified_diff_capped(old_text: str, new_text: str, from_label: str, to_label: str) -> str:
+    """Unified diff between two versions' text, capped at _DIFF_LINE_CAP lines with
+    a truncation marker — used by get_step_versions/get_agent_versions
+    (SPEC-prompt-versioning.md §5a/§5d). Labels are the two hashes, not "before"/
+    "after", so the diff header itself names exactly which versions are being compared."""
+    lines = list(difflib.unified_diff(
+        old_text.splitlines(), new_text.splitlines(),
+        fromfile=from_label, tofile=to_label, lineterm="",
+    ))
+    if len(lines) > _DIFF_LINE_CAP:
+        lines = lines[:_DIFF_LINE_CAP] + [f"... (truncated, {len(lines) - _DIFF_LINE_CAP} more line(s))"]
+    return "\n".join(lines)
 
 # Every value ever assigned to PipelineRun.status. "deduplicated" is deliberately
 # NOT included here even though it's a status a webhook caller can see in the
@@ -523,13 +547,15 @@ async def get_step_calibration(
     all_buckets = await compute_calibration_buckets(session_factory, bin_width=bin_width, n_min=n_min)
 
     result = []
-    for (bucket_step_name, agent, model, provider), bucket in all_buckets.items():
+    for (bucket_step_name, agent, model, provider, prompt_hash, agent_version), bucket in all_buckets.items():
         if bucket_step_name != step_name:
             continue
         result.append({
             "agent": agent,
             "provider": provider,
             "model": model,
+            "prompt_hash": prompt_hash,
+            "agent_version": agent_version,
             "total_n": bucket.total_n,
             "bins": [
                 {"lo": b.lo, "hi": b.hi, "n": b.n, "mean_label": b.mean_label, "validated": b.validated}
@@ -539,4 +565,143 @@ async def get_step_calibration(
         })
 
     result.sort(key=lambda r: r["total_n"], reverse=True)
+    return result
+
+
+# ── Prompt / agent versions (SPEC-prompt-versioning.md §5) ──────────────────────
+
+async def get_step_versions(session_factory: async_sessionmaker, step_name: str) -> list[dict]:
+    """Every prompt_hash P-Ork has recorded for `step_name`, newest first — "did
+    that prompt edit actually help?" made answerable with data (SPEC-prompt-
+    versioning.md §5a). Each version carries its unified diff against the
+    next-older version and its own calibration data, scoped to that one hash.
+
+    Like get_step_calibration, NOT time_range/stage scoped: a version's whole
+    point is a track record, not a recent window. `step_name` here uses the same
+    collapsed-group convention compute_calibration_buckets uses (fan-out/parallel
+    branches roll up to their group name — see runner.py's _db_save_branch), so
+    this and get_step_calibration always agree on what "this step" means. Returns
+    [] for a step with no recorded versions yet (never 404s — that's the route's job).
+    """
+    async with session_factory() as session:
+        registry_rows = (await session.execute(
+            select(StepPromptVersion)
+            .where(StepPromptVersion.step_name == step_name)
+            .order_by(StepPromptVersion.first_seen_at.asc())
+        )).scalars().all()
+
+    if not registry_rows:
+        return []
+
+    hashes = [r.prompt_hash for r in registry_rows]
+    step_name_filter = or_(
+        PipelineStep.step_name == step_name,
+        PipelineStep.step_name.like(f"{step_name}/%"),
+    )
+
+    async with session_factory() as session:
+        run_counts = dict((await session.execute(
+            select(PipelineStep.prompt_hash, func.count())
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(
+                PipelineRun.stage == "production", step_name_filter,
+                PipelineStep.prompt_hash.in_(hashes),
+            )
+            .group_by(PipelineStep.prompt_hash)
+        )).all())
+
+    all_buckets = await compute_calibration_buckets(session_factory)
+    labelled_by_hash: dict[str, int] = defaultdict(int)
+    calibration_by_hash: dict[str, list[dict]] = defaultdict(list)
+    for (bucket_step_name, agent, model, provider, p_hash, a_version), bucket in all_buckets.items():
+        if bucket_step_name != step_name or p_hash not in hashes:
+            continue
+        labelled_by_hash[p_hash] += bucket.total_n
+        calibration_by_hash[p_hash].append({
+            "agent": agent, "model": model, "provider": provider, "agent_version": a_version,
+            "total_n": bucket.total_n,
+            "bins": [
+                {"lo": b.lo, "hi": b.hi, "n": b.n, "mean_label": b.mean_label, "validated": b.validated}
+                for b in bucket.bins
+            ],
+            "recommendation": calibration_recommendation(bucket),
+        })
+
+    result = []
+    prev_template: str | None = None
+    prev_hash: str | None = None
+    for row in registry_rows:  # ascending — oldest first, to diff each against its predecessor
+        diff = None
+        if prev_template is not None:
+            diff = _unified_diff_capped(prev_template, row.template, prev_hash, row.prompt_hash)
+        result.append({
+            "prompt_hash": row.prompt_hash,
+            "template": row.template,
+            "first_seen_at": row.first_seen_at.isoformat(),
+            "last_seen_at": row.last_seen_at.isoformat(),
+            "runs_total": run_counts.get(row.prompt_hash, 0),
+            "labelled_n": labelled_by_hash.get(row.prompt_hash, 0),
+            "diff_from_previous": diff,
+            "calibration": calibration_by_hash.get(row.prompt_hash, []),
+        })
+        prev_template, prev_hash = row.template, row.prompt_hash
+
+    result.reverse()  # newest first, matching GET /runs
+    return result
+
+
+async def get_agent_versions(session_factory: async_sessionmaker, agent_name: str) -> list[dict]:
+    """Every agent_version P-Ork has a snapshot for, for the Gateway agent
+    `agent_name` (bare name, no 'gateway:' prefix — matched against `agent =
+    'gateway:<agent_name>'`), newest first (SPEC-prompt-versioning.md §5d).
+
+    This is the only place recoverable text for an agent_version survives once the
+    Gateway agent moves on — soul_md/agent_yaml are null (with `note` explaining why)
+    for a version P-Ork couldn't confirm at snapshot time (see versioning.py's
+    record_agent_version). `used_by_steps` is the reverse-direction lookup from
+    get_step_versions: which steps this agent_version actually affected. Returns []
+    for an agent with no snapshot rows at all (never 404s — that's the route's job).
+    """
+    agent = f"gateway:{agent_name}"
+    async with session_factory() as session:
+        registry_rows = (await session.execute(
+            select(AgentVersionSnapshot)
+            .where(AgentVersionSnapshot.agent == agent)
+            .order_by(AgentVersionSnapshot.first_seen_at.asc())
+        )).scalars().all()
+
+    if not registry_rows:
+        return []
+
+    versions = [r.agent_version for r in registry_rows]
+    async with session_factory() as session:
+        used_by_rows = (await session.execute(
+            select(PipelineStep.agent_version, PipelineStep.step_name)
+            .where(PipelineStep.agent == agent, PipelineStep.agent_version.in_(versions))
+            .distinct()
+        )).all()
+    used_by_steps: dict[str, set[str]] = defaultdict(set)
+    for version, step_name in used_by_rows:
+        used_by_steps[version].add(step_name.split("/", 1)[0])  # collapse fan-out/parallel branches
+
+    result = []
+    prev_soul: str | None = None
+    prev_version: str | None = None
+    for row in registry_rows:  # ascending — oldest first, to diff each against its predecessor
+        diff = None
+        if prev_soul is not None and row.soul_md is not None:
+            diff = _unified_diff_capped(prev_soul, row.soul_md, prev_version, row.agent_version)
+        result.append({
+            "agent_version": row.agent_version,
+            "soul_md": row.soul_md,
+            "agent_yaml": row.agent_yaml,
+            "note": row.note,
+            "first_seen_at": row.first_seen_at.isoformat(),
+            "last_seen_at": row.last_seen_at.isoformat(),
+            "diff_from_previous": diff,
+            "used_by_steps": sorted(used_by_steps.get(row.agent_version, ())),
+        })
+        prev_soul, prev_version = row.soul_md, row.agent_version
+
+    result.reverse()  # newest first
     return result

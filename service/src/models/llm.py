@@ -12,4 +12,5 @@ class LLMOutput(BaseModel):
     reasoning: dict | None = None
     model: str | None = None      # populated from executor metadata, not agent self-report
     provider: str | None = None   # populated from executor metadata (gateway executor only)
+    agent_version: str | None = None  # populated from executor metadata (gateway executor only)
     raw_response: dict = {}

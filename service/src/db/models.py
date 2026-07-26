@@ -44,6 +44,15 @@ class PipelineStep(Base):
     agent: Mapped[str | None] = mapped_column(String, nullable=True)   # executor_config.agent
     model: Mapped[str | None] = mapped_column(String, nullable=True)  # actual model used (from response metadata)
     provider: Mapped[str | None] = mapped_column(String, nullable=True)  # gateway provider key (gateway executor only)
+    prompt_hash: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # sha256[:12] of the step's normalised prompt_template — scopes the calibration
+    # bucket to the prompt that actually produced the outcome. NULL for pre-migration
+    # rows and for non-LLM steps with no template. NULL is its own bucket dimension,
+    # never a wildcard (SPEC-prompt-versioning.md §2).
+    agent_version: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # Gateway-reported content hash of the agent's full config incl. soul.md, from
+    # meta.agentMeta.agentVersion. NULL for non-gateway executors, for a Gateway
+    # older than SPEC-prompt-versioning.md, and for pre-migration rows.
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     raw_output: Mapped[str | None] = mapped_column(Text, nullable=True)          # JSON
     parsed_output: Mapped[str | None] = mapped_column(Text, nullable=True)       # JSON
@@ -79,6 +88,44 @@ class RunFeedback(Base):
     outcome: Mapped[str] = mapped_column(String, nullable=False)  # "correct" | "partial" | "incorrect"
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     submitted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
+
+
+class StepPromptVersion(Base):
+    """Content-addressed registry of prompt templates actually used by a run.
+
+    Write-on-miss at step-save time. Grows with prompt EDITS, not runs — tens of
+    rows a year. Because it is content-addressed, reverting a prompt to an earlier
+    version automatically re-joins that version's existing calibration history.
+    That is intended behaviour, not an accident.
+    """
+    __tablename__ = "step_prompt_versions"
+
+    prompt_hash: Mapped[str] = mapped_column(String, primary_key=True)
+    step_name: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    template: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
+
+
+class AgentVersionSnapshot(Base):
+    """Snapshot of a Gateway agent's definition at the version P-Ork observed.
+
+    P-Ork cannot compute this hash itself — the Gateway owns the algorithm and the
+    source files. On seeing an unknown agent_version, P-Ork asks the Gateway for the
+    current definition and stores it ONLY if the Gateway's reported current version
+    matches the one being resolved. If the operator changed the agent again in
+    between, text stays NULL and `note` records why — an honest gap beats a
+    mislabelled snapshot.
+    """
+    __tablename__ = "agent_version_snapshots"
+
+    agent_version: Mapped[str] = mapped_column(String, primary_key=True)
+    agent: Mapped[str] = mapped_column(String, nullable=False, index=True)  # "gateway:name"
+    soul_md: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_yaml: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
 
 
 class StepFeedback(Base):

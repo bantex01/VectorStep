@@ -63,6 +63,8 @@ async def test_get_step_calibration_returns_bucket_per_agent_model(db):
     assert bucket["agent"] == "agent-a"
     assert bucket["model"] == "model-x"
     assert bucket["provider"] == "anthropic"
+    assert bucket["prompt_hash"] is None
+    assert bucket["agent_version"] is None
     assert bucket["total_n"] == 25
     assert len(bucket["bins"]) == 10  # bin_width=0.1 -> 10 bins covering 0-1
 

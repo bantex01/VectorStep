@@ -417,6 +417,24 @@
           <span class="uppercase tracking-wide font-medium">Prompt</span>
           <span class="text-zinc-600 normal-case">— what the agent was actually asked</span>
         </button>
+        {% if item.step.prompt_hash or item.step.agent_version %}
+        <div class="mt-2 flex items-center gap-2">
+          {% if item.step.prompt_hash %}
+          <a href="/ui/insights/steps?time_range=all&step={{ item.step.step_name.split('/')[0] }}"
+             title="prompt_hash — this step's prompt template version"
+             class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 hover:text-indigo-400 hover:ring-indigo-700">
+            template {{ item.step.prompt_hash[:12] }}
+          </a>
+          {% endif %}
+          {% if item.step.agent_version %}
+          <a href="/ui/agents/gateway/{{ (item.step.agent or '').split(':', 1)[-1] }}#agent-versions"
+             title="agent_version — the Gateway agent's full config at the time of this run"
+             class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 hover:text-indigo-400 hover:ring-indigo-700">
+            agent {{ item.step.agent_version[:12] }}
+          </a>
+          {% endif %}
+        </div>
+        {% endif %}
         <div x-show="prompt_open" x-cloak class="mt-3">
           <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ item.step.prompt }}</pre>
         </div>

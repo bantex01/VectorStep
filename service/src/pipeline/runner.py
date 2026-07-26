@@ -6,6 +6,7 @@ import shlex
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Literal
 
 import httpx
@@ -39,6 +40,7 @@ from ..models.pipeline import (
 )
 from ..notifications.telegram import TelegramNotifier
 from .context import build_context
+from .versioning import prompt_hash, record_agent_version, record_prompt_version
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +224,7 @@ class PipelineRunner:
         calibration_n_min: int = 20,
         calibration_bin_width: float = 0.1,
         calibration_cache_ttl_seconds: int = 300,
+        gateway_rest_url: str | None = None,
     ):
         self._executor_classes = executors
         self._executor_instances: dict[str, BaseExecutor] = {}
@@ -229,6 +232,7 @@ class PipelineRunner:
         self._notifiers: dict[str, TelegramNotifier] = notifiers or {}
         self._artifact_store = artifact_store
         self._pipeline_registry = pipeline_registry
+        self._gateway_rest_url = gateway_rest_url
 
         from .calibration import CalibrationCache
         self._calibration_cache: "CalibrationCache | None" = (
@@ -241,6 +245,48 @@ class PipelineRunner:
 
     def set_pipeline_registry(self, registry: "dict[str, PipelineConfig]") -> None:
         self._pipeline_registry = registry
+
+    def _build_bucket_reset(
+        self,
+        step_name: str,
+        agent: str | None,
+        model: str | None,
+        provider: str | None,
+        current_prompt_hash: str | None,
+        current_agent_version: str | None,
+    ) -> dict | None:
+        """When the current (step, agent, model, provider, prompt_hash, agent_version)
+        bucket isn't validated, check whether a DIFFERENT prompt_hash/agent_version of
+        the same (step, agent, model, provider) combo was validated — i.e. this isn't
+        a step with no history, it's a step whose history just reset (SPEC-prompt-
+        versioning.md §4h). Reads CalibrationCache's already-loaded bucket dict via
+        previous_versions_for — no extra query."""
+        if self._calibration_cache is None:
+            return None
+        candidates = [
+            b for b in self._calibration_cache.previous_versions_for(step_name, agent, model, provider)
+            if (b.prompt_hash, b.agent_version) != (current_prompt_hash, current_agent_version)
+            and any(bin_.validated for bin_ in b.bins)
+        ]
+        if not candidates:
+            return None
+        # Most recently active previous version, if more than one prior version qualifies.
+        previous = max(candidates, key=lambda b: b.last_seen_at or datetime.min)
+
+        prompt_changed = previous.prompt_hash != current_prompt_hash
+        agent_changed = previous.agent_version != current_agent_version
+        reason = (
+            "both_changed" if prompt_changed and agent_changed
+            else "prompt_changed" if prompt_changed
+            else "agent_changed"
+        )
+        return {
+            "reason": reason,
+            "previous_version_last_seen": (
+                previous.last_seen_at.isoformat() if previous.last_seen_at else None
+            ),
+            "previous_validated_n": previous.total_n,
+        }
 
     @staticmethod
     def _extract_usage(raw_response: dict) -> tuple[int, int]:
@@ -751,6 +797,8 @@ class PipelineRunner:
                 bucket = await self._calibration_cache.get(
                     step_name=step.name, agent=agent_key,
                     model=primary_output.model, provider=primary_output.provider,
+                    prompt_hash=prompt_hash(step.prompt_template),
+                    agent_version=primary_output.agent_version,
                 )
             calib_bin = bucket.lookup(combined_trust) if bucket is not None else None
 
@@ -779,6 +827,12 @@ class PipelineRunner:
                     "calibrated": None,
                     "on_uncalibrated": step.calibration.on_uncalibrated,
                 }
+                bucket_reset = self._build_bucket_reset(
+                    step.name, agent_key, primary_output.model, primary_output.provider,
+                    prompt_hash(step.prompt_template), primary_output.agent_version,
+                )
+                if bucket_reset is not None:
+                    calibration_report["bucket_reset"] = bucket_reset
                 if step.calibration.on_uncalibrated == "escalate":
                     combined_trust = 0.0
 
@@ -1940,14 +1994,19 @@ class PipelineRunner:
             # gap or the prompt never asked for X). Other executors don't set this key,
             # so this falls back to the executor_config dump they've always gotten.
             _rendered_prompt = (result.output.raw_response or {}).get("prompt") if result.output else None
+            _prompt_hash = prompt_hash(step.prompt_template)
+            _agent_key = f"{step.executor}:{_agent}" if _agent else None
+            _agent_version = result.output.agent_version if result.output else None
             session.add(PipelineStep(
                 run_id=run_id,
                 step_name=result.step_name,
                 step_index=result.step_index,
                 executor=step.executor,
-                agent=f"{step.executor}:{_agent}" if _agent else None,
+                agent=_agent_key,
                 model=result.output.model if result.output else None,
                 provider=result.output.provider if result.output else None,
+                prompt_hash=_prompt_hash,
+                agent_version=_agent_version,
                 prompt=_rendered_prompt if _rendered_prompt else json.dumps(step.executor_config),
                 raw_output=json.dumps(result.output.raw_response) if result.output else None,
                 parsed_output=result.output.model_dump_json(exclude={"raw_response"}) if result.output else None,
@@ -1978,6 +2037,16 @@ class PipelineRunner:
                 input_tokens=_in_tok or None,
                 output_tokens=_out_tok or None,
             ))
+            if _prompt_hash is not None:
+                await record_prompt_version(
+                    session, hash_=_prompt_hash, step_name=result.step_name,
+                    template=step.prompt_template,
+                )
+            if self._gateway_rest_url and _agent_version is not None and _agent_key is not None:
+                await record_agent_version(
+                    session, self._gateway_rest_url,
+                    agent_version=_agent_version, agent=_agent_key,
+                )
             await session.commit()
 
     async def _db_save_branch(
@@ -2003,17 +2072,22 @@ class PipelineRunner:
         if _t is not None:
             _trace = json.dumps(_t)
         _in_tok, _out_tok = self._extract_usage(output.raw_response)
+        _branch_step_name = f"{group_name}/{branch.name}"
+        _prompt_hash = prompt_hash(branch.prompt_template)
+        _agent_key = f"{branch.executor}:{_agent}" if _agent else None
         async with self._session_factory() as session:
             session.add(PipelineStep(
                 run_id=run_id,
-                step_name=f"{group_name}/{branch.name}",
+                step_name=_branch_step_name,
                 # Encode group position + branch position so DB ordering mirrors execution order.
                 # Branches share the same group_index prefix and sort together.
                 step_index=group_index * 1000 + branch_index,
                 executor=branch.executor,
-                agent=f"{branch.executor}:{_agent}" if _agent else None,
+                agent=_agent_key,
                 model=output.model,
                 provider=output.provider,
+                prompt_hash=_prompt_hash,
+                agent_version=output.agent_version,
                 prompt=json.dumps(branch.executor_config),
                 raw_output=json.dumps(output.raw_response),
                 parsed_output=output.model_dump_json(exclude={"raw_response"}),
@@ -2029,6 +2103,20 @@ class PipelineRunner:
                 input_tokens=_in_tok or None,
                 output_tokens=_out_tok or None,
             ))
+            if _prompt_hash is not None:
+                # Registry step_name uses the collapsed group name (not the full
+                # "group/branch" runtime name), matching calibration.py's own
+                # step_name.split("/", 1)[0] collapse — so GET /steps/{name}/versions
+                # and GET /steps/{name}/calibration key on the same step_name universe.
+                await record_prompt_version(
+                    session, hash_=_prompt_hash, step_name=group_name,
+                    template=branch.prompt_template,
+                )
+            if self._gateway_rest_url and output.agent_version is not None and _agent_key is not None:
+                await record_agent_version(
+                    session, self._gateway_rest_url,
+                    agent_version=output.agent_version, agent=_agent_key,
+                )
             await session.commit()
 
     async def _db_complete_run(self, run_id: str, status: str, run_log: list) -> None:

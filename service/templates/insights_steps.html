@@ -214,12 +214,23 @@
               <th class="text-right font-medium pb-1.5 pr-4">Accuracy</th>
               <th class="text-right font-medium pb-1.5 pr-4">Avg tokens (in/out)</th>
               <th class="text-right font-medium pb-1.5 pr-4">Avg duration</th>
-              <th class="text-left font-medium pb-1.5">Calibration</th>
+              <th class="text-left font-medium pb-1.5 pr-4">Calibration</th>
+              <th class="text-left font-medium pb-1.5">Version</th>
             </tr>
           </thead>
           <tbody id="dd-pipeline-breakdown" class="divide-y divide-zinc-800"></tbody>
         </table>
       </div>
+    </div>
+
+    <!-- Prompt history -->
+    <div class="mt-5">
+      <details id="dd-prompt-history">
+        <summary class="cursor-pointer text-xs text-zinc-500 uppercase tracking-wide font-medium hover:text-zinc-300">
+          Prompt history
+        </summary>
+        <div id="dd-prompt-history-body" class="mt-3 text-sm text-zinc-500">Loading…</div>
+      </details>
     </div>
   </div>
 </div>
@@ -456,6 +467,8 @@
                   return `<span class="inline-block w-3 h-3 rounded-sm ${cellCls}" title="${title}"></span>`;
                 }).join(' ')
               : '<span class="text-xs text-zinc-600">no data</span>';
+            const versionChips = `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700" title="prompt_hash">${s.prompt_hash ? s.prompt_hash.slice(0, 12) : '—'}</span>` +
+              (s.agent_version ? ` <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700" title="agent_version">${s.agent_version.slice(0, 12)}</span>` : '');
             return `<tr class="hover:bg-zinc-800/50 transition-colors">
               <td class="py-1.5 pr-4 text-xs">
                 <a href="/ui/pipelines/${s.pipeline_name}" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">${s.pipeline_name}</a>
@@ -467,20 +480,104 @@
               <td class="py-1.5 pr-4 text-right text-xs font-semibold ${accCls}">${accStr}</td>
               <td class="py-1.5 pr-4 text-right text-xs text-zinc-400">${tokStr}</td>
               <td class="py-1.5 pr-4 text-right text-xs text-zinc-500">${s.avg_duration || '—'}</td>
-              <td class="py-1.5 text-left">${binsHtml}</td>
+              <td class="py-1.5 pr-4 text-left">${binsHtml}</td>
+              <td class="py-1.5 text-left whitespace-nowrap">${versionChips}</td>
             </tr>${s.calibration_recommendation ? `<tr>
-              <td colspan="9" class="pb-2">
+              <td colspan="10" class="pb-2">
                 <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800">${s.calibration_recommendation}</span>
               </td>
             </tr>` : ''}`;
           }).join('')
         : '<tr><td class="py-4 text-xs text-zinc-500">No breakdown data in range</td></tr>';
     }
+
+    // Prompt history — fetched lazily, only when the disclosure is open (or when
+    // it's already open and the selected step changes).
+    promptHistoryLoadedFor = null;
+    const detailsEl = document.getElementById('dd-prompt-history');
+    if (detailsEl && detailsEl.open) loadPromptHistory(name);
+  }
+
+  // ── Prompt history disclosure (SPEC-prompt-versioning.md §6a) ───────────────
+
+  let promptHistoryLoadedFor = null;
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function diffHtml(diffText) {
+    if (!diffText) return '<p class="text-xs text-zinc-600">(oldest version — nothing to diff against)</p>';
+    return '<pre class="text-xs font-mono overflow-x-auto p-3 rounded bg-zinc-950 border border-zinc-800">' +
+      diffText.split('\n').map(line => {
+        let cls = 'text-zinc-500';
+        if (line.startsWith('+') && !line.startsWith('+++')) cls = 'text-green-400';
+        else if (line.startsWith('-') && !line.startsWith('---')) cls = 'text-red-400';
+        else if (line.startsWith('@@')) cls = 'text-indigo-400';
+        return `<span class="${cls}">${escapeHtml(line)}</span>`;
+      }).join('\n') + '</pre>';
+  }
+
+  async function loadPromptHistory(name) {
+    const body = document.getElementById('dd-prompt-history-body');
+    if (!body) return;
+    if (promptHistoryLoadedFor === name) return;
+    promptHistoryLoadedFor = name;
+    body.textContent = 'Loading…';
+    try {
+      const resp = await fetch(`/steps/${encodeURIComponent(name)}/versions`);
+      if (!resp.ok) throw new Error(resp.status);
+      const data = await resp.json();
+      const versions = data.versions || [];
+      if (!versions.length) {
+        body.innerHTML = '<p class="text-xs text-zinc-500">No recorded prompt versions for this step yet.</p>';
+        return;
+      }
+      body.innerHTML = versions.map((v, i) => `
+        <details class="mb-2 border border-zinc-800 rounded-lg" ${i === 0 ? 'open' : ''}>
+          <summary class="cursor-pointer px-3 py-2 flex items-center gap-3 text-xs">
+            <span class="font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 ring-1 ring-inset ring-zinc-700">${v.prompt_hash.slice(0, 12)}</span>
+            <span class="text-zinc-500">${v.first_seen_at.slice(0, 10)} → ${v.last_seen_at.slice(0, 10)}</span>
+            <span class="text-zinc-500">${v.runs_total} run(s), ${v.labelled_n} marked</span>
+          </summary>
+          <div class="px-3 pb-3 space-y-2">
+            <div>
+              <p class="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Template</p>
+              <pre class="text-xs font-mono overflow-x-auto p-3 rounded bg-zinc-950 border border-zinc-800 text-zinc-300">${escapeHtml(v.template)}</pre>
+            </div>
+            ${v.diff_from_previous !== null ? `<div>
+              <p class="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Diff from previous version</p>
+              ${diffHtml(v.diff_from_previous)}
+            </div>` : ''}
+          </div>
+        </details>
+      `).join('');
+    } catch (e) {
+      body.innerHTML = '<p class="text-xs text-red-400">Could not load prompt history.</p>';
+    }
+  }
+
+  const promptHistoryDetails = document.getElementById('dd-prompt-history');
+  if (promptHistoryDetails) {
+    promptHistoryDetails.addEventListener('toggle', () => {
+      if (promptHistoryDetails.open && stepSelForHistory()) loadPromptHistory(stepSelForHistory());
+    });
+  }
+  function stepSelForHistory() {
+    const el = document.getElementById('step-select');
+    return el ? el.value : null;
   }
 
   const stepSel = document.getElementById('step-select');
   if (stepSel) {
     stepSel.addEventListener('change', e => updateDrilldown(e.target.value));
+    // Deep-link support (?step=name), e.g. from a run's Prompt disclosure chip.
+    const requestedStep = new URLSearchParams(window.location.search).get('step');
+    if (requestedStep && [...stepSel.options].some(o => o.value === requestedStep)) {
+      stepSel.value = requestedStep;
+      const detailsEl = document.getElementById('dd-prompt-history');
+      if (detailsEl) detailsEl.open = true;
+    }
     if (stepSel.value) updateDrilldown(stepSel.value);
   }
 </script>

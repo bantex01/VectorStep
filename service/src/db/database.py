@@ -71,6 +71,8 @@ _COLUMN_MIGRATIONS = [
     ("pipeline_steps", "verifier_model", "TEXT"),
     ("pipeline_steps", "verifier_provider", "TEXT"),
     ("pipeline_steps", "verifier_prompt", "TEXT"),
+    ("pipeline_steps", "prompt_hash", "TEXT"),
+    ("pipeline_steps", "agent_version", "TEXT"),
 ]
 
 _INDEX_MIGRATIONS = [
@@ -85,6 +87,8 @@ _INDEX_MIGRATIONS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_pipeline_runs_running_fingerprint "
     "ON pipeline_runs (pipeline_name, fingerprint) WHERE status = 'running'",
     "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_stage ON pipeline_runs (stage)",
+    "CREATE INDEX IF NOT EXISTS ix_pipeline_steps_prompt_hash ON pipeline_steps (prompt_hash)",
+    "CREATE INDEX IF NOT EXISTS ix_pipeline_steps_agent_version ON pipeline_steps (agent_version)",
 ]
 
 

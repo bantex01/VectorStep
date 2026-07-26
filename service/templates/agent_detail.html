@@ -54,7 +54,7 @@
 {% endblock %}
 
 {% block content %}
-<div x-data="{ tab: 'overview' }">
+<div x-data="{ tab: window.location.hash === '#agent-versions' ? 'versions' : 'overview' }">
 
   <!-- Configured models -->
   {% if agent_config %}
@@ -116,6 +116,14 @@
       :class="tab==='agent_file' ? 'border-indigo-500 text-indigo-400' : 'border-transparent text-zinc-400 hover:text-zinc-100 hover:border-zinc-600'"
       class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px">
       Config
+    </button>
+    {% endif %}
+    {% if agent_versions %}
+    <button @click="tab='versions'" id="agent-versions"
+      :class="tab==='versions' ? 'border-indigo-500 text-indigo-400' : 'border-transparent text-zinc-400 hover:text-zinc-100 hover:border-zinc-600'"
+      class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px">
+      Versions
+      <span class="ml-1 text-xs text-zinc-600">({{ agent_versions | length }})</span>
     </button>
     {% endif %}
   </div>
@@ -308,6 +316,65 @@
     <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6">
       <pre class="text-sm text-zinc-300 font-mono whitespace-pre overflow-x-auto leading-relaxed"><code>{{ agent_file | e }}</code></pre>
     </div>
+  </div>
+  {% endif %}
+
+  <!-- Versions — content hash history over this agent's full config incl. soul.md
+       (SPEC-prompt-versioning.md §5d/§6d). Without this, an agent_version chip
+       elsewhere in the app is exactly the opaque hex string this feature exists
+       to eliminate. -->
+  {% if agent_versions %}
+  <div x-show="tab==='versions'" x-cloak class="space-y-3">
+    {% for v in agent_versions %}
+    <div x-data="{ open: {{ 'true' if loop.first else 'false' }} }" class="bg-zinc-900 rounded-lg border border-zinc-800">
+      <button @click="open = !open" type="button" class="w-full flex items-center gap-3 px-5 py-3 text-left">
+        <svg class="w-3.5 h-3.5 shrink-0 transition-transform text-zinc-500" :class="open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+        </svg>
+        <span class="font-mono text-xs px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 ring-1 ring-inset ring-zinc-700">{{ v.agent_version[:12] }}</span>
+        <span class="text-xs text-zinc-500">{{ v.first_seen_at[:10] }} → {{ v.last_seen_at[:10] }}</span>
+        {% if v.used_by_steps %}
+        <span class="text-xs text-zinc-600">used by {{ v.used_by_steps | length }} step(s)</span>
+        {% endif %}
+      </button>
+      <div x-show="open" x-cloak class="px-5 pb-4 space-y-3 border-t border-zinc-800 pt-3">
+        {% if v.note %}
+        <p class="text-xs text-amber-400 bg-amber-950/50 ring-1 ring-inset ring-amber-900 rounded px-3 py-2">
+          {{ v.note }} — no config text could be captured for this version.
+        </p>
+        {% endif %}
+        {% if v.used_by_steps %}
+        <div>
+          <p class="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Used by steps</p>
+          <div class="flex flex-wrap gap-1.5">
+            {% for step_name in v.used_by_steps %}
+            <a href="/ui/insights/steps?time_range=all&step={{ step_name }}"
+               class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 hover:text-indigo-400">
+              {{ step_name }}
+            </a>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+        {% if v.soul_md %}
+        <div>
+          <p class="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">soul.md</p>
+          <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed p-3 rounded bg-zinc-950 border border-zinc-800 max-h-96 overflow-y-auto">{{ v.soul_md }}</pre>
+        </div>
+        {% endif %}
+        {% if v.diff_from_previous %}
+        <div>
+          <p class="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Diff from previous version</p>
+          <pre class="text-xs font-mono overflow-x-auto p-3 rounded bg-zinc-950 border border-zinc-800 leading-relaxed">{% for line in v.diff_from_previous.split('\n') %}{% if line.startswith('+') and not line.startswith('+++') %}<span class="text-green-400">{{ line }}</span>
+{% elif line.startswith('-') and not line.startswith('---') %}<span class="text-red-400">{{ line }}</span>
+{% elif line.startswith('@@') %}<span class="text-indigo-400">{{ line }}</span>
+{% else %}<span class="text-zinc-500">{{ line }}</span>
+{% endif %}{% endfor %}</pre>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
   </div>
   {% endif %}
 

@@ -1849,16 +1849,40 @@ GET /steps/{name}/models?time_range=7d&stage=production
 #     "status_counts", "success_rate", "avg_input_tokens", "avg_output_tokens",
 #     "avg_duration_seconds", "accuracy": {...}}, ...]}  — sorted by runs_total desc
 
-# Calibration bins for one step, per (agent, model, provider) — the same data
-# behind the /ui/insights/steps calibration bins (pipeline/calibration.py),
-# exposed as its own stat. NOT time_range/stage scoped — always the step's
-# full production history, since calibration is a track-record measurement
-# (windowing it would defeat the point). 404 if the step name is unknown.
+# Calibration bins for one step, per (agent, model, provider, prompt_hash,
+# agent_version) — the same data behind the /ui/insights/steps calibration
+# bins (pipeline/calibration.py), exposed as its own stat. NOT time_range/stage
+# scoped — always the step's full production history, since calibration is a
+# track-record measurement (windowing it would defeat the point). 404 if the
+# step name is unknown. See SPEC-prompt-versioning.md — prompt_hash/agent_version
+# are part of the bucket key so editing a prompt or a Gateway agent's config
+# starts a fresh bucket instead of silently pooling with the old one's history.
 GET /steps/{name}/calibration?bin_width=0.1&n_min=20
-# → {"step_name": "...", "buckets": [{"agent", "provider", "model", "total_n",
+# → {"step_name": "...", "buckets": [{"agent", "provider", "model", "prompt_hash",
+#     "agent_version", "total_n",
 #     "bins": [{"lo", "hi", "n", "mean_label", "validated"}, ...] (always 1/bin_width bins),
 #     "recommendation": "runs scoring ~90% here are only 75% correct..." or null
 #   }, ...]}  — sorted by total_n desc
+
+# Every prompt template version P-Ork has recorded for this step, newest first —
+# "did that prompt edit actually help?" made answerable with data. Each version
+# carries its diff against the version before it (null for the oldest) and its
+# own calibration data scoped to just that version. NOT time_range/stage scoped,
+# same reasoning as /calibration above. 404 if the step name is unknown.
+GET /steps/{name}/versions
+# → {"step_name": "...", "versions": [{"prompt_hash", "template", "first_seen_at",
+#     "last_seen_at", "runs_total", "labelled_n", "diff_from_previous", "calibration": [...]
+#   }, ...]}  — sorted by first_seen_at desc
+
+# Every Gateway agent_version P-Ork has a snapshot for, newest first — the only
+# place recoverable text for an agent_version survives once the Gateway agent
+# moves on to a newer config. `name` is the bare agent name (no "gateway:"
+# prefix). 404 if P-Ork has no snapshot rows for this agent at all.
+GET /agents/{name}/versions
+# → {"agent": "gateway:...", "versions": [{"agent_version", "soul_md", "agent_yaml",
+#     "note", "first_seen_at", "last_seen_at", "diff_from_previous", "used_by_steps": [...]
+#   }, ...]}  — sorted by first_seen_at desc. `note` (instead of soul_md/agent_yaml
+#   text) means P-Ork couldn't confirm that snapshot, not that the agent had no config.
 ```
 
 ### 15d. Pipeline/Step Write, Validate, and Delete Endpoints
@@ -2231,10 +2255,14 @@ means what it claims: does a step that reports 0.75 confidence in a specific
 of the time?
 
 **Bucketing.** Marked step-executions are grouped by `(step_name, agent, model,
-provider)` — a `library step` (see §Adding a Library Step) used across five pipelines
-feeds **one** bucket instead of five, and changing one step's model resets only that
-step's bucket. Fan-out branches (`step_name` like `triage/0`, `triage/1`) collapse into
-their parent step's bucket rather than one bucket per branch index.
+provider, prompt_hash, agent_version)` — a `library step` (see §Adding a Library Step)
+used across five pipelines feeds **one** bucket instead of five, and changing one step's
+model resets only that step's bucket. Fan-out branches (`step_name` like `triage/0`,
+`triage/1`) collapse into their parent step's bucket rather than one bucket per branch
+index. `prompt_hash`/`agent_version` (SPEC-prompt-versioning.md) mean editing a step's
+prompt template, or editing a Gateway agent's `agent.yaml`/`soul.md`, also starts a
+fresh bucket — see `CONFIDENCE-EXPLAINED.md` §7 for the full explanation and what you'll
+see in the UI when it happens.
 
 **Label precedence, per step-execution:**
 1. **Human** — a resolved `StepFeedback` row for that step execution (`correct → 1.0`,
@@ -2295,10 +2323,13 @@ When the bucket/bin has **not** yet accumulated `n_min` marked outcomes,
 A step with **no** `calibration:` block is unaffected by any of this — same posture as
 Phase 1's core invariant.
 
-**No new column, no new metric.** Calibration is computed fresh from the existing
-`pipeline_steps`/`step_feedback`/`run_feedback` tables on every request, the same way the
-Insights pages already recompute their rollups — there is no persisted calibration curve
-to migrate or invalidate.
+**No persisted calibration curve.** Calibration is still computed fresh from
+`pipeline_steps`/`step_feedback`/`run_feedback` on every request, the same way the
+Insights pages already recompute their rollups — there's no fitted curve to migrate or
+invalidate. (SPEC-prompt-versioning.md did add two columns to `pipeline_steps` —
+`prompt_hash`, `agent_version` — plus two small content-addressed registry tables that
+hold the recoverable text behind those hashes; see that spec and `CONFIDENCE-EXPLAINED.md`
+§7 for why.)
 
 See `samples/pipelines/trust-vector-remediation.yaml` for a complete worked example
 combining `critic`/`independent` verifier modes, enforced grounding, deterministic

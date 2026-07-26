@@ -293,12 +293,14 @@ class GatewayExecutor(BaseExecutor):
         agent_meta = result.get("meta", {}).get("agentMeta", {})
         model = agent_meta.get("model")
         provider = agent_meta.get("provider")
+        agent_version = agent_meta.get("agentVersion")
 
         try:
             output = LLMOutput(
                 **parsed,
                 model=model,
                 provider=provider,
+                agent_version=agent_version,
                 raw_response=result,
             )
         except Exception as exc:

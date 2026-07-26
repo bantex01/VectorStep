@@ -96,6 +96,77 @@ def test_calibration_unvalidated_proceed_uses_raw_score():
     assert any("as-is" in line for line in lines)
 
 
+def test_calibration_validated_has_no_bucket_reset_line():
+    trust = _trust(calibration={
+        "n": 20, "n_min": 20, "validated": True, "raw": 0.85, "calibrated": 0.62,
+        "on_uncalibrated": "proceed",
+    })
+    lines = _confidence_narrative(trust, "completed")
+
+    assert not any("reset" in line.lower() for line in lines)
+
+
+def test_bucket_reset_prompt_changed_names_the_date():
+    trust = _trust(calibration={
+        "n": 4, "n_min": 20, "validated": False, "raw": 0.85, "calibrated": None,
+        "on_uncalibrated": "proceed",
+        "bucket_reset": {
+            "reason": "prompt_changed",
+            "previous_version_last_seen": "2026-07-03T16:02:51",
+            "previous_validated_n": 47,
+        },
+    })
+    lines = _confidence_narrative(trust, "completed")
+
+    assert any(
+        "reset" in line and "prompt changed" in line and "Jul 03" in line
+        and "47" in line and "4" in line and "20" in line
+        for line in lines
+    )
+
+
+def test_bucket_reset_agent_changed_names_the_agent():
+    trust = _trust(calibration={
+        "n": 0, "n_min": 20, "validated": False, "raw": 0.85, "calibrated": None,
+        "on_uncalibrated": "proceed",
+        "bucket_reset": {
+            "reason": "agent_changed", "previous_version_last_seen": "2026-07-03T16:02:51",
+            "previous_validated_n": 30,
+        },
+    })
+    lines = _confidence_narrative(trust, "completed")
+
+    assert any("agent's configuration changed" in line for line in lines)
+
+
+def test_bucket_reset_both_changed():
+    trust = _trust(calibration={
+        "n": 0, "n_min": 20, "validated": False, "raw": 0.85, "calibrated": None,
+        "on_uncalibrated": "proceed",
+        "bucket_reset": {
+            "reason": "both_changed", "previous_version_last_seen": None,
+            "previous_validated_n": 30,
+        },
+    })
+    lines = _confidence_narrative(trust, "completed")
+
+    assert any("prompt and the agent's configuration both changed" in line for line in lines)
+
+
+def test_bucket_reset_missing_last_seen_omits_date_gracefully():
+    trust = _trust(calibration={
+        "n": 0, "n_min": 20, "validated": False, "raw": 0.85, "calibrated": None,
+        "on_uncalibrated": "proceed",
+        "bucket_reset": {
+            "reason": "prompt_changed", "previous_version_last_seen": None, "previous_validated_n": 10,
+        },
+    })
+    lines = _confidence_narrative(trust, "completed")
+
+    reset_line = next(line for line in lines if "reset" in line.lower())
+    assert "on None" not in reset_line
+
+
 def test_grounding_enforced_and_capping():
     trust = _trust(grounding={"computed": True, "score": 0.4, "enforce": True}, combined_trust=0.4)
     lines = _confidence_narrative(trust, "escalated")

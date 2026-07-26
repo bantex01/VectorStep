@@ -234,8 +234,9 @@ overconfident. Calibration measures this directly and, if you opt in, uses the m
 
 ### How it's measured
 
-For every distinct `(step, agent, model, provider)` combination, every past marked run
-is sorted into a **bin** based on what confidence it reported — by default, ten bins,
+For every distinct `(step, agent, model, provider, prompt_hash, agent_version)`
+combination, every past marked run is sorted into a **bin** based on what confidence it
+reported — by default, ten bins,
 each covering a 10-point range (0–10%, 10–20%, …, 90–100%). Within each bin, calibration
 computes the **mean label** — the average of what actually happened, not what was
 predicted:
@@ -261,6 +262,43 @@ it needed no new numerical-computing dependency for a single-operator service.
 A bin with 2 samples telling you "0% accurate" is noise, not a fact. Each bin needs
 `n_min` (default 20) marked outcomes before it's considered **validated**. Below that,
 it's advisory-only regardless of what the raw number looks like.
+
+### Editing a prompt or an agent resets the measurement — deliberately
+
+The bucket key above includes two more components than you might expect:
+`prompt_hash` (a content hash of the step's `prompt_template`) and `agent_version` (a
+content hash the Gateway computes over an agent's entire config, including `soul.md`).
+Here's why, and what you'll actually see when it happens.
+
+**The bug this closes.** Before these existed, editing a step's prompt — or editing an
+agent's `soul.md` on the Gateway, which P-Ork had no visibility into at all — silently
+kept counting outcomes from the OLD configuration as evidence for the NEW one. For a
+step with `calibration: {enforce: true}`, that meant the gate was making a real control
+decision using a measured accuracy figure that described a prompt or agent that no
+longer existed. Nothing told you this was happening.
+
+**What you'll see instead.** Edit a prompt template, or edit an agent's `agent.yaml`/
+`soul.md` on the Gateway, and the next run under that changed configuration starts a
+*new* bucket at n=0 — even though the step/agent/model/provider combination is
+identical to before. If that step had `calibration: {enforce: true}` and was passing
+(a validated bucket), it falls back to `on_uncalibrated` behaviour (escalating, by
+default proceeding) until the new bucket earns its own `n_min` marked results. The
+run-detail Trust panel names this explicitly rather than leaving you to guess why a
+step "suddenly" started behaving differently:
+
+> Calibration was reset when this step's prompt changed on 3 Jul. The previous version
+> had 47 marked results; this one has 4 of the 20 needed.
+
+**This is deliberate, and reverting restores it.** A bucket that blends two different
+prompts isn't a bigger sample, it's a wrong one — the reset is the correct behaviour,
+not a side effect to route around. And because the registry is content-addressed (keyed
+by the hash itself), reverting a prompt back to its exact previous text automatically
+rejoins that version's original bucket and every label it earned — nothing is lost by
+trying an edit and changing your mind. Two versions of the same step, side by side with
+their own calibration bins, are visible from the Steps Insights page's **Prompt
+history** disclosure (`GET /steps/{name}/versions`) — and the equivalent for an agent's
+config history is `GET /agents/{name}/versions`, reachable from the `agent <hash>` chip
+on any run that used it.
 
 ### Two postures: advisory (always on) vs enforcing (opt-in)
 
@@ -342,6 +380,8 @@ in the run-detail page's Trust panel, under **"How was this calculated?"**
 | `calibration.on_uncalibrated` | step | `proceed` | What an enforced-but-unvalidated bucket does: `proceed` (no penalty) or `escalate` (treat as untrustworthy until proven). |
 | `calibration.n_min` | service config.yaml | `20` | Marked outcomes a bin needs before it's trusted. |
 | `calibration.bin_width` | service config.yaml | `0.1` | Width of each confidence bucket. |
+| `prompt_hash` | derived, not configured | — | Content hash of the step's `prompt_template`. Part of every calibration bucket's key — editing the prompt starts a new bucket. See §7's "Editing a prompt or an agent resets the measurement". |
+| `agent_version` | derived, not configured (Gateway-owned) | — | Content hash of the Gateway agent's full config incl. `soul.md`. Also part of every bucket's key — editing `agent.yaml`/`soul.md` on the Gateway resets calibration in P-Ork, even though nothing in P-Ork's own YAML changed. |
 
 ---
 
@@ -351,7 +391,14 @@ in the run-detail page's Trust panel, under **"How was this calculated?"**
   is set up to do) and **"How was this calculated?"** (what actually happened, this run,
   in plain language with real numbers) both live in the Trust panel. **Prompt**
   disclosures on the primary, verifier, and grounding sections show exactly what each
-  agent was actually asked.
-- **`/ui/insights/steps`:** calibration bins for every agent/model combination, with the
-  divergence flag — this is where you watch calibration before ever turning on
-  `enforce: true`.
+  agent was actually asked, with `template <hash>` / `agent <hash>` chips linking to
+  that prompt's or agent's own version history.
+- **`/ui/insights/steps`:** calibration bins for every agent/model/prompt-version
+  combination, with the divergence flag — this is where you watch calibration before
+  ever turning on `enforce: true`. The **Prompt history** disclosure per step shows
+  every recorded prompt version with its date range, run count, labelled count, and a
+  diff against the version before it — "did that edit actually help?" made answerable
+  with data.
+- **`/ui/agents/gateway/<name>` → Versions tab:** every `agent_version` P-Ork has a
+  snapshot for, with a diff of `soul.md` against the version before it and the list of
+  steps that version actually affected.

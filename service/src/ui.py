@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from .analytics import _pipeline_rollup, _production_only, _step_rollup, _time_range_cutoff
+from .analytics import get_agent_versions as _get_agent_versions
 from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 from .executors.human import pending_count as _pending_approval_count
@@ -204,6 +205,31 @@ def _qualified_model(provider: str | None, model: str | None) -> str:
     return f"{provider}/{model}"
 
 
+def _bucket_reset_narrative(bucket_reset: dict, n: int, n_min: int) -> str:
+    """Plain-language line for the bucket_reset key on a calibration report
+    (SPEC-prompt-versioning.md §4h/§6c) — the single most valuable line in this
+    whole feature: it converts "this step suddenly started escalating everything
+    and I don't know why" into "this step's calibration reset when you edited its
+    prompt on 3 Jul; it needs 20 marked results at the new version."."""
+    reason_text = {
+        "prompt_changed": "this step's prompt changed",
+        "agent_changed": "the agent's configuration changed",
+        "both_changed": "this step's prompt and the agent's configuration both changed",
+    }.get(bucket_reset["reason"], "this step's configuration changed")
+    when = ""
+    last_seen = bucket_reset.get("previous_version_last_seen")
+    if last_seen:
+        try:
+            when = f" on {datetime.fromisoformat(last_seen).strftime('%b %d')}"
+        except ValueError:
+            when = ""
+    previous_n = bucket_reset["previous_validated_n"]
+    return (
+        f"Calibration was reset when {reason_text}{when}. The previous version had "
+        f"{previous_n} marked results; this one has {n} of the {n_min} needed."
+    )
+
+
 def _confidence_narrative(trust: dict, status: str) -> list[str]:
     """Plain-language, numbers-first walkthrough of how this ONE run's trust score was
     derived — S -> verifier combine -> calibration -> grounding -> deterministic checks
@@ -274,6 +300,9 @@ def _confidence_narrative(trust: dict, status: str) -> list[str]:
                 f"This combination doesn't have enough history yet to calibrate "
                 f"({n}/{n_min} marked results), so the {seed:.0%} score above was used as-is."
             )
+        bucket_reset = calibration.get("bucket_reset")
+        if bucket_reset:
+            lines.append(_bucket_reset_narrative(bucket_reset, n, n_min))
 
     grounding = trust.get("grounding")
     if grounding and grounding.get("computed"):
@@ -386,10 +415,19 @@ def _step_config_summary(trust: dict) -> list[str]:
 
     calibration = trust.get("calibration")
     if calibration:
-        lines.append(
+        line = (
             f"Calibration: enforced (needs {calibration['n_min']} marked results; "
             f"on_uncalibrated: {calibration['on_uncalibrated']})."
         )
+        bucket_reset = calibration.get("bucket_reset")
+        if bucket_reset:
+            reason_label = {
+                "prompt_changed": "prompt changed",
+                "agent_changed": "agent changed",
+                "both_changed": "prompt and agent changed",
+            }.get(bucket_reset["reason"], "configuration changed")
+            line += f" Reset: {reason_label}, previous version had {bucket_reset['previous_validated_n']} marked results."
+        lines.append(line)
 
     return lines
 
@@ -1758,6 +1796,20 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
     })
 
 
+def _largest_bucket_matching(calibration_buckets: dict, step_name, agent, model, provider):
+    """Every calibration bucket matching the first four key components, regardless
+    of prompt_hash/agent_version, ranked by sample size. See SPEC-prompt-versioning.md
+    §4g — the bucket key grew to 6 components, but several call sites (like this one)
+    only have the original 4 to key off of."""
+    matches = [
+        b for (s, a, m, p, _ph, _av), b in calibration_buckets.items()
+        if (s, a, m, p) == (step_name, agent, model, provider)
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda b: b.total_n)
+
+
 @router.get("/insights/steps", response_class=HTMLResponse)
 async def ui_insights_steps(request: Request, time_range: str = "7d"):
     cutoff, range_label = _time_range_cutoff(time_range)
@@ -1872,7 +1924,12 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
         total = c["total"]
         avg_duration_secs = (c["duration_sum_ms"] / c["duration_n"] / 1000) if c["duration_n"] else None
         fb = feedback_by_combo.get((step_name, agent, _qualified_model(provider, model)))
-        bucket = calibration_buckets.get((step_name, agent, model, provider))
+        # step_combo isn't scoped by prompt_hash/agent_version, but calibration_buckets
+        # now is (SPEC-prompt-versioning.md §4g) — one (step, agent, model, provider)
+        # combo can match several buckets (one per prompt/agent version). Show the
+        # largest by sample size rather than silently going blank; §6a's prompt-history
+        # view is where every version gets its own row.
+        bucket = _largest_bucket_matching(calibration_buckets, step_name, agent, model, provider)
         calibration_summary = calibration_recommendation(bucket) if bucket else None
         pipeline_breakdown_by_step[step_name].append({
             "pipeline_name": pipeline_name,
@@ -1890,6 +1947,8 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
                 for b in bucket.bins
             ] if bucket else [],
             "calibration_recommendation": calibration_summary,
+            "prompt_hash": bucket.prompt_hash if bucket else None,
+            "agent_version": bucket.agent_version if bucket else None,
         })
     for rows_ in pipeline_breakdown_by_step.values():
         rows_.sort(key=lambda r: r["total"], reverse=True)
@@ -4037,6 +4096,10 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
         "ago": _format_ago(r.executed_at),
     } for r in recent_rows]
 
+    # Version history is only meaningful for gateway agents — P-Ork has no
+    # equivalent content-hash mechanism for openclaw (SPEC-prompt-versioning.md §6d).
+    agent_versions = await _get_agent_versions(sf, agent_id) if executor == "gateway" else []
+
     return templates.TemplateResponse(request, "agent_detail.html", {
         "agent_id": agent_id,
         "executor": executor,
@@ -4050,6 +4113,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
         "runs_ts": runs_ts,
         "tokens_ts": tokens_ts,
         "recent_activity": recent_activity,
+        "agent_versions": agent_versions,
         "active_page": "agents",
     })
 

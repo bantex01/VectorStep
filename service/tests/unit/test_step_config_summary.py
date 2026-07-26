@@ -87,3 +87,25 @@ def test_calibration_enforced_states_n_min_and_policy():
     }))
 
     assert any("20 marked results" in line and "proceed" in line for line in lines)
+
+
+def test_calibration_bucket_reset_appends_reset_note():
+    lines = _step_config_summary(_trust(calibration={
+        "n": 4, "n_min": 20, "validated": False, "raw": 0.9, "calibrated": None,
+        "on_uncalibrated": "proceed",
+        "bucket_reset": {
+            "reason": "prompt_changed", "previous_version_last_seen": "2026-07-03T16:02:51",
+            "previous_validated_n": 47,
+        },
+    }))
+
+    assert any("Reset:" in line and "prompt changed" in line and "47" in line for line in lines)
+
+
+def test_calibration_no_bucket_reset_omits_reset_note():
+    lines = _step_config_summary(_trust(calibration={
+        "n": 20, "n_min": 20, "validated": True, "raw": 0.9, "calibrated": 0.8,
+        "on_uncalibrated": "proceed",
+    }))
+
+    assert not any("Reset:" in line for line in lines)

@@ -16,10 +16,12 @@ from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
+from .analytics import get_agent_versions as _get_agent_versions
 from .analytics import get_pipeline_stats as _get_pipeline_stats
 from .analytics import get_step_calibration as _get_step_calibration
 from .analytics import get_step_model_breakdown as _get_step_model_breakdown
 from .analytics import get_step_stats as _get_step_stats
+from .analytics import get_step_versions as _get_step_versions
 from .analytics import list_pipeline_stats as _list_pipeline_stats
 from .config_writer import (
     delete_pipeline_yaml,
@@ -468,6 +470,7 @@ async def lifespan(app: FastAPI):
         calibration_n_min=calibration_cfg.get("n_min", 20),
         calibration_bin_width=calibration_cfg.get("bin_width", 0.1),
         calibration_cache_ttl_seconds=calibration_cfg.get("cache_ttl_seconds", 300),
+        gateway_rest_url=pork_gateway_rest,
     )
 
     # Scheduler
@@ -1120,6 +1123,32 @@ async def get_step_calibration_endpoint(
     return {"step_name": name, "buckets": buckets}
 
 
+@app.get("/steps/{name}/versions")
+async def get_step_versions_endpoint(name: str):
+    """Every prompt template version P-Ork has recorded for this step, newest
+    first, with a unified diff against the version before it and that version's
+    own calibration data (SPEC-prompt-versioning.md §5a) — "did that prompt edit
+    actually help?" made answerable with data. 404 if the step name is unknown,
+    matching the sibling endpoints."""
+    if name not in _step_library:
+        raise HTTPException(status_code=404, detail=f"Step '{name}' not found")
+    versions = await _get_step_versions(get_session_factory(), name)
+    return {"step_name": name, "versions": versions}
+
+
+@app.get("/agents/{name}/versions")
+async def get_agent_versions_endpoint(name: str):
+    """Every Gateway agent_version P-Ork has a snapshot for, newest first — the
+    only place recoverable text for an agent_version survives once the Gateway
+    agent moves on (SPEC-prompt-versioning.md §5d). `name` is the bare agent name
+    (no 'gateway:' prefix). 404 if P-Ork has no snapshot rows for this agent at
+    all, matching the sibling endpoint's convention."""
+    versions = await _get_agent_versions(get_session_factory(), name)
+    if not versions:
+        raise HTTPException(status_code=404, detail=f"No version snapshots recorded for agent '{name}'")
+    return {"agent": f"gateway:{name}", "versions": versions}
+
+
 # ---------------------------------------------------------------------------
 # Runs API
 # ---------------------------------------------------------------------------
@@ -1131,6 +1160,8 @@ def _format_step(step: PipelineStep) -> dict:
         "executor": step.executor,
         "agent": step.agent,
         "model": step.model,
+        "prompt_hash": step.prompt_hash,
+        "agent_version": step.agent_version,
         "status": step.status,
         "primary_confidence": step.primary_confidence,
         "verifier_confidence": step.verifier_confidence,
