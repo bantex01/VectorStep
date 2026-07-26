@@ -580,7 +580,9 @@ class PipelineRunner:
             ctx["_pork_registry"] = self._pipeline_registry
 
     @staticmethod
-    def _set_step_span_attributes(span, result: "StepResult") -> None:
+    def _set_step_span_attributes(
+        span, result: "StepResult", prompt_template: str | None = None,
+    ) -> None:
         span.set_attribute("pork.step.status", result.status)
         if result.effective_confidence is not None:
             span.set_attribute("pork.confidence.effective", result.effective_confidence)
@@ -590,8 +592,18 @@ class PipelineRunner:
                 span.set_attribute("pork.model", result.output.model)
             if result.output.provider:
                 span.set_attribute("pork.provider", result.output.provider)
+            if result.output.agent_version:
+                span.set_attribute("pork.agent_version", result.output.agent_version)
         if result.verifier_output:
             span.set_attribute("pork.confidence.verifier", result.verifier_output.confidence)
+        # prompt_template is only passed where a single template unambiguously applies
+        # to this span (a plain step, or a fan-out group — all its branches share one
+        # template). A parallel group's branches each have their own distinct template,
+        # so no single hash would be meaningful there — omitted deliberately, not a gap.
+        if prompt_template is not None:
+            h = prompt_hash(prompt_template)
+            if h is not None:
+                span.set_attribute("pork.prompt_hash", h)
         if result.status == "failed":
             span.set_status(Status(StatusCode.ERROR))
 
@@ -617,7 +629,7 @@ class PipelineRunner:
             result = await self._run_step_impl(
                 step, index, pipeline, normalised, run_id, step_outputs, run_log
             )
-            self._set_step_span_attributes(span, result)
+            self._set_step_span_attributes(span, result, prompt_template=step.prompt_template)
             return result
 
     async def _run_step_impl(
@@ -1156,7 +1168,7 @@ class PipelineRunner:
             result = await self._run_fan_out_impl(
                 fan_out, index, pipeline, normalised, run_id, step_outputs, run_log
             )
-            self._set_step_span_attributes(span, result)
+            self._set_step_span_attributes(span, result, prompt_template=fan_out.prompt_template)
             return result
 
     async def _run_fan_out_impl(
