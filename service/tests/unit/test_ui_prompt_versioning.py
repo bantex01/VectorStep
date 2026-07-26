@@ -16,6 +16,8 @@ from src.db.models import (
     StepPromptVersion,
 )
 from src.main import app
+from src.pipeline.calibration import CalibrationBin, CalibrationBucket
+from src.ui import _largest_bucket_matching, _most_recent_bucket_matching
 
 
 @pytest.fixture
@@ -23,6 +25,55 @@ async def client():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+
+
+def _bucket(prompt_hash, agent_version, total_n, last_seen_at, validated=True):
+    n = total_n
+    return CalibrationBucket(
+        step_name="triage", agent="gateway:a", model="m", provider="p",
+        prompt_hash=prompt_hash, agent_version=agent_version,
+        bins=[CalibrationBin(lo=0.9, hi=1.0, n=n, mean_label=0.9, validated=validated)],
+        total_n=n, last_seen_at=last_seen_at,
+    )
+
+
+class TestVersionColumnPicksCurrentNotBiggest:
+    """Regression coverage for a live bug report: right after a prompt/agent edit,
+    the OLD bucket is almost always still the largest (it's had longer to
+    accumulate) — the main Steps Insights breakdown table's Version column must
+    show the MOST RECENT bucket's hash, not the biggest one, or it keeps pointing
+    at a stale version for a long time. The Calibration bins column is the
+    opposite: it should keep showing the largest/richest bucket so a brand-new,
+    near-empty version doesn't blank out real history."""
+
+    def test_largest_bucket_matching_picks_biggest_by_total_n(self):
+        old = _bucket(None, None, 40, datetime(2026, 6, 1))
+        new = _bucket("new-hash", "new-agent-ver", 1, datetime(2026, 7, 26))
+        buckets = {
+            ("triage", "gateway:a", "m", "p", None, None): old,
+            ("triage", "gateway:a", "m", "p", "new-hash", "new-agent-ver"): new,
+        }
+
+        picked = _largest_bucket_matching(buckets, "triage", "gateway:a", "m", "p")
+
+        assert picked is old
+
+    def test_most_recent_bucket_matching_picks_the_new_run_even_though_its_smaller(self):
+        old = _bucket(None, None, 40, datetime(2026, 6, 1))
+        new = _bucket("new-hash", "new-agent-ver", 1, datetime(2026, 7, 26))
+        buckets = {
+            ("triage", "gateway:a", "m", "p", None, None): old,
+            ("triage", "gateway:a", "m", "p", "new-hash", "new-agent-ver"): new,
+        }
+
+        picked = _most_recent_bucket_matching(buckets, "triage", "gateway:a", "m", "p")
+
+        assert picked is new
+        assert picked.prompt_hash == "new-hash"
+
+    def test_no_matching_buckets_returns_none_for_both(self):
+        assert _largest_bucket_matching({}, "triage", "gateway:a", "m", "p") is None
+        assert _most_recent_bucket_matching({}, "triage", "gateway:a", "m", "p") is None
 
 
 async def test_insights_steps_renders_with_prompt_hash_and_agent_version(db, client):
@@ -50,6 +101,56 @@ async def test_insights_steps_renders_with_prompt_hash_and_agent_version(db, cli
 
     assert resp.status_code == 200
     assert "a3f2c9d81e04" in resp.text  # version chip data is embedded in the drilldown JSON
+
+
+async def test_insights_steps_version_column_shows_current_not_legacy_bucket(db, client):
+    """End-to-end regression test for the live bug report: a large pre-versioning
+    (prompt_hash NULL) bucket plus a small brand-new real-hash bucket — the page's
+    embedded breakdown data must carry the NEW hash, not silently stay on the old
+    NULL bucket just because it has more samples."""
+    sf = get_session_factory()
+    async with sf() as session:
+        session.add(PipelineRun(
+            id="run-legacy", pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}", stage="production",
+            triggered_at=datetime(2026, 1, 1),
+        ))
+        session.add(PipelineRun(
+            id="run-new", pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}", stage="production",
+            triggered_at=datetime(2026, 7, 26),
+        ))
+        legacy_steps = [
+            PipelineStep(
+                id=f"legacy-{i}", run_id="run-legacy", step_name="triage", step_index=0,
+                executor="gateway", agent="gateway:sre-triage", model="claude-sonnet-5",
+                provider="anthropic", prompt="", status="completed",
+                executed_at=datetime(2026, 1, i % 28 + 1), effective_confidence=0.9,
+                prompt_hash=None, agent_version=None,
+            )
+            for i in range(1, 41)
+        ]
+        session.add_all(legacy_steps)
+        new_step = PipelineStep(
+            id="new-1", run_id="run-new", step_name="triage", step_index=0, executor="gateway",
+            agent="gateway:sre-triage", model="claude-sonnet-5", provider="anthropic",
+            prompt="", status="completed", executed_at=datetime(2026, 7, 26),
+            prompt_hash="freshhash1234", agent_version="freshagent5678", effective_confidence=0.9,
+        )
+        session.add(new_step)
+        await session.flush()
+        for step in [*legacy_steps, new_step]:
+            session.add(StepFeedback(
+                step_id=step.id, run_id=step.run_id, pipeline_name="p",
+                step_name="triage", outcome="correct",
+            ))
+        await session.commit()
+
+    resp = await client.get("/ui/insights/steps?time_range=all")
+
+    assert resp.status_code == 200
+    assert "freshhash1234" in resp.text
+    assert "freshagent5678" in resp.text
 
 
 async def test_step_versions_endpoint_reachable_from_insights_steps_page(db, client):

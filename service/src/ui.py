@@ -1796,18 +1796,39 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
     })
 
 
-def _largest_bucket_matching(calibration_buckets: dict, step_name, agent, model, provider):
+def _buckets_matching(calibration_buckets: dict, step_name, agent, model, provider) -> list:
     """Every calibration bucket matching the first four key components, regardless
-    of prompt_hash/agent_version, ranked by sample size. See SPEC-prompt-versioning.md
-    §4g — the bucket key grew to 6 components, but several call sites (like this one)
-    only have the original 4 to key off of."""
-    matches = [
+    of prompt_hash/agent_version. See SPEC-prompt-versioning.md §4g — the bucket key
+    grew to 6 components, but several call sites (like the ones below) only have the
+    original 4 to key off of."""
+    return [
         b for (s, a, m, p, _ph, _av), b in calibration_buckets.items()
         if (s, a, m, p) == (step_name, agent, model, provider)
     ]
+
+
+def _largest_bucket_matching(calibration_buckets: dict, step_name, agent, model, provider):
+    """The matching bucket with the most samples — used for the Calibration bins
+    display, so a brand-new (tiny) version doesn't blank out a rich, informative
+    history the moment a prompt or agent changes."""
+    matches = _buckets_matching(calibration_buckets, step_name, agent, model, provider)
     if not matches:
         return None
     return max(matches, key=lambda b: b.total_n)
+
+
+def _most_recent_bucket_matching(calibration_buckets: dict, step_name, agent, model, provider):
+    """The matching bucket most recently added to — used for the Version chips.
+    Deliberately NOT the same choice as _largest_bucket_matching: right after a
+    prompt/agent edit, the legacy or previous-version bucket is almost always
+    still the *largest* (it's had longer to accumulate), but the Version column's
+    whole job is to say what's CURRENT, and showing the largest bucket's hash
+    there would keep pointing at a stale version for a long time. A bucket with
+    no last_seen_at (shouldn't happen post-migration, but defensive) sorts last."""
+    matches = _buckets_matching(calibration_buckets, step_name, agent, model, provider)
+    if not matches:
+        return None
+    return max(matches, key=lambda b: b.last_seen_at or datetime.min)
 
 
 @router.get("/insights/steps", response_class=HTMLResponse)
@@ -1926,11 +1947,16 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
         fb = feedback_by_combo.get((step_name, agent, _qualified_model(provider, model)))
         # step_combo isn't scoped by prompt_hash/agent_version, but calibration_buckets
         # now is (SPEC-prompt-versioning.md §4g) — one (step, agent, model, provider)
-        # combo can match several buckets (one per prompt/agent version). Show the
-        # largest by sample size rather than silently going blank; §6a's prompt-history
-        # view is where every version gets its own row.
-        bucket = _largest_bucket_matching(calibration_buckets, step_name, agent, model, provider)
-        calibration_summary = calibration_recommendation(bucket) if bucket else None
+        # combo can match several buckets (one per prompt/agent version). The
+        # Calibration column shows the LARGEST bucket (most informative — a brand-new
+        # version's near-empty bins shouldn't blank out a rich history), but the
+        # Version column shows the MOST RECENT bucket's hash (what's actually current
+        # right now) — using the largest bucket for both would keep pointing the
+        # Version chip at a stale prompt for a long time after every edit. §6a's
+        # prompt-history view is where every version gets its own row regardless.
+        bins_bucket = _largest_bucket_matching(calibration_buckets, step_name, agent, model, provider)
+        version_bucket = _most_recent_bucket_matching(calibration_buckets, step_name, agent, model, provider)
+        calibration_summary = calibration_recommendation(bins_bucket) if bins_bucket else None
         pipeline_breakdown_by_step[step_name].append({
             "pipeline_name": pipeline_name,
             "agent": agent,
@@ -1944,11 +1970,11 @@ async def ui_insights_steps(request: Request, time_range: str = "7d"):
             "marked_total": fb["total"] if fb else 0,
             "calibration_bins": [
                 {"lo": b.lo, "hi": b.hi, "n": b.n, "mean_label": b.mean_label, "validated": b.validated}
-                for b in bucket.bins
-            ] if bucket else [],
+                for b in bins_bucket.bins
+            ] if bins_bucket else [],
             "calibration_recommendation": calibration_summary,
-            "prompt_hash": bucket.prompt_hash if bucket else None,
-            "agent_version": bucket.agent_version if bucket else None,
+            "prompt_hash": version_bucket.prompt_hash if version_bucket else None,
+            "agent_version": version_bucket.agent_version if version_bucket else None,
         })
     for rows_ in pipeline_breakdown_by_step.values():
         rows_.sort(key=lambda r: r["total"], reverse=True)
