@@ -1752,20 +1752,22 @@ Grafana Alloy/Tempo).
 
 ```
 pipeline.run: <team>/<pipeline>       (pork.pipeline.name, pork.run.id, pork.source, pork.team, pork.run.status)
-├── <step name>                       (pork.span.kind=step, pork.executor, pork.agent, confidences, pork.model, pork.provider)
+├── <step name>                       (pork.span.kind=step, pork.executor, pork.agent, confidences, pork.model, pork.provider, pork.prompt_hash, pork.agent_version)
 │   ├── gen_ai.<executor>             (pork.span.kind=gen_ai — the LLM call itself)
 │   └── <step>:verifier|:independent   (pork.span.kind=verifier, pork.verifier.mode, pork.confidence)
 │       └── gen_ai.<executor>
-├── <group name>                      (pork.span.kind=parallel_group, pork.join_strategy, pork.branch_count)
+├── <group name>                      (pork.span.kind=parallel_group, pork.join_strategy, pork.branch_count, pork.agent_version)
 │   ├── <branch name>                 (pork.span.kind=branch, pork.executor, pork.agent, pork.confidence, pork.model, pork.provider)
 │   │   └── gen_ai.<executor>
 │   └── ... (concurrent siblings)
-├── <fan_out name>                    (pork.span.kind=fan_out, pork.join_strategy)
+├── <fan_out name>                    (pork.span.kind=fan_out, pork.join_strategy, pork.prompt_hash, pork.agent_version)
 │   ├── <fan_out name>/0              (pork.span.kind=branch, pork.executor, pork.agent, pork.confidence)
 │   │   └── gen_ai.<executor>
 │   └── ... (one branch per runtime list item)
 └── ...
 ```
+
+`pork.prompt_hash`/`pork.agent_version` (SPEC-prompt-versioning.md) are set on the `<step name>` span (from that step's own `prompt_template`) and the `<fan_out name>` group span (all branches of a fan-out share one template, so a single hash is meaningful there) — but deliberately **not** on individual branch spans or the `<group name>` parallel_group span's `prompt_hash`, since each parallel branch has its own distinct template and no single hash would be meaningful at the group level. `pork.agent_version` is set wherever a single agent's output is available, including the parallel group span. Neither is added as a Prometheus metric label — see `SPEC-prompt-versioning.md`'s discussion of why (unbounded cardinality: every prompt/agent edit mints a new, permanently-retained label value).
 
 The root span name is `pipeline.run: <team>/<pipeline-name>` when a team is attributed (e.g. `pipeline.run: payments/alert-triage-critical`), or `pipeline.run: <pipeline-name>` for unattributed runs. This makes the Name column in Grafana Tempo immediately useful without needing to expand attributes. `pork.team` is also set as a span attribute when present, so traces can be filtered/grouped by team in PromQL or Tempo query expressions.
 
@@ -1873,6 +1875,12 @@ GET /steps/{name}/versions
 # → {"step_name": "...", "versions": [{"prompt_hash", "template", "first_seen_at",
 #     "last_seen_at", "runs_total", "labelled_n", "diff_from_previous", "calibration": [...]
 #   }, ...]}  — sorted by first_seen_at desc
+# May include one synthetic entry with "prompt_hash": null — pre-versioning or
+# un-backfilled runs (PipelineStep.prompt_hash IS NULL), which have no hash to
+# register under. Its "template" is also null (no text was ever captured), but
+# "runs_total"/"labelled_n" are real — don't mistake this for the step having no
+# history. "diff_from_previous" is null both for this entry and for whichever
+# real version comes right after it (nothing to diff against).
 
 # Every Gateway agent_version P-Ork has a snapshot for, newest first — the only
 # place recoverable text for an agent_version survives once the Gateway agent
@@ -1883,6 +1891,9 @@ GET /agents/{name}/versions
 #     "note", "first_seen_at", "last_seen_at", "diff_from_previous", "used_by_steps": [...]
 #   }, ...]}  — sorted by first_seen_at desc. `note` (instead of soul_md/agent_yaml
 #   text) means P-Ork couldn't confirm that snapshot, not that the agent had no config.
+# Same synthetic-entry behaviour as /steps/{name}/versions above, for rows where
+# PipelineStep.agent_version IS NULL — "agent_version": null, "soul_md"/"agent_yaml":
+# null, "note" explains why in plain language, "used_by_steps" is still real.
 ```
 
 ### 15d. Pipeline/Step Write, Validate, and Delete Endpoints
