@@ -138,6 +138,58 @@ async def test_get_step_versions_calibration_scoped_to_this_hash(db):
     assert oldest["calibration"] != newest["calibration"]
 
 
+# ---------------------------------------------------------------------------
+# get_step_versions — synthetic legacy (prompt_hash IS NULL) entry
+# ---------------------------------------------------------------------------
+
+async def test_get_step_versions_includes_synthetic_legacy_entry_for_null_hash_rows(db):
+    """Pre-versioning / un-backfilled rows (prompt_hash IS NULL) must not be
+    invisible just because there's no hash to register them under — NULL is a
+    real bucket in get_step_calibration, never a wildcard, and this endpoint's
+    own docstring promises the rest of a step's history is 'in that same
+    response'. Regression lock for the gap a live test found."""
+    sf = get_session_factory()
+    await _seed_step_run(sf, "r1", "triage", None, T0, feedback="correct")
+    await _seed_step_run(sf, "r2", "triage", None, T1, feedback="correct")
+
+    versions = await get_step_versions(sf, "triage")
+
+    assert len(versions) == 1
+    legacy = versions[0]
+    assert legacy["prompt_hash"] is None
+    assert legacy["template"] is None
+    assert legacy["runs_total"] == 2
+    assert legacy["labelled_n"] == 2
+    assert legacy["diff_from_previous"] is None
+
+
+async def test_get_step_versions_legacy_entry_alongside_real_hash_versions(db):
+    sf = get_session_factory()
+    await _seed_step_run(sf, "r1", "triage", None, T0, feedback="correct")
+    await _seed_registry(sf, "hash-new", "triage", "new template", T1, T1)
+    await _seed_step_run(sf, "r2", "triage", "hash-new", T1, feedback="correct")
+
+    versions = await get_step_versions(sf, "triage")
+
+    assert len(versions) == 2
+    newest, oldest = versions
+    assert newest["prompt_hash"] == "hash-new"
+    assert oldest["prompt_hash"] is None
+    # The real version right after the legacy one has nothing to diff against —
+    # an honest gap, not a guess, same principle as AgentVersionSnapshot.note.
+    assert newest["diff_from_previous"] is None
+
+
+async def test_get_step_versions_no_legacy_entry_when_all_rows_have_a_hash(db):
+    sf = get_session_factory()
+    await _seed_registry(sf, "hash-a", "triage", "template a", T0, T0)
+    await _seed_step_run(sf, "r1", "triage", "hash-a", T0, feedback="correct")
+
+    versions = await get_step_versions(sf, "triage")
+
+    assert all(v["prompt_hash"] is not None for v in versions)
+
+
 async def test_endpoint_get_step_versions_200(db, monkeypatch, client):
     sf = get_session_factory()
     await _seed_registry(sf, "hash-a", "triage", "template a", T0, T0)
@@ -240,6 +292,56 @@ async def test_get_agent_versions_used_by_steps(db):
     by_version = {v["agent_version"]: v for v in versions}
     assert by_version["v-old"]["used_by_steps"] == ["investigate"]
     assert by_version["v-new"]["used_by_steps"] == ["summarize"]
+
+
+# ---------------------------------------------------------------------------
+# get_agent_versions — synthetic legacy (agent_version IS NULL) entry
+# ---------------------------------------------------------------------------
+
+async def test_get_agent_versions_includes_synthetic_legacy_entry_for_null_version_rows(db):
+    """Same reasoning as get_step_versions' legacy entry: pre-versioning/
+    un-backfilled runs (agent_version IS NULL) shouldn't vanish just because
+    there's no hash to snapshot against."""
+    sf = get_session_factory()
+    async with sf() as session:
+        session.add(PipelineRun(id="r1", pipeline_name="p", source="test", normalised_context="{}", raw_payload="{}"))
+        session.add(PipelineStep(
+            run_id="r1", step_name="investigate", step_index=0, executor="gateway",
+            agent="gateway:sre-triage", agent_version=None, prompt="p", status="completed",
+            executed_at=T0,
+        ))
+        await session.commit()
+
+    versions = await get_agent_versions(sf, "sre-triage")
+
+    assert len(versions) == 1
+    legacy = versions[0]
+    assert legacy["agent_version"] is None
+    assert legacy["soul_md"] is None
+    assert legacy["note"] is not None
+    assert legacy["used_by_steps"] == ["investigate"]
+    assert legacy["diff_from_previous"] is None
+
+
+async def test_get_agent_versions_legacy_entry_alongside_real_snapshot(db):
+    sf = get_session_factory()
+    await _seed_agent_snapshot(sf, "v-new", "gateway:sre-triage", "new soul", "yaml", None, T1, T1)
+    async with sf() as session:
+        session.add(PipelineRun(id="r1", pipeline_name="p", source="test", normalised_context="{}", raw_payload="{}"))
+        session.add(PipelineStep(
+            run_id="r1", step_name="investigate", step_index=0, executor="gateway",
+            agent="gateway:sre-triage", agent_version=None, prompt="p", status="completed",
+            executed_at=T0,
+        ))
+        await session.commit()
+
+    versions = await get_agent_versions(sf, "sre-triage")
+
+    assert len(versions) == 2
+    newest, oldest = versions
+    assert newest["agent_version"] == "v-new"
+    assert oldest["agent_version"] is None
+    assert newest["diff_from_previous"] is None  # predecessor (legacy) has no soul_md to diff
 
 
 async def test_endpoint_get_agent_versions_200(db, client):

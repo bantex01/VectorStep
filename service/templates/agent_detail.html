@@ -331,7 +331,7 @@
         <svg class="w-3.5 h-3.5 shrink-0 transition-transform text-zinc-500" :class="open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
         </svg>
-        <span class="font-mono text-xs px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 ring-1 ring-inset ring-zinc-700">{{ v.agent_version[:12] }}</span>
+        <span class="font-mono text-xs px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 ring-1 ring-inset ring-zinc-700">{{ v.agent_version[:12] if v.agent_version else 'pre-versioning' }}</span>
         <span class="text-xs text-zinc-500">{{ v.first_seen_at[:10] }} → {{ v.last_seen_at[:10] }}</span>
         {% if v.used_by_steps %}
         <span class="text-xs text-zinc-600">used by {{ v.used_by_steps | length }} step(s)</span>

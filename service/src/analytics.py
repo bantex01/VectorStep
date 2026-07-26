@@ -582,7 +582,17 @@ async def get_step_versions(session_factory: async_sessionmaker, step_name: str)
     branches roll up to their group name — see runner.py's _db_save_branch), so
     this and get_step_calibration always agree on what "this step" means. Returns
     [] for a step with no recorded versions yet (never 404s — that's the route's job).
-    """
+
+    Includes a synthetic `prompt_hash: null` entry for pre-versioning/un-backfilled
+    runs (rows where PipelineStep.prompt_hash IS NULL) whenever any exist for this
+    step — NULL is a real, distinct bucket in get_step_calibration (never a
+    wildcard, per SPEC-prompt-versioning.md §2), and it would be misleading for
+    this endpoint to make that history invisible just because there's no hash to
+    register it under. `template` is null for that entry (no text was ever
+    captured for it) and `diff_from_previous`/the entry immediately after it are
+    both null too — an honest gap, not a guess, same principle as
+    AgentVersionSnapshot's `note` field. Run `backfill_prompt_versions.py` to
+    resolve it into a real, named version instead of leaving it synthetic."""
     async with session_factory() as session:
         registry_rows = (await session.execute(
             select(StepPromptVersion)
@@ -590,17 +600,29 @@ async def get_step_versions(session_factory: async_sessionmaker, step_name: str)
             .order_by(StepPromptVersion.first_seen_at.asc())
         )).scalars().all()
 
-    if not registry_rows:
-        return []
-
-    hashes = [r.prompt_hash for r in registry_rows]
     step_name_filter = or_(
         PipelineStep.step_name == step_name,
         PipelineStep.step_name.like(f"{step_name}/%"),
     )
 
     async with session_factory() as session:
-        run_counts = dict((await session.execute(
+        null_first, null_last, null_count = (await session.execute(
+            select(
+                func.min(PipelineStep.executed_at), func.max(PipelineStep.executed_at), func.count(),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(
+                PipelineRun.stage == "production", step_name_filter,
+                PipelineStep.prompt_hash.is_(None),
+            )
+        )).one()
+
+    if not registry_rows and not null_count:
+        return []
+
+    hashes = [r.prompt_hash for r in registry_rows]
+    async with session_factory() as session:
+        run_counts: dict[str | None, int] = dict((await session.execute(
             select(PipelineStep.prompt_hash, func.count())
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(
@@ -609,12 +631,17 @@ async def get_step_versions(session_factory: async_sessionmaker, step_name: str)
             )
             .group_by(PipelineStep.prompt_hash)
         )).all())
+    if null_count:
+        run_counts[None] = null_count
 
+    hashes_set = set(hashes)
     all_buckets = await compute_calibration_buckets(session_factory)
-    labelled_by_hash: dict[str, int] = defaultdict(int)
-    calibration_by_hash: dict[str, list[dict]] = defaultdict(list)
+    labelled_by_hash: dict[str | None, int] = defaultdict(int)
+    calibration_by_hash: dict[str | None, list[dict]] = defaultdict(list)
     for (bucket_step_name, agent, model, provider, p_hash, a_version), bucket in all_buckets.items():
-        if bucket_step_name != step_name or p_hash not in hashes:
+        if bucket_step_name != step_name:
+            continue
+        if p_hash is not None and p_hash not in hashes_set:
             continue
         labelled_by_hash[p_hash] += bucket.total_n
         calibration_by_hash[p_hash].append({
@@ -627,24 +654,40 @@ async def get_step_versions(session_factory: async_sessionmaker, step_name: str)
             "recommendation": calibration_recommendation(bucket),
         })
 
+    # Unify real (hashed) versions and the synthetic NULL "legacy" version into
+    # one chronologically-sortable list before diffing/formatting.
+    entries: list[dict] = [
+        {
+            "prompt_hash": row.prompt_hash, "template": row.template,
+            "first_seen_at": row.first_seen_at, "last_seen_at": row.last_seen_at,
+        }
+        for row in registry_rows
+    ]
+    if null_count:
+        entries.append({
+            "prompt_hash": None, "template": None,
+            "first_seen_at": null_first, "last_seen_at": null_last,
+        })
+    entries.sort(key=lambda e: e["first_seen_at"])
+
     result = []
     prev_template: str | None = None
     prev_hash: str | None = None
-    for row in registry_rows:  # ascending — oldest first, to diff each against its predecessor
+    for entry in entries:  # ascending — oldest first, to diff each against its predecessor
         diff = None
-        if prev_template is not None:
-            diff = _unified_diff_capped(prev_template, row.template, prev_hash, row.prompt_hash)
+        if prev_template is not None and entry["template"] is not None:
+            diff = _unified_diff_capped(prev_template, entry["template"], prev_hash, entry["prompt_hash"])
         result.append({
-            "prompt_hash": row.prompt_hash,
-            "template": row.template,
-            "first_seen_at": row.first_seen_at.isoformat(),
-            "last_seen_at": row.last_seen_at.isoformat(),
-            "runs_total": run_counts.get(row.prompt_hash, 0),
-            "labelled_n": labelled_by_hash.get(row.prompt_hash, 0),
+            "prompt_hash": entry["prompt_hash"],
+            "template": entry["template"],
+            "first_seen_at": entry["first_seen_at"].isoformat(),
+            "last_seen_at": entry["last_seen_at"].isoformat(),
+            "runs_total": run_counts.get(entry["prompt_hash"], 0),
+            "labelled_n": labelled_by_hash.get(entry["prompt_hash"], 0),
             "diff_from_previous": diff,
-            "calibration": calibration_by_hash.get(row.prompt_hash, []),
+            "calibration": calibration_by_hash.get(entry["prompt_hash"], []),
         })
-        prev_template, prev_hash = row.template, row.prompt_hash
+        prev_template, prev_hash = entry["template"], entry["prompt_hash"]
 
     result.reverse()  # newest first, matching GET /runs
     return result
@@ -661,7 +704,13 @@ async def get_agent_versions(session_factory: async_sessionmaker, agent_name: st
     record_agent_version). `used_by_steps` is the reverse-direction lookup from
     get_step_versions: which steps this agent_version actually affected. Returns []
     for an agent with no snapshot rows at all (never 404s — that's the route's job).
-    """
+
+    Includes a synthetic `agent_version: null` entry for pre-versioning/un-backfilled
+    runs (rows where PipelineStep.agent_version IS NULL for this agent) whenever any
+    exist — same reasoning as get_step_versions' synthetic prompt_hash entry: that
+    history is real and shouldn't disappear just because it predates this feature.
+    `soul_md`/`agent_yaml` are null for that entry (never captured) and
+    `diff_from_previous`/the entry right after it are both null too."""
     agent = f"gateway:{agent_name}"
     async with session_factory() as session:
         registry_rows = (await session.execute(
@@ -670,7 +719,15 @@ async def get_agent_versions(session_factory: async_sessionmaker, agent_name: st
             .order_by(AgentVersionSnapshot.first_seen_at.asc())
         )).scalars().all()
 
-    if not registry_rows:
+    async with session_factory() as session:
+        null_first, null_last, null_count = (await session.execute(
+            select(
+                func.min(PipelineStep.executed_at), func.max(PipelineStep.executed_at), func.count(),
+            )
+            .where(PipelineStep.agent == agent, PipelineStep.agent_version.is_(None))
+        )).one()
+
+    if not registry_rows and not null_count:
         return []
 
     versions = [r.agent_version for r in registry_rows]
@@ -680,28 +737,53 @@ async def get_agent_versions(session_factory: async_sessionmaker, agent_name: st
             .where(PipelineStep.agent == agent, PipelineStep.agent_version.in_(versions))
             .distinct()
         )).all()
-    used_by_steps: dict[str, set[str]] = defaultdict(set)
+    used_by_steps: dict[str | None, set[str]] = defaultdict(set)
     for version, step_name in used_by_rows:
         used_by_steps[version].add(step_name.split("/", 1)[0])  # collapse fan-out/parallel branches
+
+    if null_count:
+        async with session_factory() as session:
+            null_used_by_rows = (await session.execute(
+                select(PipelineStep.step_name)
+                .where(PipelineStep.agent == agent, PipelineStep.agent_version.is_(None))
+                .distinct()
+            )).all()
+        for (step_name,) in null_used_by_rows:
+            used_by_steps[None].add(step_name.split("/", 1)[0])
+
+    entries: list[dict] = [
+        {
+            "agent_version": row.agent_version, "soul_md": row.soul_md, "agent_yaml": row.agent_yaml,
+            "note": row.note, "first_seen_at": row.first_seen_at, "last_seen_at": row.last_seen_at,
+        }
+        for row in registry_rows
+    ]
+    if null_count:
+        entries.append({
+            "agent_version": None, "soul_md": None, "agent_yaml": None,
+            "note": "predates agent versioning, or not yet backfilled",
+            "first_seen_at": null_first, "last_seen_at": null_last,
+        })
+    entries.sort(key=lambda e: e["first_seen_at"])
 
     result = []
     prev_soul: str | None = None
     prev_version: str | None = None
-    for row in registry_rows:  # ascending — oldest first, to diff each against its predecessor
+    for entry in entries:  # ascending — oldest first, to diff each against its predecessor
         diff = None
-        if prev_soul is not None and row.soul_md is not None:
-            diff = _unified_diff_capped(prev_soul, row.soul_md, prev_version, row.agent_version)
+        if prev_soul is not None and entry["soul_md"] is not None:
+            diff = _unified_diff_capped(prev_soul, entry["soul_md"], prev_version, entry["agent_version"])
         result.append({
-            "agent_version": row.agent_version,
-            "soul_md": row.soul_md,
-            "agent_yaml": row.agent_yaml,
-            "note": row.note,
-            "first_seen_at": row.first_seen_at.isoformat(),
-            "last_seen_at": row.last_seen_at.isoformat(),
+            "agent_version": entry["agent_version"],
+            "soul_md": entry["soul_md"],
+            "agent_yaml": entry["agent_yaml"],
+            "note": entry["note"],
+            "first_seen_at": entry["first_seen_at"].isoformat(),
+            "last_seen_at": entry["last_seen_at"].isoformat(),
             "diff_from_previous": diff,
-            "used_by_steps": sorted(used_by_steps.get(row.agent_version, ())),
+            "used_by_steps": sorted(used_by_steps.get(entry["agent_version"], ())),
         })
-        prev_soul, prev_version = row.soul_md, row.agent_version
+        prev_soul, prev_version = entry["soul_md"], entry["agent_version"]
 
     result.reverse()  # newest first
     return result

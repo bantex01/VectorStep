@@ -143,6 +143,31 @@ async def test_agent_detail_renders_with_unreachable_snapshot_note(db, client):
     assert "gateway unreachable at snapshot time" in resp.text
 
 
+async def test_agent_detail_renders_with_legacy_null_agent_version(db, client):
+    """The synthetic legacy entry (agent_version IS NULL, no AgentVersionSnapshot
+    row at all) must render without crashing the Jinja `[:12]` slice — this is
+    exactly the gap a live MCP test caught: get_agent_versions can return an
+    entry whose agent_version is None."""
+    sf = get_session_factory()
+    async with sf() as session:
+        session.add(PipelineRun(
+            id="run-1", pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}", stage="production",
+            triggered_at=datetime(2026, 1, 1),
+        ))
+        session.add(PipelineStep(
+            run_id="run-1", step_name="investigate", step_index=0, executor="gateway",
+            agent="gateway:sre-triage", agent_version=None, prompt="p", status="completed",
+            executed_at=datetime(2026, 1, 1),
+        ))
+        await session.commit()
+
+    resp = await client.get("/ui/agents/gateway/sre-triage")
+
+    assert resp.status_code == 200
+    assert "pre-versioning" in resp.text
+
+
 async def test_agent_detail_renders_with_no_versions_at_all(db, client):
     """An agent with no snapshot rows must not break the page — the Versions tab
     simply doesn't appear."""

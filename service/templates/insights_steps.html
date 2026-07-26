@@ -536,14 +536,16 @@
       body.innerHTML = versions.map((v, i) => `
         <details class="mb-2 border border-zinc-800 rounded-lg" ${i === 0 ? 'open' : ''}>
           <summary class="cursor-pointer px-3 py-2 flex items-center gap-3 text-xs">
-            <span class="font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 ring-1 ring-inset ring-zinc-700">${v.prompt_hash.slice(0, 12)}</span>
+            <span class="font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 ring-1 ring-inset ring-zinc-700">${v.prompt_hash ? v.prompt_hash.slice(0, 12) : 'pre-versioning'}</span>
             <span class="text-zinc-500">${v.first_seen_at.slice(0, 10)} → ${v.last_seen_at.slice(0, 10)}</span>
             <span class="text-zinc-500">${v.runs_total} run(s), ${v.labelled_n} marked</span>
           </summary>
           <div class="px-3 pb-3 space-y-2">
             <div>
               <p class="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Template</p>
-              <pre class="text-xs font-mono overflow-x-auto p-3 rounded bg-zinc-950 border border-zinc-800 text-zinc-300">${escapeHtml(v.template)}</pre>
+              ${v.template !== null
+                ? `<pre class="text-xs font-mono overflow-x-auto p-3 rounded bg-zinc-950 border border-zinc-800 text-zinc-300">${escapeHtml(v.template)}</pre>`
+                : `<p class="text-xs text-zinc-600">(not recoverable — these runs predate prompt versioning, or haven't been backfilled yet)</p>`}
             </div>
             ${v.diff_from_previous !== null ? `<div>
               <p class="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Diff from previous version</p>
