@@ -423,3 +423,7 @@ in the run-detail page's Trust panel, under **"How was this calculated?"**
   this judged?" disclosure with a plain-language narrative and label provenance, and an
   "Observed (service defaults)" fallback for steps with no `readiness:` criteria
   configured yet. See "Promotion readiness (owner-defined criteria)" in `README.md`.
+- **Same card, "Build criteria" disclosure:** a guided, preview-only builder for the
+  `readiness:` knobs above — turn one on, see within ~300ms what it would say about this
+  pipeline's accumulated evidence, and copy a ready-to-paste YAML snippet. Writes nothing;
+  you still commit the snippet yourself. See "Criteria builder (guided UI)" in `README.md`.

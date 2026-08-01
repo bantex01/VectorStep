@@ -866,3 +866,49 @@ READINESS_KNOB_HELP: dict[str, str] = {
         "want version-independent judged accuracy."
     ),
 }
+
+_TIER_MODELS = {
+    "operational": ReadinessOperationalConfig,
+    "confidence": ReadinessConfidenceConfig,
+    "accuracy": ReadinessAccuracyConfig,
+    "calibration": ReadinessCalibrationConfig,
+}
+
+
+def _tier_defaults(model: type) -> dict:
+    """Model-default value for every field, None for a required field with no default —
+    the seed for a tier the owner has never configured."""
+    defaults = {}
+    for name, info in model.model_fields.items():
+        default = info.get_default(call_default_factory=True)
+        defaults[name] = None if info.is_required() else default
+    return defaults
+
+
+def _tier_state(effective: ReadinessConfig | None) -> dict:
+    state = {}
+    for tier, model in _TIER_MODELS.items():
+        value = getattr(effective, tier, None) if effective is not None else None
+        if value is not None:
+            state[tier] = {"enabled": True, **value.model_dump()}
+        else:
+            state[tier] = {"enabled": False, **_tier_defaults(model)}
+    return state
+
+
+def builder_seed(pipeline: PipelineConfig) -> dict:
+    """Initial client-side state for the builder, so opening it on an already-configured
+    pipeline starts from what is LIVE rather than from schema defaults — otherwise the
+    first preview would silently propose weakening the owner's existing bar.
+
+    Returns, for the pipeline-level scope and for each step scope:
+        {scope_key: {tier: {"enabled": bool, **knob_values}}}
+    where scope_key is "__pipeline__" or the step name. Values come from the effective
+    resolved criteria (readiness.resolve_step_readiness), knobs the owner never set are
+    filled with the model defaults, and `enabled` reflects whether the tier is configured.
+    """
+    pipeline_level, _ = resolve_step_readiness(pipeline.readiness, None, False)
+    seed = {"__pipeline__": _tier_state(pipeline_level)}
+    for spec in step_specs(pipeline):
+        seed[spec.name] = _tier_state(spec.readiness)
+    return seed

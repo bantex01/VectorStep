@@ -2021,7 +2021,7 @@ The web UI is served under `/ui` and provides the following pages:
 | Approvals | `/ui/approvals` | Every pending `executor: human` approval (§ "human — Human-in-the-Loop"), regardless of channel — a universal fallback so a team isn't stuck if their primary chat channel (Slack/Telegram) is unreachable. No standalone sidebar entry; reached via a pending-count badge next to **Runs** (only shown when the count is non-zero) |
 | Approval decision | `/ui/approvals/{token}` | Standalone page (no sidebar) reached via a direct token link — used by the Teams approval channel, which posts this link instead of an in-chat button since Teams interactive cards need a public Bot Framework callback endpoint this deployment doesn't expose (see `executors/human.py` `TeamsApprovalChannel`). Approve/Reject decision buttons post back to this same route |
 | Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status, run counts, per-pipeline agent badges (read from config), all-time success rate, avg tokens in/out per run, a **TESTING** badge per pipeline (§3c), and **tag** (`?tag=`) / **agent** (`?agent=`) filters; header stat cards and all per-pipeline rollups are scoped to production |
-| Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, stage badge, **Agents card** (every agent used by the pipeline — including verifier agents in critic or independent mode — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), **Promotion readiness card** (`stage: testing` pipelines only — per-step tier chips, provenance, and an "Observed (service defaults)" fallback for steps with no criteria configured — see "Promotion readiness (owner-defined criteria)"), accuracy feedback summary bar (production only), recent runs (badged, all stages), YAML viewer, and **Run now** button (always runs regardless of stage) |
+| Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, stage badge, **Agents card** (every agent used by the pipeline — including verifier agents in critic or independent mode — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), **Promotion readiness card** (`stage: testing` pipelines only — per-step tier chips, provenance, and an "Observed (service defaults)" fallback for steps with no criteria configured — see "Promotion readiness (owner-defined criteria)") with a **Criteria builder** disclosure (guided, preview-only `readiness:` authoring — see "Criteria builder (guided UI)"), accuracy feedback summary bar (production only), recent runs (badged, all stages), YAML viewer, and **Run now** button (always runs regardless of stage) |
 | Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) — summary cards and the config-fingerprint comparison are production only; the chronological "every marked run" table shows all stages, badged |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, a **tag filter** (`?tag=`), and a per-pipeline/agent/model breakdown table (runs, success rate, avg tokens) for steps with run history |
 | Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg duration, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
@@ -2526,6 +2526,22 @@ defaults)" fallback for steps with no criteria configured. `GET
 /pipelines/{name}/promotion-readiness` (see API reference) exposes the same data as JSON
 for either stage; `POST .../preview` evaluates a *candidate* config against the same
 evidence without writing anything.
+
+#### Criteria builder (guided UI)
+
+Authoring `readiness:` by hand from a README is a lot of surface for knobs this
+counter-intuitive — `n_min` being per band, `acceptable_statuses` being laxer the more you
+add, and the rest. The "Build criteria" button on the Promotion readiness card (or clicking
+any `—` tier chip on a step) opens a builder card below it: turn a knob, see within ~300ms
+what that bar would say about the evidence already accumulated for this pipeline, read the
+same plain-language help text as above, and copy a ready-to-paste YAML snippet.
+
+**It is preview-only and writes nothing.** There is no save button and no write endpoint
+call — the builder is a thin client over `POST .../preview` (the same read-only endpoint
+described above), which validates the candidate config through the real `ReadinessConfig`
+and hands back generated YAML. You paste the snippet into the pipeline's YAML file yourself
+and ship it through the normal `POST /reload` + git review workflow (§3c) — the builder
+never touches the file on disk, and P-Ork's git-controlled-config posture is unchanged.
 
 ### Agent Library
 

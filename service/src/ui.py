@@ -23,6 +23,8 @@ from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 from .executors.human import pending_count as _pending_approval_count
 from .gateway import gateway_call_safe
 from .models.pipeline import FanOutGroupConfig, ParallelGroupConfig, PipelineConfig
+from .readiness import READINESS_KNOB_HELP
+from .readiness import builder_seed as _builder_seed
 from .readiness import evaluate_readiness as _evaluate_readiness
 from .readiness import gather_readiness_evidence as _gather_readiness_evidence
 from .utils import utc_now
@@ -3325,9 +3327,11 @@ async def ui_pipeline_detail(request: Request, name: str):
     feedback_total = sum(feedback_counts.values())
 
     promotion_readiness = None
+    readiness_builder_seed = None
     if pipeline.stage == "testing":
         readiness_evidence = await _gather_readiness_evidence(sf, pipeline)
         promotion_readiness = _evaluate_readiness(readiness_evidence, pipeline)
+        readiness_builder_seed = _builder_seed(pipeline)
 
     # Group this pipeline's agent usage by executor:agent, then enrich with each
     # agent's live-configured model + fallbacks (only known from the backend's
@@ -3378,6 +3382,8 @@ async def ui_pipeline_detail(request: Request, name: str):
         "feedback_total": feedback_total,
         "pipeline_agents": pipeline_agents,
         "promotion_readiness": promotion_readiness,
+        "readiness_builder_seed": readiness_builder_seed,
+        "readiness_knob_help": READINESS_KNOB_HELP,
         "active_page": "pipelines",
     })
 

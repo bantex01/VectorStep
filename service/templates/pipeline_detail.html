@@ -157,8 +157,9 @@
 </div>
 {% endif %}
 
-<!-- Promotion readiness (SPEC-readiness-criteria.md) -->
+<!-- Promotion readiness (SPEC-readiness-criteria.md) + Criteria builder (SPEC-readiness-builder.md) -->
 {% if pipeline.stage == 'testing' and promotion_readiness %}
+<div x-data="readinessBuilder('{{ pipeline.name }}', {{ readiness_builder_seed | tojson }})">
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6">
   <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-2">
     <div class="flex items-center gap-2">
@@ -167,14 +168,20 @@
         {{ promotion_readiness.verdict|replace('_', ' ') }}
       </span>
     </div>
-    <span class="text-xs text-zinc-500">
-      {% if promotion_readiness.criteria_source == 'configured' %}
-        Criteria: {{ promotion_readiness.summary.ready }}/{{ promotion_readiness.summary.total }} ready
-        {% if promotion_readiness.summary.not_ready %}· {{ promotion_readiness.summary.not_ready }} not ready{% endif %}
-      {% else %}
-        No criteria configured — showing observed evidence at service defaults
-      {% endif %}
-    </span>
+    <div class="flex items-center gap-3">
+      <span class="text-xs text-zinc-500">
+        {% if promotion_readiness.criteria_source == 'configured' %}
+          Criteria: {{ promotion_readiness.summary.ready }}/{{ promotion_readiness.summary.total }} ready
+          {% if promotion_readiness.summary.not_ready %}· {{ promotion_readiness.summary.not_ready }} not ready{% endif %}
+        {% else %}
+          No criteria configured — showing observed evidence at service defaults
+        {% endif %}
+      </span>
+      <button type="button" @click="openBuilder()"
+              class="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">
+        Build criteria
+      </button>
+    </div>
   </div>
   <div class="divide-y divide-zinc-800">
     {% for step in promotion_readiness.steps %}
@@ -197,9 +204,17 @@
             </span>
           {% else %}
             {% for tier in ['operational', 'confidence', 'accuracy', 'calibration'] %}
-              <span class="px-1.5 py-0.5 rounded text-[10px] font-medium ring-1 ring-inset {{ readiness_tier_classes(step.tiers[tier].verdict) }}">
-                {{ readiness_tier_label(tier, step.tiers[tier]) }}
-              </span>
+              {% if step.tiers[tier].verdict == 'not_configured' %}
+                <button type="button" @click="openForStep('{{ step.step_name }}', '{{ tier }}')"
+                        title="Configure {{ tier }} for this step"
+                        class="px-1.5 py-0.5 rounded text-[10px] font-medium ring-1 ring-inset {{ readiness_tier_classes(step.tiers[tier].verdict) }} hover:ring-indigo-600 hover:text-indigo-400 transition-colors">
+                  {{ readiness_tier_label(tier, step.tiers[tier]) }}
+                </button>
+              {% else %}
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-medium ring-1 ring-inset {{ readiness_tier_classes(step.tiers[tier].verdict) }}">
+                  {{ readiness_tier_label(tier, step.tiers[tier]) }}
+                </span>
+              {% endif %}
             {% endfor %}
           {% endif %}
           <button @click="explain_open = !explain_open" type="button"
@@ -235,6 +250,271 @@
     <p class="text-[10px] text-zinc-600">Criteria as loaded at last reload. <code class="font-mono">POST /reload</code> to pick up YAML changes.</p>
   </div>
 </div>
+
+<!-- Criteria builder (SPEC-readiness-builder.md) -->
+{% macro knob_label(key, text) -%}
+<div class="flex items-center justify-between gap-2">
+  <label class="text-xs text-zinc-400">{{ text }}</label>
+  <button type="button" @click="help = (help === '{{ key }}' ? null : '{{ key }}')"
+          class="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors shrink-0">(?)</button>
+</div>
+{%- endmacro %}
+{% macro knob_help(key) -%}
+<p x-show="help === '{{ key }}'" x-cloak class="mt-1 text-[11px] text-zinc-400 leading-relaxed bg-zinc-800/60 rounded px-2 py-1.5">{{ readiness_knob_help[key] }}</p>
+{%- endmacro %}
+
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6">
+  <button type="button" @click="open = !open; if (open && !preview) run()"
+          class="w-full flex items-center justify-between gap-2 px-5 py-4 border-b border-zinc-800 flex-wrap">
+    <div class="flex items-center gap-2">
+      <h2 class="text-sm font-semibold text-zinc-200">Criteria builder</h2>
+      <svg class="w-4 h-4 text-zinc-500 transition-transform" :class="open ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+      </svg>
+    </div>
+    <span class="text-[10px] text-amber-500 font-medium">Preview only — nothing is saved. Copy the YAML and ship it through git.</span>
+  </button>
+
+  <div x-show="open" x-cloak class="p-5">
+    <div class="mb-4">
+      <label class="block text-xs font-medium text-zinc-400 mb-1.5">Scope</label>
+      <select x-model="scope" @change="setScope()"
+              class="w-full sm:w-80 bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+        <option value="__pipeline__">Whole pipeline (default for every step)</option>
+        {% for step in promotion_readiness.steps %}
+          <option value="{{ step.step_name }}">{{ step.step_name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="grid lg:grid-cols-2 gap-6">
+      <!-- Knobs -->
+      <div class="space-y-3">
+
+        <!-- Operational -->
+        <div class="border border-zinc-800 rounded-md p-3">
+          <label class="flex items-center gap-2 text-xs font-semibold text-zinc-200 mb-2">
+            <input type="checkbox" x-model="tiers.operational.enabled" @change="schedule()">
+            Operational
+          </label>
+          <div class="space-y-2.5" x-show="tiers.operational.enabled" x-cloak>
+            <div>
+              {{ knob_label('operational.min_runs', 'min_runs') }}
+              <input type="number" min="1" x-model.number="tiers.operational.min_runs" @input="schedule()"
+                     class="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+              {{ knob_help('operational.min_runs') }}
+            </div>
+            <div>
+              {{ knob_label('operational.acceptable_statuses', 'acceptable_statuses') }}
+              <select multiple x-model="tiers.operational.acceptable_statuses" @change="schedule()"
+                      class="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500" size="5">
+                {% for s in ['completed', 'failed', 'aborted', 'escalated', 'stopped'] %}
+                  <option value="{{ s }}">{{ s }}</option>
+                {% endfor %}
+              </select>
+              {{ knob_help('operational.acceptable_statuses') }}
+            </div>
+            <div>
+              {{ knob_label('operational.max_age_days', 'max_age_days (optional)') }}
+              <input type="number" min="1" x-model.number="tiers.operational.max_age_days" @input="schedule()"
+                     class="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+              {{ knob_help('operational.max_age_days') }}
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-xs text-zinc-400">
+                <input type="checkbox" x-model="tiers.operational.require_current_config" @change="schedule()">
+                require_current_config
+                <button type="button" @click="help = (help === 'operational.require_current_config' ? null : 'operational.require_current_config')"
+                        class="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">(?)</button>
+              </label>
+              {{ knob_help('operational.require_current_config') }}
+            </div>
+          </div>
+        </div>
+
+        <!-- Confidence -->
+        <div class="border border-zinc-800 rounded-md p-3">
+          <label class="flex items-center gap-2 text-xs font-semibold text-zinc-200 mb-2">
+            <input type="checkbox" x-model="tiers.confidence.enabled" @change="schedule()">
+            Confidence
+          </label>
+          <div class="space-y-2.5" x-show="tiers.confidence.enabled" x-cloak>
+            <div>
+              {{ knob_label('confidence.min_confidence', 'min_confidence (0–1)') }}
+              <input type="number" min="0" max="1" step="0.01" x-model.number="tiers.confidence.min_confidence" @input="schedule()"
+                     class="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+              {{ knob_help('confidence.min_confidence') }}
+            </div>
+            <div>
+              {{ knob_label('confidence.min_runs', 'min_runs (optional)') }}
+              <input type="number" min="1" x-model.number="tiers.confidence.min_runs" @input="schedule()"
+                     class="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+              {{ knob_help('confidence.min_runs') }}
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-xs text-zinc-400">
+                <input type="checkbox" x-model="tiers.confidence.require_current_config" @change="schedule()">
+                require_current_config
+                <button type="button" @click="help = (help === 'confidence.require_current_config' ? null : 'confidence.require_current_config')"
+                        class="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">(?)</button>
+              </label>
+              {{ knob_help('confidence.require_current_config') }}
+            </div>
+          </div>
+        </div>
+
+        <!-- Accuracy -->
+        <div class="border border-zinc-800 rounded-md p-3">
+          <label class="flex items-center gap-2 text-xs font-semibold text-zinc-200 mb-2">
+            <input type="checkbox" x-model="tiers.accuracy.enabled" @change="schedule()">
+            Accuracy
+          </label>
+          <div class="space-y-2.5" x-show="tiers.accuracy.enabled" x-cloak>
+            <div>
+              {{ knob_label('accuracy.min_accuracy', 'min_accuracy (0–1)') }}
+              <input type="number" min="0" max="1" step="0.01" x-model.number="tiers.accuracy.min_accuracy" @input="schedule()"
+                     class="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+              {{ knob_help('accuracy.min_accuracy') }}
+            </div>
+            <div>
+              {{ knob_label('accuracy.min_marked', 'min_marked') }}
+              <input type="number" min="1" x-model.number="tiers.accuracy.min_marked" @input="schedule()"
+                     class="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+              {{ knob_help('accuracy.min_marked') }}
+            </div>
+            <div>
+              {{ knob_label('accuracy.min_human_marked', 'min_human_marked (optional)') }}
+              <input type="number" min="0" x-model.number="tiers.accuracy.min_human_marked" @input="schedule()"
+                     class="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+              {{ knob_help('accuracy.min_human_marked') }}
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-xs text-zinc-400">
+                <input type="checkbox" x-model="tiers.accuracy.require_current_config" @change="schedule()">
+                require_current_config
+                <button type="button" @click="help = (help === 'accuracy.require_current_config' ? null : 'accuracy.require_current_config')"
+                        class="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">(?)</button>
+              </label>
+              {{ knob_help('accuracy.require_current_config') }}
+            </div>
+          </div>
+        </div>
+
+        <!-- Calibration -->
+        <div class="border border-zinc-800 rounded-md p-3">
+          <label class="flex items-center gap-2 text-xs font-semibold text-zinc-200 mb-2">
+            <input type="checkbox" x-model="tiers.calibration.enabled" @change="schedule()">
+            Calibration
+          </label>
+          <div class="space-y-2.5" x-show="tiers.calibration.enabled" x-cloak>
+            <div>
+              {{ knob_label('calibration.n_min', 'n_min (per confidence bin)') }}
+              <input type="number" min="1" x-model.number="tiers.calibration.n_min" @input="schedule()"
+                     class="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+              {{ knob_help('calibration.n_min') }}
+            </div>
+            <div>
+              {{ knob_label('calibration.bin_width', 'bin_width (must evenly divide 1.0)') }}
+              <input type="number" min="0.01" max="1" step="0.01" x-model.number="tiers.calibration.bin_width" @input="schedule()"
+                     class="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+              {{ knob_help('calibration.bin_width') }}
+            </div>
+            <div>
+              {{ knob_label('calibration.max_divergence', 'max_divergence (0–1)') }}
+              <input type="number" min="0" max="1" step="0.01" x-model.number="tiers.calibration.max_divergence" @input="schedule()"
+                     class="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+              {{ knob_help('calibration.max_divergence') }}
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-xs text-zinc-400">
+                <input type="checkbox" x-model="tiers.calibration.require_own_evidence" @change="schedule()">
+                require_own_evidence
+                <button type="button" @click="help = (help === 'calibration.require_own_evidence' ? null : 'calibration.require_own_evidence')"
+                        class="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">(?)</button>
+              </label>
+              {{ knob_help('calibration.require_own_evidence') }}
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-xs text-zinc-600">
+                <input type="checkbox" checked disabled>
+                require_current_config <span class="text-zinc-600">(always true, locked)</span>
+                <button type="button" @click="help = (help === 'calibration.require_current_config' ? null : 'calibration.require_current_config')"
+                        class="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">(?)</button>
+              </label>
+              {{ knob_help('calibration.require_current_config') }}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live result -->
+      <div class="space-y-3">
+        <div class="flex items-center gap-2 flex-wrap">
+          <svg x-show="loading" class="w-3.5 h-3.5 animate-spin text-zinc-500" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+          </svg>
+          <template x-if="preview">
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset" :class="verdictClasses(preview.verdict)">
+              <span x-text="preview.verdict.replace('_', ' ')"></span>
+            </span>
+          </template>
+          <template x-if="preview">
+            <span class="text-xs text-zinc-500">
+              <span x-text="preview.summary.ready"></span>/<span x-text="preview.summary.total"></span> step(s) would be ready
+            </span>
+          </template>
+        </div>
+
+        <p x-show="error" x-cloak x-text="error" class="text-xs text-red-400 bg-red-950 border border-red-800 rounded-md px-3 py-2"></p>
+
+        <p x-show="preview && preview.evidence_cache_hit" x-cloak class="text-[10px] text-amber-500">
+          Evidence from cache, gathered at <span x-text="preview?.evidence_gathered_at"></span>.
+        </p>
+
+        <template x-if="preview">
+          <div class="divide-y divide-zinc-800 border border-zinc-800 rounded-md">
+            <template x-for="step in preview.steps" :key="step.step_name">
+              <div class="px-3 py-2.5">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-xs font-mono text-zinc-300" x-text="step.step_name"></span>
+                  <template x-for="tier in ['operational', 'confidence', 'accuracy', 'calibration']" :key="tier">
+                    <template x-if="step.tiers[tier] && step.tiers[tier].verdict !== 'not_configured'">
+                      <span class="px-1.5 py-0.5 rounded text-[10px] font-medium ring-1 ring-inset" :class="tierClasses(step.tiers[tier].verdict)">
+                        <span x-text="tier"></span> <span x-text="tierIcon(step.tiers[tier].verdict)"></span>
+                      </span>
+                    </template>
+                  </template>
+                </div>
+                <template x-for="line in step.narrative" :key="line">
+                  <p class="mt-1.5 text-xs text-zinc-400 leading-relaxed" x-text="line"></p>
+                </template>
+                <template x-for="note in step.notes" :key="note">
+                  <p class="mt-1 text-xs text-amber-400 leading-relaxed" x-text="'⚠ ' + note"></p>
+                </template>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <div>
+          <div class="flex items-center justify-between mb-1.5">
+            <label class="text-xs font-medium text-zinc-400">YAML to add to your pipeline</label>
+            <button @click="copy()" class="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">
+              <span x-text="copied ? 'Copied' : 'Copy'"></span>
+            </button>
+          </div>
+          <textarea readonly x-ref="yaml" rows="10" @click="$event.target.select()"
+                    :value="preview ? (preview.yaml_snippet_indented || preview.yaml_snippet || '') : ''"
+                    class="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-xs font-mono text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-y"></textarea>
+          <p class="mt-1 text-[10px] text-zinc-500 font-mono" x-text="preview?.yaml_target_hint || ''"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- end readinessBuilder x-data -->
 {% endif %}
 
 <!-- Accuracy feedback summary -->
@@ -451,6 +731,121 @@ function runPanel(pipelineName) {
       } finally {
         this.running = false;
       }
+    },
+  };
+}
+
+function readinessBuilder(pipelineName, seed) {
+  return {
+    open: false,
+    scope: '__pipeline__',
+    seed: seed,                       // {scope_key: {tier: {enabled, ...knobs}}}
+    tiers: JSON.parse(JSON.stringify(seed['__pipeline__'] || {})),
+    help: null,
+    preview: null,
+    error: '',
+    loading: false,
+    copied: false,
+    timer: null,
+
+    openBuilder() {
+      this.open = !this.open;
+      if (this.open && !this.preview) this.run();
+    },
+
+    openForStep(stepName, tier) {
+      this.open = true;
+      this.scope = stepName;
+      this.setScope();
+      if (tier && this.tiers[tier]) {
+        this.tiers[tier].enabled = true;
+        this.schedule();
+      }
+    },
+
+    setScope() {
+      this.tiers = JSON.parse(JSON.stringify(this.seed[this.scope] || {}));
+      this.schedule();
+    },
+
+    body() {
+      const readiness = {};
+      for (const [tier, v] of Object.entries(this.tiers)) {
+        if (!v.enabled) continue;
+        const { enabled, ...knobs } = v;
+        // Drop empty-string knobs so an untouched optional field is omitted, not sent as ''.
+        readiness[tier] = Object.fromEntries(
+          Object.entries(knobs).filter(([, x]) => x !== '' && x !== null)
+        );
+      }
+      return {
+        readiness,
+        apply_to: this.scope === '__pipeline__' ? null : [this.scope],
+      };
+    },
+
+    schedule() {
+      clearTimeout(this.timer);
+      this.timer = setTimeout(() => this.run(), 300);
+    },
+
+    async run() {
+      this.loading = true;
+      this.error = '';
+      try {
+        const resp = await fetch(
+          `/pipelines/${encodeURIComponent(pipelineName)}/promotion-readiness/preview`,
+          { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(this.body()) });
+        const data = await resp.json();
+        if (!resp.ok) {
+          this.error = data.detail?.[0]?.msg || data.detail?.message || data.detail
+                       || `Error ${resp.status}`;
+          return;
+        }
+        this.preview = data;
+      } catch (e) {
+        this.error = 'Request failed: ' + e.message;
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async copy() {
+      const text = this.preview?.yaml_snippet_indented || this.preview?.yaml_snippet || '';
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (e) {
+        this.$refs.yaml.select();          // insecure-context fallback, see §6d
+        document.execCommand('copy');
+      }
+      this.copied = true;
+      setTimeout(() => { this.copied = false; }, 1500);
+    },
+
+    verdictClasses(verdict) {
+      return {
+        ready:           'bg-green-950 text-green-400 ring-green-800',
+        not_ready:       'bg-red-950 text-red-400 ring-red-800',
+        building:        'bg-amber-950 text-amber-400 ring-amber-800',
+        no_data:         'bg-zinc-800 text-zinc-400 ring-zinc-700',
+        not_configured:  'bg-zinc-800 text-zinc-600 ring-zinc-700',
+      }[verdict] || 'bg-zinc-800 text-zinc-400 ring-zinc-700';
+    },
+
+    tierClasses(verdict) {
+      return {
+        pass:                'bg-green-950 text-green-400 ring-green-800',
+        fail:                'bg-red-950 text-red-400 ring-red-800',
+        insufficient_data:   'bg-amber-950 text-amber-400 ring-amber-800',
+        not_current_config:  'bg-zinc-800 text-zinc-600 ring-zinc-700',
+        not_configured:      'bg-zinc-800 text-zinc-600 ring-zinc-700',
+      }[verdict] || 'bg-zinc-800 text-zinc-600 ring-zinc-700';
+    },
+
+    tierIcon(verdict) {
+      return verdict === 'pass' ? '✓' : verdict === 'fail' ? '✗' : '…';
     },
   };
 }
