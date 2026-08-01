@@ -18,6 +18,7 @@ from sqlalchemy.orm import selectinload
 
 from .analytics import _pipeline_rollup, _production_only, _step_rollup, _time_range_cutoff
 from .analytics import get_agent_versions as _get_agent_versions
+from .analytics import get_pipeline_promotion_readiness as _get_pipeline_promotion_readiness
 from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 from .executors.human import pending_count as _pending_approval_count
@@ -3249,6 +3250,10 @@ async def ui_pipeline_detail(request: Request, name: str):
 
     feedback_total = sum(feedback_counts.values())
 
+    promotion_readiness = None
+    if pipeline.stage == "testing":
+        promotion_readiness = await _get_pipeline_promotion_readiness(sf, pipeline)
+
     # Group this pipeline's agent usage by executor:agent, then enrich with each
     # agent's live-configured model + fallbacks (only known from the backend's
     # own config, unlike everything else here which comes straight from the
@@ -3297,6 +3302,7 @@ async def ui_pipeline_detail(request: Request, name: str):
         "feedback_counts": feedback_counts,
         "feedback_total": feedback_total,
         "pipeline_agents": pipeline_agents,
+        "promotion_readiness": promotion_readiness,
         "active_page": "pipelines",
     })
 

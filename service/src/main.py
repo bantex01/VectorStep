@@ -17,6 +17,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from .analytics import get_agent_versions as _get_agent_versions
+from .analytics import get_pipeline_promotion_readiness as _get_pipeline_promotion_readiness
 from .analytics import get_pipeline_stats as _get_pipeline_stats
 from .analytics import get_step_calibration as _get_step_calibration
 from .analytics import get_step_model_breakdown as _get_step_model_breakdown
@@ -1067,6 +1068,26 @@ async def get_pipeline_stats_endpoint(
         raise HTTPException(status_code=404, detail=f"Pipeline '{name}' not found")
     _validate_stage(stage)
     return await _get_pipeline_stats(get_session_factory(), name, time_range=time_range, stage=stage)
+
+
+@app.get("/pipelines/{name}/promotion-readiness")
+async def get_pipeline_promotion_readiness_endpoint(
+    name: str,
+    bin_width: float = Query(default=0.1),
+    n_min: int = Query(default=20),
+):
+    """Calibration-based promotion-readiness readout for one pipeline
+    (SPEC-calibration-readiness.md) — advisory only, does not gate or block
+    `stage: testing -> production`. Works for a pipeline of either stage (a
+    production pipeline's steps can be checked too), 404 if the pipeline name
+    isn't loaded. `bin_width`/`n_min` mirror /steps/{name}/calibration's query
+    params; they are NOT read from config.yaml's calibration block (§2)."""
+    pipeline = next((p for p in _pipelines if p.name == name), None)
+    if pipeline is None:
+        raise HTTPException(status_code=404, detail=f"Pipeline '{name}' not found")
+    return await _get_pipeline_promotion_readiness(
+        get_session_factory(), pipeline, bin_width=bin_width, n_min=n_min
+    )
 
 
 @app.get("/stats/pipelines")

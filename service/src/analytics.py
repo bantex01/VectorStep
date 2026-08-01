@@ -31,6 +31,7 @@ from .db.models import (
     StepFeedback,
     StepPromptVersion,
 )
+from .models.pipeline import FanOutGroupConfig, ParallelGroupConfig, PipelineConfig
 from .pipeline.calibration import calibration_recommendation, compute_calibration_buckets
 from .utils import utc_now
 
@@ -566,6 +567,131 @@ async def get_step_calibration(
 
     result.sort(key=lambda r: r["total_n"], reverse=True)
     return result
+
+
+def _confidence_thresholds_by_step(pipeline: PipelineConfig) -> dict[str, float]:
+    """step_name -> confidence_threshold, flattening parallel/fan-out groups the same
+    way _agent_usage_in_pipeline (ui.py) does. Branch names get the parent's bucket-
+    collapsed step_name (see compute_calibration_buckets' fan-out handling) — a
+    fan_out named "triage" contributes its threshold under key "triage", matching
+    how PipelineStep.step_name.split('/', 1)[0] collapses "triage/0" back to "triage"."""
+    thresholds: dict[str, float] = {}
+    for step in pipeline.steps:
+        if isinstance(step, ParallelGroupConfig):
+            # Group-level threshold (ParallelGroupInner.confidence_threshold), not a
+            # per-branch one — this is what actually gates the group via `join`, and
+            # it's the only value that makes sense against a bucket that already pools
+            # every branch together. Do NOT loop over step.parallel.steps and take a
+            # branch's own confidence_threshold — branches can carry different values
+            # and silently keeping "whichever iterated last" is wrong, not a simplification.
+            thresholds[step.parallel.name] = step.parallel.confidence_threshold
+        elif isinstance(step, FanOutGroupConfig):
+            thresholds[step.fan_out.name] = step.fan_out.confidence_threshold
+        else:
+            thresholds[step.name] = step.confidence_threshold
+    return thresholds
+
+
+async def get_pipeline_promotion_readiness(
+    session_factory: async_sessionmaker,
+    pipeline: PipelineConfig,
+    bin_width: float = 0.1,
+    n_min: int = 20,
+) -> dict:
+    """Promotion-readiness readout for one pipeline (SPEC-calibration-readiness.md).
+
+    For every (step_name, agent, model, provider, prompt_hash, agent_version) combo
+    this pipeline's OWN `stage: testing` runs have actually exercised, checks two
+    independent calibration views for that exact combo:
+      - its PRODUCTION bucket (real-world evidence — possibly from a different
+        pipeline sharing the same library step under the identical configuration)
+      - its own TESTING bucket (evidence purely from this pipeline's dry runs)
+
+    A combo is "ready" if either view is validated (>= n_min marked outcomes) with no
+    calibration_recommendation() divergence flag. "flagged" if a view is validated but
+    diverges >= 15 points. "building" if there's some marked history but neither view
+    is validated yet. "no_data" if neither view has any marked outcomes for this combo
+    at all. Advisory only — does not read or write pipeline_runs.stage; purely a report
+    over existing data, recomputed fresh on every call, same philosophy as
+    compute_calibration_buckets itself.
+    """
+    async with session_factory() as session:
+        observed_rows = (await session.execute(
+            _scope_stage(
+                select(
+                    PipelineStep.step_name, PipelineStep.agent, PipelineStep.model,
+                    PipelineStep.provider, PipelineStep.prompt_hash, PipelineStep.agent_version,
+                )
+                .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+                .where(
+                    PipelineRun.pipeline_name == pipeline.name,
+                    PipelineStep.effective_confidence.is_not(None),
+                ),
+                "testing",
+            )
+            .distinct()
+        )).all()
+
+    observed_combos = {
+        (step_name.split("/", 1)[0], agent, model, provider, p_hash, a_version)
+        for step_name, agent, model, provider, p_hash, a_version in observed_rows
+    }
+
+    if not observed_combos:
+        return {"pipeline_name": pipeline.name, "combos": [], "summary": {
+            "ready": 0, "flagged": 0, "building": 0, "no_data": 0, "total": 0,
+        }}
+
+    production_buckets, testing_buckets = (
+        await compute_calibration_buckets(session_factory, bin_width, n_min, stage="production"),
+        await compute_calibration_buckets(session_factory, bin_width, n_min, stage="testing"),
+    )
+    thresholds = _confidence_thresholds_by_step(pipeline)
+
+    def _view(bucket) -> dict | None:
+        if bucket is None:
+            return None
+        return {
+            "total_n": bucket.total_n,
+            "validated": any(b.validated for b in bucket.bins),
+            "recommendation": calibration_recommendation(bucket),
+        }
+
+    combos = []
+    counts = {"ready": 0, "flagged": 0, "building": 0, "no_data": 0}
+    # None-safe sort key: fields other than step_name can be None (e.g. non-agent
+    # executor steps), and plain sorted() raises TypeError comparing None to str.
+    for key in sorted(observed_combos, key=lambda k: tuple(x if x is not None else "" for x in k)):
+        step_name, agent, model, provider, p_hash, a_version = key
+        prod = _view(production_buckets.get(key))
+        test = _view(testing_buckets.get(key))
+
+        flagged = (prod is not None and prod["recommendation"]) or (test is not None and test["recommendation"])
+        validated = (prod is not None and prod["validated"]) or (test is not None and test["validated"])
+        any_data = prod is not None or test is not None
+
+        status = (
+            "flagged" if flagged
+            else "ready" if validated
+            else "building" if any_data
+            else "no_data"
+        )
+        counts[status] += 1
+
+        combos.append({
+            "step_name": step_name, "agent": agent, "model": model, "provider": provider,
+            "prompt_hash": p_hash, "agent_version": a_version,
+            "confidence_threshold": thresholds.get(step_name),
+            "status": status,
+            "production": prod,
+            "testing": test,
+        })
+
+    return {
+        "pipeline_name": pipeline.name,
+        "combos": combos,
+        "summary": {**counts, "total": len(combos)},
+    }
 
 
 # ── Prompt / agent versions (SPEC-prompt-versioning.md §5) ──────────────────────

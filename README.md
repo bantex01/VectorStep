@@ -1835,6 +1835,24 @@ GET /pipelines/{name}/stats?time_range=7d&stage=production
 GET /stats/pipelines?time_range=7d&stage=production
 # → {"pipelines": [{...}, ...]}
 
+# Calibration-based promotion-readiness readout for one pipeline (see "Promotion
+# readiness (calibration-based)" below) — advisory only, does not gate or block
+# `stage: testing -> production`. For every (step, agent, model, provider,
+# prompt_hash, agent_version) combo the pipeline's OWN testing-stage runs have
+# exercised, reports whether it's already backed by a validated, non-diverging
+# calibration bucket — either this pipeline's own testing-stage evidence, or a
+# shared library step's existing production evidence. Works for a pipeline of
+# either stage; 404 if the pipeline name is unknown. bin_width/n_min mirror
+# /steps/{name}/calibration's query params — NOT read from config.yaml's
+# `calibration:` block, which only feeds the live runtime gate.
+GET /pipelines/{name}/promotion-readiness?bin_width=0.1&n_min=20
+# → {"pipeline_name": "...", "combos": [{"step_name", "agent", "model", "provider",
+#     "prompt_hash", "agent_version", "confidence_threshold", "status":
+#     "ready"|"flagged"|"building"|"no_data",
+#     "production": {"total_n", "validated", "recommendation"} | null,
+#     "testing": {"total_n", "validated", "recommendation"} | null
+#   }, ...], "summary": {"ready", "flagged", "building", "no_data", "total"}}
+
 # Same stats shape as /pipelines/{name}/stats, aggregated per library step
 # across every pipeline that uses it (avg_input_tokens/avg_output_tokens instead
 # of 'teams'). 404 if the step name is unknown to the library.
@@ -1985,7 +2003,7 @@ The web UI is served under `/ui` and provides the following pages:
 | Approvals | `/ui/approvals` | Every pending `executor: human` approval (§ "human — Human-in-the-Loop"), regardless of channel — a universal fallback so a team isn't stuck if their primary chat channel (Slack/Telegram) is unreachable. No standalone sidebar entry; reached via a pending-count badge next to **Runs** (only shown when the count is non-zero) |
 | Approval decision | `/ui/approvals/{token}` | Standalone page (no sidebar) reached via a direct token link — used by the Teams approval channel, which posts this link instead of an in-chat button since Teams interactive cards need a public Bot Framework callback endpoint this deployment doesn't expose (see `executors/human.py` `TeamsApprovalChannel`). Approve/Reject decision buttons post back to this same route |
 | Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status, run counts, per-pipeline agent badges (read from config), all-time success rate, avg tokens in/out per run, a **TESTING** badge per pipeline (§3c), and **tag** (`?tag=`) / **agent** (`?agent=`) filters; header stat cards and all per-pipeline rollups are scoped to production |
-| Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, stage badge, **Agents card** (every agent used by the pipeline — including verifier agents in critic or independent mode — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), accuracy feedback summary bar (production only), recent runs (badged, all stages), YAML viewer, and **Run now** button (always runs regardless of stage) |
+| Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, stage badge, **Agents card** (every agent used by the pipeline — including verifier agents in critic or independent mode — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), **Promotion readiness card** (`stage: testing` pipelines only, once at least one combo has been observed — see "Promotion readiness (calibration-based)"), accuracy feedback summary bar (production only), recent runs (badged, all stages), YAML viewer, and **Run now** button (always runs regardless of stage) |
 | Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) — summary cards and the config-fingerprint comparison are production only; the chronological "every marked run" table shows all stages, badged |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, a **tag filter** (`?tag=`), and a per-pipeline/agent/model breakdown table (runs, success rate, avg tokens) for steps with run history |
 | Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg duration, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
@@ -2345,6 +2363,47 @@ hold the recoverable text behind those hashes; see that spec and `CONFIDENCE-EXP
 See `samples/pipelines/trust-vector-remediation.yaml` for a complete worked example
 combining `critic`/`independent` verifier modes, enforced grounding, deterministic
 checks, and calibration into a single trust-vector gate on a side-effecting step.
+
+### Promotion readiness (calibration-based)
+
+Calibration above is deliberately production-scoped — that's correct for the live gate
+(`calibration: {enforce: true}`), but it means calibration data can't inform a
+`stage: testing → production` promotion decision as it stands: a testing pipeline has
+run zero production traffic by definition, so every bucket for its steps is empty until
+*after* it's promoted.
+
+Promotion readiness closes that gap as a second, read-only view — it never mixes into
+the production buckets the live gate uses. For every `(step, agent, model, provider,
+prompt_hash, agent_version)` combination a `stage: testing` pipeline's own testing-stage
+runs have actually exercised, it checks two independent calibration views for that exact
+combo:
+- its own **testing** bucket — evidence purely from this pipeline's dry runs, or
+- the combo's **production** bucket — because library steps pool evidence across every
+  pipeline that uses them (see "Bucketing" above), a testing pipeline that reuses an
+  already-productionized library step under the identical configuration inherits that
+  step's real production track record, with zero testing-stage history of its own
+  required.
+
+A combo counts as **ready** if either view is validated (`n_min` marked outcomes) with
+no `calibration_recommendation()` divergence flag, **flagged** if a validated view
+diverges >= 15 points (this outranks an otherwise-clean view for the same combo),
+**building** if there's some marked history but neither view is validated yet, or
+**no_data** if neither view has any marked outcomes for the combo at all.
+
+**Advisory only — no automated gate.** Promoting a pipeline stays exactly the §3c
+workflow: a one-line `stage:` edit in YAML, `POST /reload`, reviewed in git like any
+other config change. This readout doesn't intercept that edit, add a UI toggle, or block
+`/reload`/SIGHUP — it's a report a human can check before deciding to promote, the same
+"tool informs, human governs" posture as calibration's own recommendation strings. A team
+that wants an automated CI block can script one against the JSON endpoint below; building
+that automation isn't part of this feature.
+
+The pipeline detail page (`/ui/pipelines/{name}`) shows a "Promotion readiness" card for
+`stage: testing` pipelines once at least one combo has been observed. `GET
+/pipelines/{name}/promotion-readiness` (see API reference) exposes the same data as JSON
+for either stage. No new DB column or migration, no new Prometheus metric — like Phase 3
+itself, both views are recomputed fresh from `pipeline_steps`/`step_feedback`/
+`run_feedback`/`pipeline_runs` on every request.
 
 ### Agent Library
 

@@ -157,6 +157,48 @@
 </div>
 {% endif %}
 
+<!-- Promotion readiness (SPEC-calibration-readiness.md) -->
+{% if promotion_readiness and promotion_readiness.combos %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6">
+  <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between">
+    <h2 class="text-sm font-semibold text-zinc-200">Promotion readiness</h2>
+    <span class="text-xs text-zinc-500">
+      {{ promotion_readiness.summary.ready }}/{{ promotion_readiness.summary.total }} ready
+      {% if promotion_readiness.summary.flagged %}· {{ promotion_readiness.summary.flagged }} flagged{% endif %}
+    </span>
+  </div>
+  <div class="divide-y divide-zinc-800">
+    {% for c in promotion_readiness.combos %}
+    <div class="px-5 py-3 flex items-center justify-between gap-4 flex-wrap">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-xs font-mono text-zinc-300">{{ c.step_name }}</span>
+        <span class="text-xs text-zinc-500">{{ c.agent }} · {{ c.model }}</span>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap justify-end">
+        {% if c.status == 'ready' %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-950 text-green-400 ring-1 ring-inset ring-green-800">
+            ready — {{ 'production' if c.production and c.production.validated else 'testing' }} evidence, n={{ (c.production.total_n if c.production and c.production.validated else c.testing.total_n) }}
+          </span>
+        {% elif c.status == 'flagged' %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800">
+            flagged — {{ (c.production.recommendation if c.production and c.production.recommendation else c.testing.recommendation) }}
+          </span>
+        {% elif c.status == 'building' %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">
+            building — {{ (c.testing.total_n if c.testing else 0) }} testing-marked so far
+          </span>
+        {% else %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-600 ring-1 ring-inset ring-zinc-700">
+            no data yet
+          </span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <!-- Accuracy feedback summary -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6 px-5 py-4">
   <div class="flex items-center justify-between mb-3">

@@ -54,6 +54,7 @@ async def compute_calibration_buckets(
     session_factory: async_sessionmaker,
     bin_width: float = 0.1,
     n_min: int = 20,
+    stage: str = "production",
 ) -> dict[
     tuple[str, str | None, str | None, str | None, str | None, str | None],
     "CalibrationBucket",
@@ -67,7 +68,17 @@ async def compute_calibration_buckets(
     collapse into their group's bucket, per CONFIDENCE-REDESIGN.md §7 item 8. Label
     precedence per step-execution: StepFeedback (human) > deterministic_passed=False
     (automated) > RunFeedback fallback (via run_id) > excluded (no label at all —
-    not counted as 0, not counted as unlabelled-N)."""
+    not counted as 0, not counted as unlabelled-N).
+
+    `stage` selects which run population this view is computed over — "production"
+    (default, unchanged behaviour) or "testing". The two are never mixed in one call:
+    a testing pipeline's own track record and a step's proven production track record
+    are deliberately kept as two separate views (SPEC-calibration-readiness.md §2) so
+    dry-run testing traffic never pollutes the numbers the live gate
+    (`calibration: {enforce: true}`) actually uses. `CalibrationCache` — the only
+    caller on the live-gate path — always calls this with the default `stage="production"`
+    and must keep doing so; do not thread a configurable stage through the cache."""
+    assert stage in ("production", "testing"), f"stage must be 'production' or 'testing', got {stage!r}"
     n_bins = round(1.0 / bin_width)
     assert abs(n_bins * bin_width - 1.0) < 1e-9, f"bin_width {bin_width} must evenly divide 1.0"
 
@@ -84,7 +95,7 @@ async def compute_calibration_buckets(
             .outerjoin(StepFeedback, StepFeedback.step_id == PipelineStep.id)
             .outerjoin(RunFeedback, RunFeedback.run_id == PipelineStep.run_id)
             .where(
-                PipelineRun.stage == "production",
+                PipelineRun.stage == stage,
                 PipelineStep.effective_confidence.is_not(None),
             )
         )).all()
@@ -172,6 +183,7 @@ class CalibrationCache:
         if now - self._computed_at > self._ttl:
             self._buckets = await compute_calibration_buckets(
                 self._session_factory, bin_width=self._bin_width, n_min=self.n_min,
+                stage="production",
             )
             self._computed_at = now
 
