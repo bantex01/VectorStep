@@ -30,6 +30,78 @@ def _warn_correlated_critic_on_gated_steps(pipeline: PipelineConfig) -> None:
             )
 
 
+def _warn_readiness_misconfiguration(pipeline: PipelineConfig) -> None:
+    """Advisory only, load-time, never blocking — same posture as
+    _warn_correlated_critic_on_gated_steps above (SPEC-readiness-criteria.md §10b).
+
+    Lazily imports readiness.step_specs/resolve_step_readiness rather than importing
+    at module scope: src/pipeline/__init__.py imports this module (loader) first,
+    and src/readiness.py imports from src/pipeline/calibration.py — a module-level
+    import here would run during that partial package initialisation. Called from
+    load_pipelines_from_raw, well after the package has finished importing, a
+    function-local import is unconditionally safe.
+    """
+    from ..readiness import READINESS_TIERS, step_specs
+
+    non_llm_executors = {"webhook", "notify", "human", "pipeline"}
+    seen_names: dict[str, str] = {}   # collapsed bucket name -> first-seen config kind
+
+    for spec in step_specs(pipeline):
+        if spec.name in seen_names and seen_names[spec.name] != spec.kind:
+            logger.warning(
+                "Pipeline '%s' has two step definitions that collapse to the same "
+                "readiness/calibration bucket name '%s' (a %s and a %s) — their "
+                "evidence will silently merge. Rename one of them.",
+                pipeline.name, spec.name, seen_names[spec.name], spec.kind,
+            )
+        seen_names.setdefault(spec.name, spec.kind)
+
+        if spec.readiness is None:
+            continue
+
+        judgment_tiers = [
+            t for t in ("confidence", "accuracy", "calibration")
+            if getattr(spec.readiness, t) is not None
+        ]
+        if judgment_tiers and spec.executor in non_llm_executors:
+            logger.warning(
+                "Pipeline '%s' step '%s' (executor: %s) has readiness tier(s) %s "
+                "configured, but this executor never writes effective_confidence — "
+                "that tier will be permanently insufficient_data. Use "
+                "'readiness: {%s: null}' to drop it, or 'readiness: null' to opt the "
+                "step out entirely.",
+                pipeline.name, spec.name, spec.executor, judgment_tiers, judgment_tiers[0],
+            )
+
+        if spec.executor == "pipeline" and any(getattr(spec.readiness, t) is not None for t in READINESS_TIERS):
+            logger.warning(
+                "Pipeline '%s' step '%s' (executor: pipeline) has readiness criteria "
+                "configured, but a sub-pipeline step never writes confidence/labels of "
+                "its own — its readiness bar can never be satisfied by this step's own "
+                "evidence. The child pipeline's stage governs where ITS rows land; "
+                "consider setting readiness criteria on the child pipeline instead.",
+                pipeline.name, spec.name,
+            )
+
+        cal = spec.readiness.calibration
+        if cal is not None:
+            if cal.bin_width > 0.2:
+                logger.warning(
+                    "Pipeline '%s' step '%s' sets calibration.bin_width: %s — bands "
+                    "wider than 0.2 quantise the predicted score coarsely enough that "
+                    "divergence can look smaller than it is.",
+                    pipeline.name, spec.name, cal.bin_width,
+                )
+            if cal.max_divergence < cal.bin_width / 2:
+                logger.warning(
+                    "Pipeline '%s' step '%s' sets calibration.max_divergence: %s with "
+                    "bin_width: %s — a bin this wide has quantisation error alone that "
+                    "can exceed max_divergence, tripping the flag on a perfectly "
+                    "calibrated step.",
+                    pipeline.name, spec.name, cal.max_divergence, cal.bin_width,
+                )
+
+
 def load_step_library_from_raw(
     raw_by_filename: dict[str, str],
     log_success: bool = True,
@@ -104,7 +176,10 @@ def _resolve_step_references(raw_steps: list, library: dict[str, dict]) -> list:
             inner = step["parallel"]
             if "steps" in inner:
                 inner = {**inner, "steps": _resolve_step_references(inner["steps"], library)}
-            resolved.append({"parallel": inner})
+            # Preserve sibling keys of `parallel:` (e.g. a step-level `readiness:`
+            # block written alongside it) — previously discarded entirely, a latent
+            # trap for the next block anyone adds. See SPEC-readiness-criteria.md §10a.
+            resolved.append({**step, "parallel": inner})
             continue
 
         use = step.get("use")
@@ -166,6 +241,7 @@ def load_pipelines_from_raw(
                 raw["steps"] = _resolve_step_references(raw["steps"], step_library)
             pipeline = PipelineConfig.model_validate(raw)
             _warn_correlated_critic_on_gated_steps(pipeline)
+            _warn_readiness_misconfiguration(pipeline)
             pipelines.append(pipeline)
             if log_success:
                 logger.info("Loaded pipeline config: %s (from %s)", pipeline.name, filename)

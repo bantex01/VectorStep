@@ -18,12 +18,13 @@ from sqlalchemy.orm import selectinload
 
 from .analytics import _pipeline_rollup, _production_only, _step_rollup, _time_range_cutoff
 from .analytics import get_agent_versions as _get_agent_versions
-from .analytics import get_pipeline_promotion_readiness as _get_pipeline_promotion_readiness
 from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 from .executors.human import pending_count as _pending_approval_count
 from .gateway import gateway_call_safe
 from .models.pipeline import FanOutGroupConfig, ParallelGroupConfig, PipelineConfig
+from .readiness import evaluate_readiness as _evaluate_readiness
+from .readiness import gather_readiness_evidence as _gather_readiness_evidence
 from .utils import utc_now
 from . import run_events
 
@@ -51,6 +52,75 @@ def _status_classes(status: str) -> str:
         "stopped":     "bg-purple-950 text-purple-400 ring-purple-800",
         "interrupted": "bg-zinc-700 text-zinc-300 ring-zinc-500",
     }.get(status or "", "bg-zinc-800 text-zinc-400 ring-zinc-600")
+
+
+def _readiness_verdict_classes(verdict: str) -> str:
+    """Badge classes for a pipeline/step readiness verdict (SPEC-readiness-criteria.md §9)."""
+    return {
+        "ready":           "bg-green-950 text-green-400 ring-green-800",
+        "not_ready":       "bg-red-950 text-red-400 ring-red-800",
+        "building":        "bg-amber-950 text-amber-400 ring-amber-800",
+        "no_data":         "bg-zinc-800 text-zinc-400 ring-zinc-700",
+        "not_configured":  "bg-zinc-800 text-zinc-600 ring-zinc-700",
+    }.get(verdict, "bg-zinc-800 text-zinc-400 ring-zinc-700")
+
+
+def _readiness_tier_classes(verdict: str) -> str:
+    """Badge classes for one tier chip within a readiness step row."""
+    return {
+        "pass":               "bg-green-950 text-green-400 ring-green-800",
+        "fail":                "bg-red-950 text-red-400 ring-red-800",
+        "insufficient_data":  "bg-amber-950 text-amber-400 ring-amber-800",
+        "not_current_config": "bg-zinc-800 text-zinc-600 ring-zinc-700",
+        "not_configured":     "bg-zinc-800 text-zinc-600 ring-zinc-700",
+    }.get(verdict, "bg-zinc-800 text-zinc-600 ring-zinc-700")
+
+
+def _readiness_observed_status(observed_combos: list) -> dict:
+    """Roll up a step's observed_combos (service-default calibration snapshot,
+    computed regardless of whether any tier is configured) into a single status —
+    the §11 backward-compat guarantee: a pipeline with no readiness: block must
+    still show observed calibration evidence, not a vanished signal. Mirrors the
+    old get_pipeline_promotion_readiness ready/flagged/building/no_data rollup."""
+    if not observed_combos:
+        return {"status": "no_data", "label": "no observed data yet"}
+    flagged = [c for c in observed_combos if c["observed"]["recommendation"]]
+    if flagged:
+        return {"status": "not_ready", "label": f"flagged — {flagged[0]['observed']['recommendation']}"}
+    validated = [c for c in observed_combos if c["observed"]["validated"]]
+    if validated:
+        best = max(validated, key=lambda c: c["observed"]["total_n"])
+        return {"status": "ready", "label": f"ready — n={best['observed']['total_n']}"}
+    if any(c["observed"]["total_n"] for c in observed_combos):
+        return {"status": "building", "label": "building"}
+    return {"status": "no_data", "label": "no observed data yet"}
+
+
+def _readiness_tier_label(tier_name: str, tier: dict) -> str:
+    """Short chip text for one tier — the calibration label deliberately always
+    says 'N/n_min in top band', never a bare 'N/n_min' (SPEC-readiness-criteria.md
+    §12.5 — the single most misread knob in the system)."""
+    verdict = tier.get("verdict")
+    if verdict == "not_configured":
+        return "—"
+    icon = "✓" if verdict == "pass" else "✗" if verdict == "fail" else "…"
+
+    if tier_name == "operational":
+        return f"runs {tier['runs_acceptable']}/{tier['min_runs']} {icon}"
+    if tier_name == "confidence":
+        pct = f"{tier['mean_confidence']:.0%}" if tier.get("mean_confidence") is not None else "—"
+        return f"conf {pct} {icon}"
+    if tier_name == "accuracy":
+        pct = f"{tier['accuracy']:.0%}" if tier.get("accuracy") is not None else "—"
+        return f"acc {pct} {icon}"
+    if tier_name == "calibration":
+        fullest = 0
+        for c in tier.get("combos", []):
+            for view in (c.get("own"), c.get("production")):
+                if view:
+                    fullest = max(fullest, max((b["n"] for b in view["bins"]), default=0))
+        return f"calib {fullest}/{tier['n_min']} in top band {icon}"
+    return icon
 
 
 _CHART_PALETTE = ["#6366f1", "#22d3ee", "#fbbf24", "#34d399", "#fb7185", "#a78bfa", "#71717a"]
@@ -648,6 +718,10 @@ templates.env.globals.update({
     "pending_approval_count": _pending_approval_count,
     "source_label": _source_label,
     "outcome_classes": lambda o: _OUTCOME_CLASSES.get(o or "", "bg-zinc-800 text-zinc-400 ring-zinc-600"),
+    "readiness_verdict_classes": _readiness_verdict_classes,
+    "readiness_tier_classes": _readiness_tier_classes,
+    "readiness_tier_label": _readiness_tier_label,
+    "readiness_observed_status": _readiness_observed_status,
 })
 
 
@@ -3252,7 +3326,8 @@ async def ui_pipeline_detail(request: Request, name: str):
 
     promotion_readiness = None
     if pipeline.stage == "testing":
-        promotion_readiness = await _get_pipeline_promotion_readiness(sf, pipeline)
+        readiness_evidence = await _gather_readiness_evidence(sf, pipeline)
+        promotion_readiness = _evaluate_readiness(readiness_evidence, pipeline)
 
     # Group this pipeline's agent usage by executor:agent, then enrich with each
     # agent's live-configured model + fallbacks (only known from the backend's

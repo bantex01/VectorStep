@@ -12,11 +12,15 @@ from src.models.llm import LLMOutput
 from src.models.pipeline import CalibrationConfig, GroundingConfig, PipelineConfig, StepConfig, TriggerConfig
 from src.pipeline import calibration as calibration_module
 from src.pipeline.calibration import (
+    LABEL_DETERMINISTIC,
+    LABEL_HUMAN,
+    LABEL_RUN_FALLBACK,
     CalibrationBin,
     CalibrationBucket,
     CalibrationCache,
     calibration_recommendation,
     compute_calibration_buckets,
+    resolve_label,
 )
 from src.pipeline.runner import PipelineRunner
 from src.pipeline.versioning import prompt_hash as prompt_hash_fn
@@ -884,3 +888,84 @@ def test_recommendation_returned_for_divergent_validated_bin():
     assert "70%" in msg
     assert "50%" in msg
     assert "40 marked" in msg
+
+
+# ---------------------------------------------------------------------------
+# calibration_recommendation — max_divergence / n_min overrides
+# (SPEC-readiness-criteria.md §6b, extended for the readiness engine)
+# ---------------------------------------------------------------------------
+
+def test_max_divergence_override_suppresses_a_flag_that_fires_at_default():
+    bucket = _bucket_with_bins([
+        CalibrationBin(lo=0.5, hi=0.9, n=40, mean_label=0.5, validated=True),  # midpoint 0.7, diff 0.2
+    ])
+    assert calibration_recommendation(bucket) is not None
+    assert calibration_recommendation(bucket, max_divergence=0.30) is None
+
+
+def test_n_min_override_validates_a_bin_whose_baked_flag_is_false():
+    bucket = _bucket_with_bins([
+        CalibrationBin(lo=0.5, hi=0.9, n=5, mean_label=0.5, validated=False),  # baked False at some other n_min
+    ])
+    assert calibration_recommendation(bucket) is None            # respects the baked flag
+    msg = calibration_recommendation(bucket, n_min=5)             # override treats n=5 as validated
+    assert msg is not None
+
+
+def test_resolve_label_precedence_table():
+    # Human feedback beats a failed deterministic check beats a run-level fallback.
+    assert resolve_label("correct", False, "incorrect") == (1.0, LABEL_HUMAN)
+    assert resolve_label(None, False, "incorrect") == (0.0, LABEL_DETERMINISTIC)
+    assert resolve_label(None, None, "partial") == (0.5, LABEL_RUN_FALLBACK)
+    assert resolve_label(None, True, None) is None   # a PASSING check produces no label
+    assert resolve_label(None, None, None) is None
+
+
+# ---------------------------------------------------------------------------
+# compute_calibration_buckets(stage=...) / CalibrationCache stage scoping
+# Moved here from test_promotion_readiness.py (SPEC-readiness-criteria.md §14) —
+# calibration tests that had landed in that file by history.
+# ---------------------------------------------------------------------------
+
+async def test_default_stage_excludes_testing_rows(db):
+    sf = await _init()
+    await _seed_run(sf, "run-1", "testing")
+    await _seed_step(sf, "run-1", "s", agent="a", model="m", provider="pr",
+                      effective_confidence=0.9, step_feedback="correct")
+
+    buckets = await compute_calibration_buckets(sf)
+
+    assert buckets == {}
+
+
+async def test_testing_stage_excludes_production_rows_for_same_key(db):
+    sf = await _init()
+    await _seed_run(sf, "run-prod", "production")
+    await _seed_step(sf, "run-prod", "s", agent="a", model="m", provider="pr",
+                      effective_confidence=0.9, step_feedback="correct")
+    await _seed_run(sf, "run-test", "testing")
+    await _seed_step(sf, "run-test", "s", agent="a", model="m", provider="pr",
+                      effective_confidence=0.9, step_feedback="partial", index=0)
+
+    testing_buckets = await compute_calibration_buckets(sf, stage="testing")
+
+    key = ("s", "a", "m", "pr", None, None)
+    assert testing_buckets[key].total_n == 1
+    assert testing_buckets[key].bins[9].mean_label == 0.5  # only the testing (partial) row
+
+
+async def test_calibration_cache_stays_production_only(db):
+    sf = await _init()
+    await _seed_run(sf, "run-prod", "production")
+    await _seed_step(sf, "run-prod", "s", agent="a", model="m", provider="pr",
+                      effective_confidence=0.9, step_feedback="correct")
+    await _seed_run(sf, "run-test", "testing")
+    await _seed_step(sf, "run-test", "s", agent="a", model="m", provider="pr",
+                      effective_confidence=0.9, step_feedback="incorrect")
+
+    cache = CalibrationCache(sf)
+    bucket = await cache.get("s", "a", "m", "pr", None, None)
+
+    assert bucket is not None
+    assert bucket.total_n == 1
+    assert bucket.bins[9].mean_label == 1.0  # only the production (correct) row

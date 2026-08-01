@@ -157,44 +157,82 @@
 </div>
 {% endif %}
 
-<!-- Promotion readiness (SPEC-calibration-readiness.md) -->
-{% if promotion_readiness and promotion_readiness.combos %}
+<!-- Promotion readiness (SPEC-readiness-criteria.md) -->
+{% if pipeline.stage == 'testing' and promotion_readiness %}
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 mb-6">
-  <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between">
-    <h2 class="text-sm font-semibold text-zinc-200">Promotion readiness</h2>
+  <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-2">
+    <div class="flex items-center gap-2">
+      <h2 class="text-sm font-semibold text-zinc-200">Promotion readiness</h2>
+      <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset {{ readiness_verdict_classes(promotion_readiness.verdict) }}">
+        {{ promotion_readiness.verdict|replace('_', ' ') }}
+      </span>
+    </div>
     <span class="text-xs text-zinc-500">
-      {{ promotion_readiness.summary.ready }}/{{ promotion_readiness.summary.total }} ready
-      {% if promotion_readiness.summary.flagged %}· {{ promotion_readiness.summary.flagged }} flagged{% endif %}
+      {% if promotion_readiness.criteria_source == 'configured' %}
+        Criteria: {{ promotion_readiness.summary.ready }}/{{ promotion_readiness.summary.total }} ready
+        {% if promotion_readiness.summary.not_ready %}· {{ promotion_readiness.summary.not_ready }} not ready{% endif %}
+      {% else %}
+        No criteria configured — showing observed evidence at service defaults
+      {% endif %}
     </span>
   </div>
   <div class="divide-y divide-zinc-800">
-    {% for c in promotion_readiness.combos %}
-    <div class="px-5 py-3 flex items-center justify-between gap-4 flex-wrap">
-      <div class="flex items-center gap-2 flex-wrap">
-        <span class="text-xs font-mono text-zinc-300">{{ c.step_name }}</span>
-        <span class="text-xs text-zinc-500">{{ c.agent }} · {{ c.model }}</span>
+    {% for step in promotion_readiness.steps %}
+    <div class="px-5 py-3" x-data="{ explain_open: false }">
+      <div class="flex items-center justify-between gap-4 flex-wrap">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-xs font-mono text-zinc-300">{{ step.step_name }}</span>
+          <span class="text-[10px] text-zinc-600 uppercase tracking-wide">{{ step.kind }}</span>
+          {% if step.when %}
+            <span class="text-[10px] text-amber-600" title="when: {{ step.when }}">conditional</span>
+          {% endif %}
+        </div>
+        <div class="flex items-center gap-2 flex-wrap justify-end">
+          {% if step.criteria.operational is none and step.criteria.confidence is none and step.criteria.accuracy is none and step.criteria.calibration is none %}
+            {% set obs = readiness_observed_status(step.observed_combos) %}
+            <span class="text-xs text-zinc-600">no criteria configured</span>
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-medium ring-1 ring-inset {{ readiness_tier_classes('pass' if obs.status == 'ready' else 'fail' if obs.status == 'not_ready' else 'insufficient_data' if obs.status == 'building' else 'not_configured') }}"
+                  title="Observed at service defaults (bin_width 0.1, n_min 20) — not a bar you chose">
+              observed: {{ obs.label }}
+            </span>
+          {% else %}
+            {% for tier in ['operational', 'confidence', 'accuracy', 'calibration'] %}
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-medium ring-1 ring-inset {{ readiness_tier_classes(step.tiers[tier].verdict) }}">
+                {{ readiness_tier_label(tier, step.tiers[tier]) }}
+              </span>
+            {% endfor %}
+          {% endif %}
+          <button @click="explain_open = !explain_open" type="button"
+                  class="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">
+            How is this judged?
+          </button>
+        </div>
       </div>
-      <div class="flex items-center gap-2 flex-wrap justify-end">
-        {% if c.status == 'ready' %}
-          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-950 text-green-400 ring-1 ring-inset ring-green-800">
-            ready — {{ 'production' if c.production and c.production.validated else 'testing' }} evidence, n={{ (c.production.total_n if c.production and c.production.validated else c.testing.total_n) }}
-          </span>
-        {% elif c.status == 'flagged' %}
-          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800">
-            flagged — {{ (c.production.recommendation if c.production and c.production.recommendation else c.testing.recommendation) }}
-          </span>
-        {% elif c.status == 'building' %}
-          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">
-            building — {{ (c.testing.total_n if c.testing else 0) }} testing-marked so far
-          </span>
-        {% else %}
-          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-600 ring-1 ring-inset ring-zinc-700">
-            no data yet
-          </span>
+      <div x-show="explain_open" x-cloak class="mt-3 rounded-md bg-zinc-800/50 border border-zinc-700/50 px-3 py-2.5 space-y-1.5">
+        {% for line in step.narrative %}
+          <p class="text-xs text-zinc-300 leading-relaxed">{{ loop.index }}. {{ line }}</p>
+        {% endfor %}
+        {% for note in step.notes %}
+          <p class="text-xs text-amber-400 leading-relaxed">⚠ {{ note }}</p>
+        {% endfor %}
+        {% if step.observed_combos %}
+        <div class="pt-1.5 mt-1.5 border-t border-zinc-700/50">
+          <p class="text-[10px] text-zinc-500 uppercase tracking-wide mb-1">Observed (service defaults — not a bar you chose)</p>
+          {% for c in step.observed_combos %}
+          <p class="text-xs text-zinc-400 leading-relaxed">
+            {{ c.agent }} · {{ c.model }} — {{ c.rows }} row(s), {{ c.runs }} run(s)
+            {%- if c.observed.total_n %}, {{ c.observed.total_n }} marked{% if c.observed.validated %} (validated){% endif %}{% endif -%}
+            {%- if c.observed.recommendation %} — {{ c.observed.recommendation }}{% endif %}
+          </p>
+          {% endfor %}
+        </div>
         {% endif %}
       </div>
     </div>
     {% endfor %}
+  </div>
+  <div class="px-5 py-2.5 border-t border-zinc-800">
+    <p class="text-[10px] text-zinc-600">Criteria as loaded at last reload. <code class="font-mono">POST /reload</code> to pick up YAML changes.</p>
   </div>
 </div>
 {% endif %}

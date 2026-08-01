@@ -85,6 +85,100 @@ class CalibrationConfig(BaseModel):
     #             policy from CONFIDENCE-REDESIGN.md §4.5. Not the default.
 
 
+ReadinessStepStatus = Literal["completed", "failed", "aborted", "escalated", "stopped"]
+# Deliberately duplicated from analytics.ALL_STEP_STATUSES rather than imported:
+# analytics.py imports models.pipeline, so the reverse import would be circular.
+# If a new step status is ever added, update both.
+
+
+class ReadinessOperationalConfig(BaseModel):
+    """Cheapest bar there is: pure PipelineStep.status counting. No judgment, no
+    confidence, no labels — and the only tier a non-LLM step (notify/webhook/human)
+    can ever satisfy, since those never write effective_confidence."""
+    min_runs: int = Field(gt=0)   # required — `operational: {}` is a config error
+    acceptable_statuses: list[ReadinessStepStatus] = Field(
+        default_factory=lambda: ["completed"]
+    )
+    max_age_days: int | None = Field(default=None, gt=0)
+    # Only tier with a time window. None = lifetime track record (the default).
+    require_current_config: bool = False
+    # False by default: fixing a typo in a prompt shouldn't wipe 30 clean runs.
+
+
+class ReadinessConfidenceConfig(BaseModel):
+    """Mean self-reported effective_confidence. A weak signal alone — the model can be
+    confidently wrong — but a useful first checkpoint before anyone has marked anything."""
+    min_confidence: float = Field(ge=0.0, le=1.0)   # required
+    min_runs: int | None = Field(default=None, gt=0)
+    # Strongly recommended. Without it, `min_confidence: 0.9` passes on a single 0.95 run.
+    require_current_config: bool = False
+
+
+class ReadinessAccuracyConfig(BaseModel):
+    """Judged accuracy over marked outcomes: correct=1.0, partial=0.5, incorrect=0.0,
+    using the SAME label-precedence chain calibration uses (see calibration.resolve_label).
+    Proves the step's work is good, without additionally demanding that its confidence
+    NUMBER be trustworthy — that stricter claim is the calibration tier."""
+    min_accuracy: float = Field(ge=0.0, le=1.0)   # required
+    min_marked: int = Field(gt=0)                  # required
+    min_human_marked: int | None = Field(default=None, ge=0)
+    # Require N labels from a human specifically. Guards the trap in §12.2: only
+    # deterministic-check FAILURES produce a free label, so a step with checks and no
+    # human feedback has a labelled population that is 100% failures.
+    require_current_config: bool = True
+
+
+class ReadinessCalibrationConfig(BaseModel):
+    """The strongest bar: not just 'outcomes are good' but 'the confidence number can be
+    trusted'. Uses the existing Phase 3 bucket machinery, with every previously-hardcoded
+    constant now owner-settable."""
+    n_min: int = Field(default=20, gt=0)
+    # PER BIN, not total. See §12.5 — this is the single most misread knob here.
+    bin_width: float = Field(default=0.1, gt=0.0, le=1.0)
+    max_divergence: float = Field(default=0.15, ge=0.0, le=1.0)
+    # Replaces the hardcoded 0.15 in calibration_recommendation().
+    require_own_evidence: bool = False
+    # False: a shared library step's PRODUCTION evidence from a different pipeline counts.
+    # True: only this pipeline's own evidence counts.
+    require_current_config: bool = True
+    # Must stay True — see the validator below.
+
+    @field_validator("bin_width")
+    @classmethod
+    def _bin_width_divides_one(cls, v: float) -> float:
+        n = round(1.0 / v)
+        if abs(n * v - 1.0) >= 1e-9:
+            raise ValueError(f"bin_width {v} must evenly divide 1.0")
+        return v
+
+    @field_validator("require_current_config")
+    @classmethod
+    def _must_require_current_config(cls, v: bool) -> bool:
+        if v is False:
+            raise ValueError(
+                "calibration.require_current_config cannot be false — a calibration "
+                "bucket is keyed by (prompt_hash, agent_version) by definition, so "
+                "'ignore the version' would mean merging buckets and destroying the "
+                "reset semantics SPEC-prompt-versioning.md exists to protect. Use the "
+                "accuracy tier if you want version-independent judged accuracy."
+            )
+        return v
+
+
+class ReadinessConfig(BaseModel):
+    """Owner-defined promotion bar (SPEC-readiness-criteria.md). Every CONFIGURED tier
+    must pass for the step to be 'ready'; an unconfigured tier is not a failure, it is
+    simply not asked. Strictly advisory — nothing here gates, blocks, or writes.
+
+    Settable at pipeline level (house default for every step) and at step level
+    (override). Tiers merge, tier contents replace — see readiness.resolve_step_readiness.
+    """
+    operational: ReadinessOperationalConfig | None = None
+    confidence: ReadinessConfidenceConfig | None = None
+    accuracy: ReadinessAccuracyConfig | None = None
+    calibration: ReadinessCalibrationConfig | None = None
+
+
 class ShellCheckConfig(BaseModel):
     """Run a shell command; evaluate its output. `run` is executed via the shell (so
     pipes/redirects work, e.g. `curl ... | jq ...`), inheriting the P-Ork process's
@@ -190,6 +284,7 @@ class StepConfig(BaseModel):
     grounding: GroundingConfig | None = None
     deterministic_checks: list[DeterministicCheckConfig] = Field(default_factory=list)
     calibration: CalibrationConfig | None = None
+    readiness: ReadinessConfig | None = None
 
     @field_validator("on_failure", mode="before")
     @classmethod
@@ -207,6 +302,7 @@ class ParallelGroupInner(BaseModel):
     on_abort: str = "notify"
     timeout_seconds: int | None = None
     when: str | None = None
+    readiness: ReadinessConfig | None = None
     steps: list[ParallelStepConfig]
 
 
@@ -231,6 +327,7 @@ class FanOutConfig(BaseModel):
     on_empty: Literal["complete", "skip", "abort"] = "complete"
     when: str | None = None
     verifier: VerifierConfig | None = None
+    readiness: ReadinessConfig | None = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -296,6 +393,7 @@ class LibraryStepConfig(BaseModel):
     grounding: GroundingConfig | None = None
     deterministic_checks: list[DeterministicCheckConfig] = Field(default_factory=list)
     calibration: CalibrationConfig | None = None
+    readiness: ReadinessConfig | None = None
 
     @field_validator("on_failure", mode="before")
     @classmethod
@@ -318,6 +416,7 @@ class PipelineConfig(BaseModel):
     notifications: dict[str, list[NotificationConfig]] = Field(default_factory=dict)
     schedule: ScheduleConfig | None = None
     budget: BudgetConfig | None = None
+    readiness: ReadinessConfig | None = None
 
     @field_validator("notifications", mode="before")
     @classmethod

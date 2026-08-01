@@ -1835,23 +1835,41 @@ GET /pipelines/{name}/stats?time_range=7d&stage=production
 GET /stats/pipelines?time_range=7d&stage=production
 # → {"pipelines": [{...}, ...]}
 
-# Calibration-based promotion-readiness readout for one pipeline (see "Promotion
-# readiness (calibration-based)" below) — advisory only, does not gate or block
-# `stage: testing -> production`. For every (step, agent, model, provider,
-# prompt_hash, agent_version) combo the pipeline's OWN testing-stage runs have
-# exercised, reports whether it's already backed by a validated, non-diverging
-# calibration bucket — either this pipeline's own testing-stage evidence, or a
-# shared library step's existing production evidence. Works for a pipeline of
-# either stage; 404 if the pipeline name is unknown. bin_width/n_min mirror
-# /steps/{name}/calibration's query params — NOT read from config.yaml's
-# `calibration:` block, which only feeds the live runtime gate.
+# Owner-defined promotion-readiness readout for one pipeline (see "Promotion
+# readiness (owner-defined criteria)" below) — advisory only, does not gate or
+# block `stage: testing -> production`. Evaluates every step against its
+# effective `readiness:` config (four independent tiers: operational,
+# confidence, accuracy, calibration) against evidence from the pipeline's OWN
+# current stage. Works for a pipeline of either stage; 404 if the pipeline
+# name is unknown. bin_width/n_min are the INFORMATIONAL defaults used only
+# for the observed-calibration snapshot on steps with no calibration tier
+# configured — a configured step's own values always win, and neither is read
+# from config.yaml's `calibration:` block (which only feeds the live runtime gate).
 GET /pipelines/{name}/promotion-readiness?bin_width=0.1&n_min=20
-# → {"pipeline_name": "...", "combos": [{"step_name", "agent", "model", "provider",
-#     "prompt_hash", "agent_version", "confidence_threshold", "status":
-#     "ready"|"flagged"|"building"|"no_data",
-#     "production": {"total_n", "validated", "recommendation"} | null,
-#     "testing": {"total_n", "validated", "recommendation"} | null
-#   }, ...], "summary": {"ready", "flagged", "building", "no_data", "total"}}
+# → {"pipeline_name", "pipeline_stage", "evidence_stage", "criteria_source":
+#     "configured"|"none", "verdict": "ready"|"not_ready"|"building"|"no_data"|
+#     "not_configured", "gathered_at",
+#     "summary": {"ready","not_ready","building","no_data","not_configured","total"},
+#     "steps": [{"step_name", "kind", "executor", "when", "verdict",
+#       "confidence_threshold", "criteria": {tier: {...knobs, "source"} | null, ...},
+#       "current_config": {"prompt_hash", "agent_version", "agent_version_source",
+#         "prompt_hash_source", "prompt_hash_matches_history"},
+#       "evidence": {"runs_total", "rows_total", "marked_total", "first_seen_at", "last_seen_at"},
+#       "tiers": {"operational", "confidence", "accuracy", "calibration": {"verdict", ...}},
+#       "observed_combos": [...], "narrative": ["...", ...], "notes": ["...", ...]
+#     }, ...]}
+
+# Preview a CANDIDATE readiness: block against the same evidence, WITHOUT
+# writing anything — the same response shape as the GET, plus applied_to,
+# scope ("pipeline"|"step"), yaml_snippet/yaml_snippet_indented (server-
+# generated, validated through the real ReadinessConfig — this endpoint
+# cannot be used to produce YAML the loader would reject), yaml_target_hint,
+# evidence_gathered_at, evidence_cache_hit (a 30s in-process cache, used only
+# by this endpoint — the GET above always re-gathers fresh). 422 with
+# Pydantic's own detail on an invalid readiness: body; 400 if apply_to names
+# a step that doesn't exist.
+POST /pipelines/{name}/promotion-readiness/preview
+# body: {"readiness": {"operational": {"min_runs": 20}, ...}, "apply_to": ["step-name"] | null}
 
 # Same stats shape as /pipelines/{name}/stats, aggregated per library step
 # across every pipeline that uses it (avg_input_tokens/avg_output_tokens instead
@@ -2003,7 +2021,7 @@ The web UI is served under `/ui` and provides the following pages:
 | Approvals | `/ui/approvals` | Every pending `executor: human` approval (§ "human — Human-in-the-Loop"), regardless of channel — a universal fallback so a team isn't stuck if their primary chat channel (Slack/Telegram) is unreachable. No standalone sidebar entry; reached via a pending-count badge next to **Runs** (only shown when the count is non-zero) |
 | Approval decision | `/ui/approvals/{token}` | Standalone page (no sidebar) reached via a direct token link — used by the Teams approval channel, which posts this link instead of an in-chat button since Teams interactive cards need a public Bot Framework callback endpoint this deployment doesn't expose (see `executors/human.py` `TeamsApprovalChannel`). Approve/Reject decision buttons post back to this same route |
 | Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status, run counts, per-pipeline agent badges (read from config), all-time success rate, avg tokens in/out per run, a **TESTING** badge per pipeline (§3c), and **tag** (`?tag=`) / **agent** (`?agent=`) filters; header stat cards and all per-pipeline rollups are scoped to production |
-| Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, stage badge, **Agents card** (every agent used by the pipeline — including verifier agents in critic or independent mode — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), **Promotion readiness card** (`stage: testing` pipelines only, once at least one combo has been observed — see "Promotion readiness (calibration-based)"), accuracy feedback summary bar (production only), recent runs (badged, all stages), YAML viewer, and **Run now** button (always runs regardless of stage) |
+| Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, stage badge, **Agents card** (every agent used by the pipeline — including verifier agents in critic or independent mode — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), **Promotion readiness card** (`stage: testing` pipelines only — per-step tier chips, provenance, and an "Observed (service defaults)" fallback for steps with no criteria configured — see "Promotion readiness (owner-defined criteria)"), accuracy feedback summary bar (production only), recent runs (badged, all stages), YAML viewer, and **Run now** button (always runs regardless of stage) |
 | Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) — summary cards and the config-fingerprint comparison are production only; the chronological "every marked run" table shows all stages, badged |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, a **tag filter** (`?tag=`), and a per-pipeline/agent/model breakdown table (runs, success rate, avg tokens) for steps with run history |
 | Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg duration, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
@@ -2364,46 +2382,150 @@ See `samples/pipelines/trust-vector-remediation.yaml` for a complete worked exam
 combining `critic`/`independent` verifier modes, enforced grounding, deterministic
 checks, and calibration into a single trust-vector gate on a side-effecting step.
 
-### Promotion readiness (calibration-based)
+### Promotion readiness (owner-defined criteria)
 
-Calibration above is deliberately production-scoped — that's correct for the live gate
-(`calibration: {enforce: true}`), but it means calibration data can't inform a
-`stage: testing → production` promotion decision as it stands: a testing pipeline has
-run zero production traffic by definition, so every bucket for its steps is empty until
-*after* it's promoted.
+The calibration loop above is deliberately production-scoped — correct for the live gate
+(`calibration: {enforce: true}`), but calibration is also the strictest, slowest-to-earn
+signal there is, and it was previously the *only* readiness criterion that existed,
+hardcoded (`n_min: 20`, `bin_width: 0.1`, a 15-point divergence flag). A pipeline owner
+who just wants "twenty clean runs" had no way to say so; one who wanted a stricter
+divergence threshold had no way to say that either.
 
-Promotion readiness closes that gap as a second, read-only view — it never mixes into
-the production buckets the live gate uses. For every `(step, agent, model, provider,
-prompt_hash, agent_version)` combination a `stage: testing` pipeline's own testing-stage
-runs have actually exercised, it checks two independent calibration views for that exact
-combo:
-- its own **testing** bucket — evidence purely from this pipeline's dry runs, or
-- the combo's **production** bucket — because library steps pool evidence across every
-  pipeline that uses them (see "Bucketing" above), a testing pipeline that reuses an
-  already-productionized library step under the identical configuration inherits that
-  step's real production track record, with zero testing-stage history of its own
-  required.
+`readiness:` lets the owner define the bar instead, on a ladder from *nothing* (today's
+default: promote freely, no criteria, no gate) through progressively stronger evidence up
+to full calibration. It is settable at the pipeline level (a house default for every
+step) and per step (add to or override the house default) — a step pulled from the shared
+step library is *owned by the pipeline that uses it*, so its bar is settable at the point
+of use.
 
-A combo counts as **ready** if either view is validated (`n_min` marked outcomes) with
-no `calibration_recommendation()` divergence flag, **flagged** if a validated view
-diverges >= 15 points (this outranks an otherwise-clean view for the same combo),
-**building** if there's some marked history but neither view is validated yet, or
-**no_data** if neither view has any marked outcomes for the combo at all.
+**Four independent, additive tiers.** Every *configured* tier must pass for a step to be
+"ready"; an unconfigured tier is not a failure, it is simply not asked — an owner can
+require `operational` + `accuracy` without touching `calibration`, because they answer
+genuinely different questions:
 
-**Advisory only — no automated gate.** Promoting a pipeline stays exactly the §3c
-workflow: a one-line `stage:` edit in YAML, `POST /reload`, reviewed in git like any
+| Tier | Answers | Cheapest signal? |
+|---|---|---|
+| `operational` | Did it run cleanly? | Yes — pure `PipelineStep.status` counting. The only tier a non-LLM step (`webhook`/`notify`/`human`/`pipeline` executor) can ever satisfy, since those never write `effective_confidence`. Can only ever report `pass` or `insufficient_data` — never `fail`. |
+| `confidence` | Does it claim confidence? | Mean self-reported `effective_confidence`. Weak alone — the model can be confidently wrong. |
+| `accuracy` | Are its outputs actually good? | Judged accuracy (correct=1.0, partial=0.5, incorrect=0.0) over human/deterministic/run-level labels. |
+| `calibration` | Is its confidence number trustworthy? | The strongest bar — reuses the Phase 3 bucket machinery above, with every previously-hardcoded constant now owner-settable. |
+
+**Strictly advisory — no automated gate, ever.** Promoting a pipeline stays exactly the
+§3c workflow: a one-line `stage:` edit in YAML, `POST /reload`, reviewed in git like any
 other config change. This readout doesn't intercept that edit, add a UI toggle, or block
-`/reload`/SIGHUP — it's a report a human can check before deciding to promote, the same
-"tool informs, human governs" posture as calibration's own recommendation strings. A team
-that wants an automated CI block can script one against the JSON endpoint below; building
-that automation isn't part of this feature.
+`/reload`/SIGHUP. A team that wants an automated CI block can script one against the JSON
+endpoint below; building that automation isn't part of this feature.
+
+**Evidence follows the pipeline's own stage.** A `stage: testing` pipeline is measured
+against its testing runs; a `stage: production` pipeline against its production runs
+(`evidence_stage` in the response) — this makes the readout an ongoing "are my criteria
+currently met" health check in either stage, not only a promotion-moment check.
+
+**Merge: tiers merge, tier contents replace.** The pipeline sets a house standard; a step
+*adds* tiers to it or *replaces* an individual tier wholesale (never field-by-field —
+a step's `accuracy:` block is always exactly what's written for that step). Explicit
+`null` on a tier removes an inherited one (`readiness: {calibration: null}`); `readiness:
+null` on the whole block opts a step out entirely. **Documented wart:** a step pulled via
+`use:` from the step library is, after loading, indistinguishable from a step whose
+`readiness:` was written directly in the pipeline YAML — so when the library step and the
+pipeline-level block configure the *same* tier, the library step's value wins the
+conflict. The worst case under tier-level merging is still a union of tiers (strictly
+stricter), never a silent replacement of the whole block.
+
+**`require_current_config`** (default `true` on `accuracy`/`calibration`, `false` on
+`operational`/`confidence`) filters evidence to runs matching the pipeline's *current*
+`prompt_template` and the step's most recently observed `agent_version`. Editing a
+step's prompt therefore drops its accuracy/calibration tiers to `insufficient_data`
+immediately — with an explicit note naming how many earlier marked results were excluded,
+never a silent zero — while `operational`'s default (`false`) means a typo fix doesn't
+wipe out 30 clean runs. `calibration.require_current_config` cannot be set `false`: a
+calibration bucket is keyed by `(prompt_hash, agent_version)` by definition.
+
+**`calibration.require_own_evidence`** (default `false`) lets a shared library step's
+*production* track record from a different pipeline count, when agent/model/prompt/agent
+version all match exactly — the response names which pipeline(s) contributed
+(`production_pipelines`) so an owner's green tick is never mysteriously "someone else's
+traffic." `true` restricts a step to only its own pipeline's evidence. Overriding
+`prompt_template` locally on a `use:` step changes the prompt hash and silently forfeits
+inherited evidence either way — a real trap worth knowing about.
+
+**The single most misread knob: `calibration.n_min` is per confidence band, not a
+total.** A step with 100 marked results spread evenly across 10 bands has only 10 in
+each, and will not validate at `n_min: 20`. Look at the fullest band's own count, never
+`total_n`.
+
+**`acceptable_statuses` is laxer, not stricter, the more you add.**
+`[completed, escalated]` accepts runs where a human had to step in — a *weaker* claim
+than `[completed]` alone, even though the longer list reads like a higher bar.
+
+A pipeline with **no** `readiness:` block anywhere behaves exactly as before —
+`criteria_source: "none"`, no verdict asserted — but the readout still shows each step's
+observed calibration evidence (at the endpoint's `bin_width`/`n_min` defaults), so a real
+signal never disappears behind a config chore.
+
+No new DB column or migration, no new Prometheus metric — like Phase 3 itself, everything
+is recomputed fresh from `pipeline_steps`/`step_feedback`/`run_feedback`/`pipeline_runs`
+on every request.
+
+#### YAML examples
+
+Minimal — operational only, pipeline-wide:
+
+```yaml
+readiness:
+  operational:
+    min_runs: 20                      # 20 runs of this step...
+    acceptable_statuses: [completed]  # ...that all ended `completed`
+```
+
+House default plus a stricter step, an opt-out, and a parallel group:
+
+```yaml
+readiness:                            # house standard for every step
+  operational:
+    min_runs: 20
+    acceptable_statuses: [completed, escalated]
+    max_age_days: 30
+  confidence:
+    min_confidence: 0.80
+    min_runs: 10
+
+steps:
+  - name: investigate                 # inherits the house standard verbatim
+    executor: gateway
+    ...
+
+  - name: apply-fix                   # house standard PLUS accuracy PLUS calibration
+    executor: gateway
+    readiness:
+      accuracy:
+        min_accuracy: 0.90
+        min_marked: 30
+        min_human_marked: 15          # at least 15 by a real human, not automation
+      calibration:
+        n_min: 30                     # PER BAND, not total
+        max_divergence: 0.10          # stricter than the 0.15 default
+        require_own_evidence: true
+
+  - name: notify-oncall                # no bar makes sense for a notify step
+    executor: notify
+    readiness: null
+
+  - parallel:                          # readiness lives INSIDE `parallel:`
+      name: cross-checks
+      readiness:
+        operational: {min_runs: 50}
+        confidence: null              # drop the inherited confidence tier
+      steps: [...]
+```
 
 The pipeline detail page (`/ui/pipelines/{name}`) shows a "Promotion readiness" card for
-`stage: testing` pipelines once at least one combo has been observed. `GET
+`stage: testing` pipelines, with per-step tier chips, a "How is this judged?" disclosure
+carrying a plain-language narrative and label provenance, and an "Observed (service
+defaults)" fallback for steps with no criteria configured. `GET
 /pipelines/{name}/promotion-readiness` (see API reference) exposes the same data as JSON
-for either stage. No new DB column or migration, no new Prometheus metric — like Phase 3
-itself, both views are recomputed fresh from `pipeline_steps`/`step_feedback`/
-`run_feedback`/`pipeline_runs` on every request.
+for either stage; `POST .../preview` evaluates a *candidate* config against the same
+evidence without writing anything.
 
 ### Agent Library
 

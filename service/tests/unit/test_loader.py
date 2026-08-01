@@ -1,7 +1,12 @@
 import pytest
 import yaml
 
-from src.pipeline.loader import _resolve_step_references, load_pipelines, load_step_library
+from src.pipeline.loader import (
+    _resolve_step_references,
+    load_pipelines,
+    load_pipelines_from_raw,
+    load_step_library,
+)
 
 LIBRARY = {
     "sre-investigation": {
@@ -16,6 +21,19 @@ LIBRARY = {
         "confidence_threshold": 0.60,
         "prompt_template": "default prompt",
     }
+}
+
+LIBRARY_WITH_READINESS = {
+    **LIBRARY,
+    "step-with-readiness": {
+        "name": "step-with-readiness",
+        "executor": "gateway",
+        "prompt_template": "x",
+        "readiness": {
+            "operational": {"min_runs": 20},
+            "accuracy": {"min_accuracy": 0.9, "min_marked": 10},
+        },
+    },
 }
 
 
@@ -229,3 +247,145 @@ def test_critic_mode_without_gate_does_not_log_advisory_nudge(tmp_path, caplog):
         load_pipelines(tmp_path)
 
     assert "weaker corroboration signal" not in caplog.text
+
+
+# ----------------------------------------------------------------------
+# readiness: — loader-level merge behaviour (SPEC-readiness-criteria.md §14)
+# ----------------------------------------------------------------------
+
+def test_library_readiness_with_local_override_replaces_whole_block():
+    resolved = _resolve_step_references(
+        [{"use": "step-with-readiness", "readiness": {"operational": {"min_runs": 5}}}],
+        LIBRARY_WITH_READINESS,
+    )
+    step = resolved[0]
+    # Whole-value replace, not a field merge — the library's accuracy tier is gone.
+    assert step["readiness"] == {"operational": {"min_runs": 5}}
+
+
+def test_library_step_readiness_wins_per_tier_conflict_with_pipeline_level():
+    """Documented wart (§5): after 'use:' flattening, a library-provided readiness
+    block is indistinguishable from a locally-written one, so when both the
+    pipeline-level default and the library step configure the SAME tier, the
+    library step's value wins — not a bug to fix here, but behaviour that must
+    not silently drift into something different-but-also-undocumented."""
+    from src.readiness import step_specs
+
+    raw = {
+        "name": "p",
+        "trigger": {"match": {}},
+        "readiness": {"operational": {"min_runs": 999}},   # pipeline-level house standard
+        "steps": [{"use": "step-with-readiness"}],           # library step ALSO sets operational
+    }
+    pipelines = load_pipelines_from_raw({"p.yaml": yaml.dump(raw)}, step_library=LIBRARY_WITH_READINESS)
+    spec = step_specs(pipelines[0])[0]
+
+    assert spec.readiness.operational.min_runs == 20   # the library's value, not the pipeline's 999
+    assert spec.readiness_source["operational"] == "step"
+    # The accuracy tier, only set by the library step, still comes through untouched.
+    assert spec.readiness.accuracy.min_accuracy == 0.9
+
+
+def test_parallel_sibling_key_survives_resolution_with_nonempty_library():
+    """Regression test for the §10a bug: `resolved.append({"parallel": inner})`
+    used to silently discard every sibling key of `parallel:` — but only when a
+    non-empty step library triggers _resolve_step_references at all."""
+    steps = [
+        {
+            "parallel": {
+                "name": "cross-checks",
+                "readiness": {"operational": {"min_runs": 50}},
+                "steps": [{"use": "sre-investigation"}],
+            }
+        }
+    ]
+    resolved = _resolve_step_references(steps, LIBRARY)
+    assert resolved[0]["parallel"]["readiness"] == {"operational": {"min_runs": 50}}
+
+
+# ----------------------------------------------------------------------
+# _warn_readiness_misconfiguration (SPEC-readiness-criteria.md §10b)
+# ----------------------------------------------------------------------
+
+def test_warns_when_judgment_tier_on_non_llm_executor(tmp_path, caplog):
+    step = {
+        "name": "notify-oncall", "executor": "notify",
+        "readiness": {"accuracy": {"min_accuracy": 0.9, "min_marked": 5}},
+    }
+    _write_pipeline(tmp_path, "p", step)
+
+    with caplog.at_level("WARNING"):
+        load_pipelines(tmp_path)
+
+    assert "never writes effective_confidence" in caplog.text
+
+
+def test_no_warning_for_operational_only_on_non_llm_executor(tmp_path, caplog):
+    step = {
+        "name": "notify-oncall", "executor": "notify",
+        "readiness": {"operational": {"min_runs": 5}},
+    }
+    _write_pipeline(tmp_path, "p", step)
+
+    with caplog.at_level("WARNING"):
+        load_pipelines(tmp_path)
+
+    assert "never writes effective_confidence" not in caplog.text
+
+
+def test_warns_for_readiness_on_sub_pipeline_step(tmp_path, caplog):
+    step = {
+        "name": "child", "executor": "pipeline", "executor_config": {"pipeline_name": "other"},
+        "readiness": {"operational": {"min_runs": 5}},
+    }
+    _write_pipeline(tmp_path, "p", step)
+
+    with caplog.at_level("WARNING"):
+        load_pipelines(tmp_path)
+
+    assert "sub-pipeline step never writes" in caplog.text
+
+
+def test_warns_for_wide_bin_width(tmp_path, caplog):
+    step = {
+        "name": "investigate", "executor": "gateway", "prompt_template": "x",
+        "readiness": {"calibration": {"bin_width": 0.5}},
+    }
+    _write_pipeline(tmp_path, "p", step)
+
+    with caplog.at_level("WARNING"):
+        load_pipelines(tmp_path)
+
+    assert "quantise the predicted score" in caplog.text
+
+
+def test_warns_when_max_divergence_smaller_than_half_bin_width(tmp_path, caplog):
+    step = {
+        "name": "investigate", "executor": "gateway", "prompt_template": "x",
+        "readiness": {"calibration": {"bin_width": 0.2, "max_divergence": 0.05}},
+    }
+    _write_pipeline(tmp_path, "p", step)
+
+    with caplog.at_level("WARNING"):
+        load_pipelines(tmp_path)
+
+    assert "quantisation error" in caplog.text
+
+
+def test_warns_on_duplicate_collapsed_bucket_names(tmp_path, caplog):
+    raw = {
+        "name": "p",
+        "trigger": {"match": {}},
+        "steps": [
+            {"name": "x", "executor": "gateway", "prompt_template": "a"},
+            {"parallel": {"name": "x", "steps": [
+                {"name": "branch", "executor": "gateway", "prompt_template": "b"},
+            ]}},
+        ],
+    }
+    (tmp_path / "p.yaml").write_text(yaml.dump(raw))
+
+    with caplog.at_level("WARNING"):
+        load_pipelines(tmp_path)
+
+    assert "collapse to the same" in caplog.text

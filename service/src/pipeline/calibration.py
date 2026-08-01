@@ -5,17 +5,28 @@ table, no curve-fitting dependency. See CONFIDENCE-REDESIGN.md §4 for the desig
 rationale, and SPEC-prompt-versioning.md §1/§4g for why prompt_hash and
 agent_version are part of the key: without them, editing a step's prompt template
 or a Gateway agent's config silently keeps counting outcomes from the old
-configuration as evidence for the new one."""
+configuration as evidence for the new one.
+
+SPEC-readiness-criteria.md §6 extracted the label-precedence chain, the pure
+binning core, and the DB scan into standalone pieces (resolve_label,
+bins_from_samples, fetch_label_rows) so the readiness engine can reuse them
+without duplicating the rules. compute_calibration_buckets is now a thin
+composition of the three and its behaviour for every existing caller is
+unchanged."""
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 
 _OUTCOME_TO_LABEL = {"correct": 1.0, "partial": 0.5, "incorrect": 0.0}
+
+LABEL_HUMAN = "human_step_feedback"
+LABEL_DETERMINISTIC = "deterministic_failure"
+LABEL_RUN_FALLBACK = "run_feedback_fallback"
 
 
 @dataclass
@@ -38,6 +49,9 @@ class CalibrationBucket:
     bins: list[CalibrationBin]   # always exactly len == round(1 / bin_width), in order
     total_n: int                 # total labelled step-executions across all bins
     last_seen_at: datetime | None  # max(executed_at) across this bucket's rows
+    label_sources: dict[str, int] = field(default_factory=dict)
+    # {LABEL_HUMAN | LABEL_DETERMINISTIC | LABEL_RUN_FALLBACK: count}, sums to total_n.
+    # NEW (SPEC-readiness-criteria.md) — provenance for the accuracy/calibration tiers.
 
     def lookup(self, predicted: float) -> CalibrationBin | None:
         """Which bin a predicted score falls into. predicted == 1.0 lands in the last
@@ -48,6 +62,102 @@ class CalibrationBucket:
         if self.bins and predicted >= self.bins[-1].lo:
             return self.bins[-1]
         return None
+
+
+def resolve_label(
+    step_outcome: str | None, det_passed: bool | None, run_outcome: str | None,
+) -> tuple[float, str] | None:
+    """THE label-precedence chain, single definition, lifted verbatim out of
+    compute_calibration_buckets' row loop.
+
+    StepFeedback (human) > deterministic_passed=False (automated) > RunFeedback
+    fallback (via run_id) > excluded (no label at all — not counted as 0, not counted
+    as unlabelled-N). Returns (label, source) or None.
+
+    Note the asymmetry, which matters a great deal for the accuracy tier: only a
+    deterministic check FAILURE produces a label. A passing check produces nothing —
+    it is not a strong enough positive signal on its own. See
+    SPEC-readiness-criteria.md §12.2."""
+    if step_outcome is not None:
+        return _OUTCOME_TO_LABEL[step_outcome], LABEL_HUMAN
+    if det_passed is False:
+        return 0.0, LABEL_DETERMINISTIC
+    if run_outcome is not None:
+        return _OUTCOME_TO_LABEL[run_outcome], LABEL_RUN_FALLBACK
+    return None
+
+
+def bins_from_samples(
+    pairs: list[tuple[float, float]], bin_width: float, n_min: int,
+) -> list[CalibrationBin]:
+    """Pure binning core, lifted verbatim from the original
+    compute_calibration_buckets. No I/O."""
+    n_bins = round(1.0 / bin_width)
+    assert abs(n_bins * bin_width - 1.0) < 1e-9, f"bin_width {bin_width} must evenly divide 1.0"
+    bin_edges = [round(i * bin_width, 10) for i in range(n_bins + 1)]
+    bins: list[CalibrationBin] = []
+    for i in range(n_bins):
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        in_bin = [
+            label for predicted, label in pairs
+            if lo <= predicted < hi or (i == n_bins - 1 and predicted == hi)
+        ]
+        n = len(in_bin)
+        mean_label = sum(in_bin) / n if n else 0.0
+        bins.append(CalibrationBin(lo=lo, hi=hi, n=n, mean_label=mean_label, validated=n >= n_min))
+    return bins
+
+
+async def fetch_label_rows(
+    session_factory: async_sessionmaker,
+    *,
+    stage: str,
+    pipeline_name: str | None = None,
+    step_names: set[str] | None = None,
+    require_confidence: bool = True,
+) -> list:
+    """The DB scan, lifted from compute_calibration_buckets' original query, with
+    three optional filters, all defaulting to the original behaviour so every
+    existing caller is byte-identical:
+
+      pipeline_name      — PipelineRun.pipeline_name == this. None = unscoped.
+      step_names         — WHERE step_name IN (...) OR step_name LIKE 'name/%',
+                           so fan-out/parallel branch rows are included. None = unscoped.
+      require_confidence — the original `effective_confidence IS NOT NULL` filter.
+                           False lets non-LLM steps through, which the readiness
+                           operational tier needs.
+
+    Also selects run_id, status, and PipelineRun.pipeline_name (needed by the
+    readiness operational tier and by readiness.gather_readiness_evidence's
+    cross-pipeline attribution, respectively) in addition to the original columns.
+    """
+    conditions = [PipelineRun.stage == stage]
+    if pipeline_name is not None:
+        conditions.append(PipelineRun.pipeline_name == pipeline_name)
+    if require_confidence:
+        conditions.append(PipelineStep.effective_confidence.is_not(None))
+    if step_names:
+        conditions.append(or_(*(
+            or_(PipelineStep.step_name == name, PipelineStep.step_name.like(f"{name}/%"))
+            for name in step_names
+        )))
+
+    async with session_factory() as session:
+        rows = (await session.execute(
+            select(
+                PipelineStep.step_name, PipelineStep.agent, PipelineStep.model,
+                PipelineStep.provider, PipelineStep.prompt_hash, PipelineStep.agent_version,
+                PipelineStep.effective_confidence, PipelineStep.deterministic_passed,
+                PipelineStep.executed_at, PipelineStep.run_id, PipelineStep.status,
+                PipelineRun.pipeline_name,
+                StepFeedback.outcome, RunFeedback.outcome,
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .outerjoin(StepFeedback, StepFeedback.step_id == PipelineStep.id)
+            .outerjoin(RunFeedback, RunFeedback.run_id == PipelineStep.run_id)
+            .where(*conditions)
+        )).all()
+    return rows
 
 
 async def compute_calibration_buckets(
@@ -77,79 +187,70 @@ async def compute_calibration_buckets(
     dry-run testing traffic never pollutes the numbers the live gate
     (`calibration: {enforce: true}`) actually uses. `CalibrationCache` — the only
     caller on the live-gate path — always calls this with the default `stage="production"`
-    and must keep doing so; do not thread a configurable stage through the cache."""
+    and must keep doing so; do not thread a configurable stage through the cache.
+
+    This is now a thin composition of fetch_label_rows + resolve_label +
+    bins_from_samples (SPEC-readiness-criteria.md §6) — behaviour for every
+    existing caller is unchanged."""
     assert stage in ("production", "testing"), f"stage must be 'production' or 'testing', got {stage!r}"
     n_bins = round(1.0 / bin_width)
     assert abs(n_bins * bin_width - 1.0) < 1e-9, f"bin_width {bin_width} must evenly divide 1.0"
 
-    async with session_factory() as session:
-        rows = (await session.execute(
-            select(
-                PipelineStep.step_name, PipelineStep.agent, PipelineStep.model,
-                PipelineStep.provider, PipelineStep.prompt_hash, PipelineStep.agent_version,
-                PipelineStep.effective_confidence, PipelineStep.deterministic_passed,
-                PipelineStep.executed_at,
-                StepFeedback.outcome, RunFeedback.outcome,
-            )
-            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
-            .outerjoin(StepFeedback, StepFeedback.step_id == PipelineStep.id)
-            .outerjoin(RunFeedback, RunFeedback.run_id == PipelineStep.run_id)
-            .where(
-                PipelineRun.stage == stage,
-                PipelineStep.effective_confidence.is_not(None),
-            )
-        )).all()
+    rows = await fetch_label_rows(session_factory, stage=stage, require_confidence=True)
 
     # bucket_key -> list of (predicted, label)
     samples: dict[tuple, list[tuple[float, float]]] = {}
     last_seen: dict[tuple, datetime] = {}
+    label_sources: dict[tuple, dict[str, int]] = {}
     for (step_name, agent, model, provider, p_hash, a_version,
-         predicted, det_passed, executed_at, step_outcome, run_outcome) in rows:
-        label: float | None = None
-        if step_outcome is not None:
-            label = _OUTCOME_TO_LABEL[step_outcome]
-        elif det_passed is False:
-            label = 0.0
-        elif run_outcome is not None:
-            label = _OUTCOME_TO_LABEL[run_outcome]
-        if label is None:
+         predicted, det_passed, executed_at, _run_id, _status, _pipeline_name,
+         step_outcome, run_outcome) in rows:
+        resolved = resolve_label(step_outcome, det_passed, run_outcome)
+        if resolved is None:
             continue
+        label, source = resolved
 
         bucket_step_name = step_name.split("/", 1)[0]  # collapse fan-out branches
         key = (bucket_step_name, agent, model, provider, p_hash, a_version)
         samples.setdefault(key, []).append((predicted, label))
+        sources = label_sources.setdefault(key, {})
+        sources[source] = sources.get(source, 0) + 1
         if executed_at is not None and (key not in last_seen or executed_at > last_seen[key]):
             last_seen[key] = executed_at
 
     buckets: dict[tuple, CalibrationBucket] = {}
-    for (step_name, agent, model, provider, p_hash, a_version), pairs in samples.items():
-        bin_edges = [round(i * bin_width, 10) for i in range(n_bins + 1)]
-        bins: list[CalibrationBin] = []
-        for i in range(n_bins):
-            lo, hi = bin_edges[i], bin_edges[i + 1]
-            in_bin = [label for predicted, label in pairs if lo <= predicted < hi or (i == n_bins - 1 and predicted == hi)]
-            n = len(in_bin)
-            mean_label = sum(in_bin) / n if n else 0.0
-            bins.append(CalibrationBin(lo=lo, hi=hi, n=n, mean_label=mean_label, validated=n >= n_min))
-        key = (step_name, agent, model, provider, p_hash, a_version)
+    for key, pairs in samples.items():
+        step_name, agent, model, provider, p_hash, a_version = key
+        bins = bins_from_samples(pairs, bin_width, n_min)
         buckets[key] = CalibrationBucket(
             step_name=step_name, agent=agent, model=model, provider=provider,
             prompt_hash=p_hash, agent_version=a_version,
             bins=bins, total_n=len(pairs), last_seen_at=last_seen.get(key),
+            label_sources=label_sources.get(key, {}),
         )
     return buckets
 
 
-def calibration_recommendation(bucket: CalibrationBucket) -> str | None:
+def calibration_recommendation(
+    bucket: CalibrationBucket,
+    max_divergence: float = 0.15,
+    n_min: int | None = None,
+) -> str | None:
     """Flag the first validated bin whose predicted score and observed accuracy diverge
-    by >= 15 points — the exact style of recommendation CONFIDENCE-REDESIGN.md §4.3 uses
-    as its own worked example. Returns None if every validated bin looks fine (or there
-    are no validated bins yet)."""
+    by >= max_divergence — the exact style of recommendation CONFIDENCE-REDESIGN.md §4.3
+    uses as its own worked example. Returns None if every validated bin looks fine (or
+    there are no validated bins yet).
+
+    `n_min`, when given, overrides the bucket's own baked-in `validated` flags — needed
+    because readiness (SPEC-readiness-criteria.md) may bin the same bucket with a
+    per-step `n_min` that differs from the one the bucket was built with. `None` (the
+    default) preserves every existing caller's behaviour exactly."""
     for b in bucket.bins:
-        if not b.validated:
+        validated = b.validated if n_min is None else b.n >= n_min
+        if not validated:
             continue
         midpoint = (b.lo + b.hi) / 2
-        if abs(b.mean_label - midpoint) >= 0.15:
+        if abs(b.mean_label - midpoint) >= max_divergence:
             return (
                 f"runs scoring ~{round(midpoint * 100)}% in this configuration are only "
                 f"{round(b.mean_label * 100)}% correct ({b.n} marked) — consider raising "

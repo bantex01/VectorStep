@@ -382,6 +382,22 @@ in the run-detail page's Trust panel, under **"How was this calculated?"**
 | `calibration.bin_width` | service config.yaml | `0.1` | Width of each confidence bucket. |
 | `prompt_hash` | derived, not configured | — | Content hash of the step's `prompt_template`. Part of every calibration bucket's key — editing the prompt starts a new bucket. See §7's "Editing a prompt or an agent resets the measurement". |
 | `agent_version` | derived, not configured (Gateway-owned) | — | Content hash of the Gateway agent's full config incl. `soul.md`. Also part of every bucket's key — editing `agent.yaml`/`soul.md` on the Gateway resets calibration in P-Ork, even though nothing in P-Ork's own YAML changed. |
+| `readiness.operational.min_runs` | pipeline or step `readiness:` | required | Distinct runs (never rows) that must end in an acceptable status. Can only ever be `pass`/`insufficient_data` — never `fail`. |
+| `readiness.operational.acceptable_statuses` | pipeline or step `readiness:` | `[completed]` | End-states that count. Adding a status makes the bar LAXER, not stricter — `[completed, escalated]` is weaker than `[completed]` alone. |
+| `readiness.operational.max_age_days` | pipeline or step `readiness:` | `null` (lifetime) | Restricts `operational` to runs from the last N days. The only readiness tier with a time window. |
+| `readiness.operational.require_current_config` | pipeline or step `readiness:` | `false` | `true` filters to runs matching the current prompt/agent version. |
+| `readiness.confidence.min_confidence` | pipeline or step `readiness:` | required | Minimum mean self-reported `effective_confidence` over qualifying runs. |
+| `readiness.confidence.min_runs` | pipeline or step `readiness:` | `null` | Minimum sample size before `min_confidence` is trusted — strongly recommended. |
+| `readiness.accuracy.min_accuracy` | pipeline or step `readiness:` | required | Minimum weighted judged accuracy (correct=1.0, partial=0.5, incorrect=0.0). |
+| `readiness.accuracy.min_marked` | pipeline or step `readiness:` | required | Minimum labelled results before `min_accuracy` is evaluated. |
+| `readiness.accuracy.min_human_marked` | pipeline or step `readiness:` | `null` | Minimum labels from a HUMAN specifically — guards against a labelled population that's 100% failed deterministic checks reading as 0% accurate. |
+| `readiness.calibration.n_min` | pipeline or step `readiness:` | `20` | Marked outcomes needed AT THE SAME CONFIDENCE BAND — per band, not a total. The single most misread readiness knob. |
+| `readiness.calibration.bin_width` | pipeline or step `readiness:` | `0.1` | Must evenly divide 1.0 — rejected at config load, not at request time, if it doesn't. |
+| `readiness.calibration.max_divergence` | pipeline or step `readiness:` | `0.15` | Owner-settable version of the hardcoded 15-point divergence flag. |
+| `readiness.calibration.require_own_evidence` | pipeline or step `readiness:` | `false` | `true` restricts calibration to this pipeline's own runs, excluding a shared library step's production track record from elsewhere. |
+| `readiness.calibration.require_current_config` | pipeline or step `readiness:` | `true`, cannot be `false` | A calibration bucket is keyed by `(prompt_hash, agent_version)` by definition — "ignore the version" would mean merging buckets. |
+
+**Safety property:** adding a `readiness:` block never resets a calibration bucket — `prompt_hash` is computed from `prompt_template` **text only**, so `readiness:` (which lives alongside, not inside, the prompt) can't touch it.
 
 ---
 
@@ -402,3 +418,8 @@ in the run-detail page's Trust panel, under **"How was this calculated?"**
 - **`/ui/agents/gateway/<name>` → Versions tab:** every `agent_version` P-Ork has a
   snapshot for, with a diff of `soul.md` against the version before it and the list of
   steps that version actually affected.
+- **Pipeline detail page, "Promotion readiness" card** (`stage: testing` pipelines):
+  per-step tier chips for `operational`/`confidence`/`accuracy`/`calibration`, a "How is
+  this judged?" disclosure with a plain-language narrative and label provenance, and an
+  "Observed (service defaults)" fallback for steps with no `readiness:` criteria
+  configured yet. See "Promotion readiness (owner-defined criteria)" in `README.md`.

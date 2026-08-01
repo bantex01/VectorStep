@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import signal
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -13,11 +14,11 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
+from pydantic import ValidationError
 from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from .analytics import get_agent_versions as _get_agent_versions
-from .analytics import get_pipeline_promotion_readiness as _get_pipeline_promotion_readiness
 from .analytics import get_pipeline_stats as _get_pipeline_stats
 from .analytics import get_step_calibration as _get_step_calibration
 from .analytics import get_step_model_breakdown as _get_step_model_breakdown
@@ -41,12 +42,13 @@ from .executors.gateway import GatewayExecutor
 from .executors.openclaw_ws import OpenClawWSExecutor, UnconfiguredOpenClawExecutor, validate_identity
 from .metrics import PorkCollector, fetch_metrics_data
 from .models.context import NormalisedContext
-from .models.pipeline import PipelineConfig
+from .models.pipeline import PipelineConfig, ReadinessConfig
 from .normaliser import PARSERS
 from .normaliser.alertmanager import AlertmanagerStrategy
 from .notifications.log import LogNotifier
 from .notifications.telegram import TelegramNotifier
 from .pipeline import PipelineRunner, load_pipelines, load_step_library, resolve_pipeline
+from .readiness import evaluate_readiness, gather_readiness_evidence, step_specs
 from .tracing import setup_tracing, shutdown_tracing
 from .ui import _fetch_openclaw_agents, _fetch_pork_gateway_agents, _read_pipeline_yaml, _read_step_yaml
 from .ui import configure as configure_ui
@@ -1076,18 +1078,106 @@ async def get_pipeline_promotion_readiness_endpoint(
     bin_width: float = Query(default=0.1),
     n_min: int = Query(default=20),
 ):
-    """Calibration-based promotion-readiness readout for one pipeline
-    (SPEC-calibration-readiness.md) — advisory only, does not gate or block
-    `stage: testing -> production`. Works for a pipeline of either stage (a
-    production pipeline's steps can be checked too), 404 if the pipeline name
-    isn't loaded. `bin_width`/`n_min` mirror /steps/{name}/calibration's query
-    params; they are NOT read from config.yaml's calibration block (§2)."""
+    """Owner-defined promotion-readiness readout for one pipeline
+    (SPEC-readiness-criteria.md) — advisory only, does not gate or block
+    `stage: testing -> production`. Works for a pipeline of either stage, 404 if
+    the pipeline name isn't loaded. `bin_width`/`n_min` are the defaults used for
+    the INFORMATIONAL 'observed' calibration readout on steps that have no
+    calibration tier configured — a configured step's own values always win.
+    They are NOT read from config.yaml's calibration block (§2), and this
+    endpoint always re-gathers evidence fresh (no caching — see the preview
+    endpoint below for that)."""
     pipeline = next((p for p in _pipelines if p.name == name), None)
     if pipeline is None:
         raise HTTPException(status_code=404, detail=f"Pipeline '{name}' not found")
-    return await _get_pipeline_promotion_readiness(
-        get_session_factory(), pipeline, bin_width=bin_width, n_min=n_min
-    )
+    evidence = await gather_readiness_evidence(get_session_factory(), pipeline)
+    return evaluate_readiness(evidence, pipeline, default_bin_width=bin_width, default_n_min=n_min)
+
+
+_readiness_evidence_cache: dict[str, tuple[float, object]] = {}
+_READINESS_EVIDENCE_CACHE_TTL = 30.0
+
+
+async def _cached_readiness_evidence(pipeline: PipelineConfig):
+    """30s-TTL in-process cache, used only by the preview endpoint below — the
+    GET always re-gathers, preserving analytics.py's 'computed fresh on every
+    request' philosophy. Returns (evidence, cache_hit)."""
+    now = time.time()
+    cached = _readiness_evidence_cache.get(pipeline.name)
+    if cached is not None and now - cached[0] <= _READINESS_EVIDENCE_CACHE_TTL:
+        return cached[1], True
+    evidence = await gather_readiness_evidence(get_session_factory(), pipeline)
+    _readiness_evidence_cache[pipeline.name] = (now, evidence)
+    return evidence, False
+
+
+def _readiness_yaml_snippet(
+    pipeline_name: str, override: ReadinessConfig, apply_to: list[str] | None,
+) -> tuple[str, str, str]:
+    """Server-generated YAML for the candidate readiness: block — never hand-rolled,
+    can't drift from the schema (§8b)."""
+    readiness_dict = override.model_dump(exclude_none=True, exclude_unset=True)
+    yaml_snippet = yaml.safe_dump({"readiness": readiness_dict}, sort_keys=False)
+    if not apply_to:
+        return (
+            yaml_snippet, yaml_snippet,
+            f"pipelines/{pipeline_name}.yaml → readiness: (pipeline-level, applies to every step)",
+        )
+    indented = "\n".join(f"    {line}" if line else line for line in yaml_snippet.splitlines()) + "\n"
+    target = apply_to[0] if len(apply_to) == 1 else ", ".join(apply_to)
+    hint = f"pipelines/{pipeline_name}.yaml → steps: → - name: {target}"
+    return yaml_snippet, indented, hint
+
+
+@app.post("/pipelines/{name}/promotion-readiness/preview")
+async def preview_promotion_readiness_endpoint(name: str, request: Request):
+    """Preview a CANDIDATE readiness: block against this pipeline's accumulated
+    evidence, without writing anything (SPEC-readiness-criteria.md §8b). A
+    separate endpoint from the GET — genuinely different contract (takes an
+    override, returns generated YAML) — and it keeps the GET pure/idempotent.
+
+    Body: {"readiness": {...ReadinessConfig shape...}, "apply_to": [step names] | null}.
+    `apply_to: null` or omitted evaluates the override as a pipeline-level default
+    across every step. `apply_to` naming an unknown step -> 400.
+
+    The body is validated through the REAL ReadinessConfig (422 with Pydantic's
+    own detail on failure) — this is the entire safety argument for a read-only
+    builder: it cannot emit YAML the loader would reject. Writes nothing; the
+    pipeline YAML file is untouched by this endpoint, always."""
+    pipeline = next((p for p in _pipelines if p.name == name), None)
+    if pipeline is None:
+        raise HTTPException(status_code=404, detail=f"Pipeline '{name}' not found")
+
+    body = await request.json()
+    apply_to = body.get("apply_to")
+    if apply_to is not None and not isinstance(apply_to, list):
+        raise HTTPException(status_code=400, detail="apply_to must be a list of step names or null")
+
+    try:
+        override = ReadinessConfig.model_validate(body.get("readiness") or {})
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=json.loads(exc.json()))
+
+    if apply_to:
+        known = {s.name for s in step_specs(pipeline)}
+        unknown = sorted(set(apply_to) - known)
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"apply_to names unknown step(s): {unknown}")
+
+    evidence, cache_hit = await _cached_readiness_evidence(pipeline)
+    result = evaluate_readiness(evidence, pipeline, override=override, override_steps=apply_to)
+
+    yaml_snippet, yaml_snippet_indented, yaml_target_hint = _readiness_yaml_snippet(name, override, apply_to)
+    result.update({
+        "applied_to": apply_to,
+        "scope": "step" if apply_to else "pipeline",
+        "yaml_snippet": yaml_snippet,
+        "yaml_snippet_indented": yaml_snippet_indented,
+        "yaml_target_hint": yaml_target_hint,
+        "evidence_gathered_at": evidence.gathered_at,
+        "evidence_cache_hit": cache_hit,
+    })
+    return result
 
 
 @app.get("/stats/pipelines")
