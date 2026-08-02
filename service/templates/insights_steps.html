@@ -468,8 +468,8 @@
                 }).join(' ')
               : '<span class="text-xs text-zinc-600">no data</span>';
             const versionChips = `<div class="flex flex-col items-start gap-1">` +
-              `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700" title="prompt_hash">${s.prompt_hash ? s.prompt_hash.slice(0, 12) : '—'}</span>` +
-              (s.agent_version ? `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700" title="agent_version">${s.agent_version.slice(0, 12)}</span>` : '') +
+              `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700" title="prompt_hash">prompt: ${s.prompt_hash ? s.prompt_hash.slice(0, 12) : '—'}</span>` +
+              (s.agent_version ? `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700" title="agent_version">agent: ${s.agent_version.slice(0, 12)}</span>` : '') +
               `</div>`;
             return `<tr class="hover:bg-zinc-800/50 transition-colors">
               <td class="py-1.5 pr-4 text-xs">
