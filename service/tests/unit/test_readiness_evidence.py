@@ -6,7 +6,7 @@ from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep, StepFeedback
 from src.models.pipeline import PipelineConfig, StepConfig, TriggerConfig
 from src.pipeline.calibration import compute_calibration_buckets
-from src.readiness import gather_readiness_evidence
+from src.readiness import evaluate_readiness, gather_readiness_evidence
 
 
 async def _seed_run(sf, run_id: str, pipeline_name: str, stage: str) -> None:
@@ -106,6 +106,34 @@ async def test_require_confidence_false_surfaces_notify_step(db):
     se = evidence.by_step["notify-oncall"]
     assert len(se.rows) == 1
     assert se.rows[0]["predicted"] is None
+
+
+async def test_labeled_row_with_no_confidence_is_excluded_from_calibration_samples(db):
+    """A row can be LABELED (human feedback, a failed deterministic check, or a
+    run-level outcome fallback) while effective_confidence is NULL — e.g. a run
+    that errored before the model returned, or a non-confidence-bearing executor.
+    own_rows is deliberately fetched with require_confidence=False so operational/
+    accuracy still see it, but it must not become a calibration SAMPLE (predicted,
+    label) — bins_from_samples compares `lo <= predicted < hi`, which crashes on
+    a None predicted. This reproduces the crash a real testing-stage pipeline hit
+    on GET /ui/pipelines/{name} the moment one such row existed."""
+    sf = get_session_factory()
+    await _seed_run(sf, "r-a", "p", "testing")
+    await _seed_step(sf, "r-a", "p", "s", agent="a", model="m", provider="pr",
+                      effective_confidence=None, step_feedback="correct")
+
+    pipeline = _pipeline("p", "testing")
+    evidence = await gather_readiness_evidence(sf, pipeline)
+
+    combo = evidence.by_step["s"].own_combos[("a", "m", "pr", None, None)]
+    assert combo.samples == []          # the labeled-but-unconfident row must not be a sample
+
+    # evaluate_readiness always computes observed_combos (the "Observed (service
+    # defaults)" fallback), regardless of whether any readiness: tier is configured —
+    # this must not raise.
+    result = evaluate_readiness(evidence, pipeline)
+    assert result["steps"][0]["observed_combos"][0]["rows"] == 1
+    assert result["steps"][0]["observed_combos"][0]["observed"]["bins"][0]["n"] == 0
 
 
 async def test_step_names_narrowing_includes_fan_out_and_parallel_branches(db):

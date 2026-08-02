@@ -1683,6 +1683,10 @@ GET /pipelines
 
 # Prometheus metrics — runs/steps by status, step duration histograms, verifier veto rate
 GET /metrics
+
+# Liveness/readiness probe — also surfaces in-process concurrency state
+GET /health
+# → {"status": "ok", "active_runs": 0, "max_concurrent_runs": 10}
 ```
 
 See §15c for the pipeline/step-library/agent read + analytics endpoints and

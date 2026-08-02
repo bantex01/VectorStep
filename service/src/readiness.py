@@ -244,7 +244,11 @@ async def gather_readiness_evidence(
             agent=agent, model=model, provider=provider, prompt_hash=p_hash, agent_version=a_version,
         ))
         combo.rows += 1
-        if label is not None:
+        # own_rows is fetched with require_confidence=False (operational/accuracy need
+        # labeled-but-unconfident rows too — a failed/aborted run, a non-LLM executor) —
+        # but a calibration sample needs BOTH a label and a predicted confidence, so a
+        # labeled row with no effective_confidence must not become a sample here.
+        if label is not None and predicted is not None:
             combo.samples.append((predicted, label, label_source))
         if executed_at is not None and (combo.last_seen_at is None or executed_at > combo.last_seen_at):
             combo.last_seen_at = executed_at
@@ -273,7 +277,10 @@ async def gather_readiness_evidence(
             agent=agent, model=model, provider=provider, prompt_hash=p_hash, agent_version=a_version,
         ))
         combo.rows += 1
-        if label is not None:
+        # prod_rows is fetched with require_confidence=True today, so predicted is never
+        # None here in practice — guarded anyway so this can't regress the same way as
+        # own_combos above if that query's filter ever changes.
+        if label is not None and predicted is not None:
             combo.samples.append((predicted, label, label_source))
         if executed_at is not None and (combo.last_seen_at is None or executed_at > combo.last_seen_at):
             combo.last_seen_at = executed_at
