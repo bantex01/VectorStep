@@ -2027,6 +2027,7 @@ The web UI is served under `/ui` and provides the following pages:
 | Pipelines | `/ui/pipelines` | All loaded pipelines with last-run status, run counts, per-pipeline agent badges (read from config), all-time success rate, avg tokens in/out per run, a **TESTING** badge per pipeline (§3c), and **tag** (`?tag=`) / **agent** (`?agent=`) filters; header stat cards and all per-pipeline rollups are scoped to production |
 | Pipeline detail | `/ui/pipelines/{name}` | Config summary, tags, stage badge, **Agents card** (every agent used by the pipeline — including verifier agents in critic or independent mode — with its role(s), the step(s) it's used in, and its live-configured model + fallback models fetched from the backend), **Promotion readiness card** (`stage: testing` pipelines only — per-step tier chips, provenance, and an "Observed (service defaults)" fallback for steps with no criteria configured — see "Promotion readiness (owner-defined criteria)") with a **Criteria builder** disclosure (guided, preview-only `readiness:` authoring — see "Criteria builder (guided UI)"), accuracy feedback summary bar (production only), recent runs (badged, all stages), YAML viewer, and **Run now** button (always runs regardless of stage) |
 | Pipeline accuracy | `/ui/pipelines/{name}/feedback` | Accuracy breakdown by pipeline configuration (see §Accuracy feedback) — summary cards and the config-fingerprint comparison are production only; the chronological "every marked run" table shows all stages, badged |
+| Marking queue | `/ui/marking-queue` | Cross-pipeline review queue of steps with no **human** accuracy feedback yet, grouped by pipeline then step, oldest first, with pipeline/team/stage (default `testing`) additive filters and stat cards (pipelines/runs/steps affected, marked coverage %) — see "Marking queue". Links out to `/ui/runs/{id}` to actually mark; nothing is markable from this page itself |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, a **tag filter** (`?tag=`), and a per-pipeline/agent/model breakdown table (runs, success rate, avg tokens) for steps with run history |
 | Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg duration, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
 | MCP Tools | `/ui/mcp` | Live MCP tool/server registry — every tool's schema, and each server's running/pid/restart_count, fetched from the P-Ork Gateway's `GET /mcp/tools` and `GET /mcp/servers`. Config-and-schema browsing only; see Insights — MCP for call-usage analytics |
@@ -2523,6 +2524,9 @@ steps:
       steps: [...]
 ```
 
+See `samples/pipelines/promotion-readiness-criteria.yaml` for a complete worked example
+hitting all sixteen knobs across all four tiers, including both traps above.
+
 The pipeline detail page (`/ui/pipelines/{name}`) shows a "Promotion readiness" card for
 `stage: testing` pipelines, with per-step tier chips, a "How is this judged?" disclosure
 carrying a plain-language narrative and label provenance, and an "Observed (service
@@ -2546,6 +2550,33 @@ described above), which validates the candidate config through the real `Readine
 and hands back generated YAML. You paste the snippet into the pipeline's YAML file yourself
 and ship it through the normal `POST /reload` + git review workflow (§3c) — the builder
 never touches the file on disk, and P-Ork's git-controlled-config posture is unchanged.
+
+#### Marking queue
+
+Every knob on the accuracy and calibration tiers ultimately needs marked evidence to
+resolve against, and `accuracy.min_human_marked` specifically needs a *human* to have
+graded the step directly — not an inherited run-level rating, and not a deterministic
+check's automatic label. Finding what still needs a human mark used to mean opening each
+pipeline's Accuracy feedback page one at a time; the **Marking queue**
+(`/ui/marking-queue`) is a single cross-pipeline view of it instead.
+
+It lists every step with no `StepFeedback` (i.e. `human_marked` would not count it),
+grouped by pipeline then by step (fan-out/parallel branches collapse to their group name,
+same as everywhere else in the readiness system), oldest first. A step that already has an
+*automatic* label — a failed deterministic check, or an inherited run-level rating — is
+still listed, but tagged with where that label came from, since neither one satisfies
+`min_human_marked`. Stat cards at the top give the shape of the backlog (pipelines
+affected, runs affected, steps unmarked, and marked-coverage %); filters for pipeline,
+team, and stage are additive.
+
+**Stage defaults to `testing`** — the pre-promotion review case — but is a real,
+selectable filter, not a hard scope: a `stage: production` pipeline using calibration on
+its own merits (independently of any `stage: testing → production` gate) needs its backlog
+visible here too, so `production` and "all stages" are both one click away.
+
+**Nothing can be marked from this page.** Every row links out to the run on
+`/ui/runs/{id}`, where the existing accuracy feedback widget (run-level and per-step) does
+the actual marking — the queue is a finder, not a second place feedback gets written.
 
 ### Agent Library
 

@@ -1,0 +1,129 @@
+# Demonstrates every readiness: knob across all four tiers (operational,
+# confidence, accuracy, calibration) — see "Promotion readiness (owner-defined
+# criteria)" in README.md and CONFIDENCE-EXPLAINED.md §7 for what each one means
+# and why. This pipeline is not meant to be run as-is; copy the readiness:
+# blocks into your own pipeline and adapt the thresholds.
+#
+# What's shown:
+#   - Pipeline-level `readiness:` — a house default (operational + confidence,
+#     every knob on both tiers set explicitly) inherited by every step.
+#   - `investigate` — inherits the house default verbatim, adds nothing.
+#   - `apply-fix`   — adds accuracy + calibration on top of the inherited
+#     tiers (every knob on both, including the two traps: accuracy's
+#     min_human_marked and calibration's n_min-is-per-band).
+#   - `notify-oncall` — `readiness: null`, an explicit opt-out (no bar makes
+#     sense for a step that never produces a judged outcome).
+#   - `cross-checks` — a parallel group showing readiness lives INSIDE
+#     `parallel:`, overrides one inherited tier's values, and REMOVES another
+#     inherited tier with an explicit `null`.
+#
+# Once you paste real values into your own pipeline: `POST /reload`, then open
+# the pipeline detail page in the UI — the Promotion readiness card renders
+# this immediately, and the "Build criteria" disclosure underneath it lets you
+# preview any change against your own accumulated evidence before you touch
+# the YAML at all (SPEC-readiness-builder.md).
+
+name: promotion-readiness-criteria
+description: "Reference pipeline showing every readiness: knob, at both pipeline and step level, including an opt-out and a parallel group."
+version: 1
+stage: testing        # readiness: only ever evaluates and renders for stage: testing pipelines
+
+trigger:
+  match: {}   # unused — this is a reference file, not meant to be triggered
+
+readiness:                              # house default — every step inherits this unless it overrides
+  operational:
+    min_runs: 20                        # 20 runs in an acceptable status before this tier passes
+    acceptable_statuses: [completed, escalated]
+    # LAXER than [completed] alone — escalated runs (a human stepped in) still count.
+    max_age_days: 30                    # only look at the last 30 days; omit for a lifetime count
+    require_current_config: false       # a prompt typo-fix doesn't wipe out prior clean runs (default)
+  confidence:
+    min_confidence: 0.80                # mean self-reported effective_confidence must clear 0.80
+    min_runs: 10                        # ...over at least 10 confidence-bearing runs
+    # Without min_runs, min_confidence: 0.80 would pass on the strength of one lucky run.
+    require_current_config: false       # default — counts every qualifying run regardless of version
+
+steps:
+  - name: investigate
+    executor: gateway
+    executor_config:
+      agent: investigate
+      session_key: "agent:investigate:{{pipeline_run_id}}"
+    confidence_threshold: 0.60
+    on_low_confidence: escalate
+    prompt_template: |
+      Investigate the incoming event and summarise findings.
+      # investigate inherits the pipeline-level readiness: block verbatim —
+      # no readiness: key here at all.
+
+  - name: apply-fix
+    executor: gateway
+    executor_config:
+      agent: apply-fix
+      session_key: "agent:apply-fix:{{pipeline_run_id}}"
+    confidence_threshold: 0.70
+    on_low_confidence: escalate
+    prompt_template: |
+      Apply the remediation investigate recommended: {{steps.investigate.summary}}
+    readiness:                          # ADDS accuracy + calibration on top of the inherited tiers
+      accuracy:
+        min_accuracy: 0.90              # weighted judged accuracy (correct=1, partial=0.5, incorrect=0)
+        min_marked: 30                  # ...over at least 30 labelled results
+        min_human_marked: 15            # ...at least 15 of which came from a HUMAN reviewing the step
+        # The trap: only a FAILED deterministic check produces a label for free — passing
+        # checks produce nothing — so a step with checks and no human review can read as
+        # 0% accurate while actually being fine. min_human_marked is the guard for that.
+        require_current_config: true    # default for accuracy — excludes results from an edited prompt
+      calibration:
+        n_min: 30                       # PER CONFIDENCE BAND, not a total — the most misread knob here.
+        # 100 marked results spread evenly across 10 bands is only 10 per band — this will
+        # NOT validate at n_min: 30 even though the total looks plenty. Watch the fullest
+        # band's own count, never total_n.
+        bin_width: 0.10                 # 10 confidence bands (must evenly divide 1.0)
+        max_divergence: 0.10            # stricter than the 0.15 service-wide default
+        require_own_evidence: true      # true: only THIS pipeline's own evidence counts, never a
+        # shared library step's production track record from another pipeline (default: false).
+        require_current_config: true    # CANNOT be false — a calibration bucket is keyed by
+        # (prompt_hash, agent_version) by definition; shown here only for completeness.
+
+  - name: notify-oncall
+    executor: notify
+    executor_config:
+      url: "${PAGERDUTY_EVENTS_URL}"
+      payload:
+        routing_key: "${PAGERDUTY_ROUTING_KEY}"
+        event_action: trigger
+        payload:
+          summary: "{{steps.apply_fix.summary}}"
+          source: pork
+    readiness: null                     # explicit opt-out — a notify step never produces a judged
+    # outcome, so no readiness bar makes sense for it. Omitting readiness: here would instead
+    # INHERIT the pipeline-level house default, which is very likely not what you want.
+
+  - parallel:                           # readiness: lives INSIDE the `parallel:` block, not beside it
+      name: cross-checks
+      join: all_must_pass
+      confidence_threshold: 0.65
+      readiness:
+        operational:
+          min_runs: 50                  # override — this group needs a much larger sample than the
+          # pipeline-level default (20) before its operational tier can pass
+          acceptable_statuses: [completed]
+          require_current_config: false
+        confidence: null                # REMOVE the inherited confidence tier for this group — a
+        # parallel group's per-branch confidence is already pooled into the join outcome, so a
+        # second, separate confidence bar at the group level would be redundant here.
+      steps:
+        - name: log-check
+          executor: gateway
+          prompt_template: "Check application logs for anomalies related to: {{steps.apply_fix.summary}}"
+        - name: metric-check
+          executor: gateway
+          prompt_template: "Check service metrics for anomalies related to: {{steps.apply_fix.summary}}"
+
+notifications:
+  escalate:
+    channel: telegram
+    template: |
+      ⚠️ {{pipeline_name}} escalated at step {{current_step}}: {{escalation_reason}}

@@ -427,3 +427,9 @@ in the run-detail page's Trust panel, under **"How was this calculated?"**
   `readiness:` knobs above — turn one on, see within ~300ms what it would say about this
   pipeline's accumulated evidence, and copy a ready-to-paste YAML snippet. Writes nothing;
   you still commit the snippet yourself. See "Criteria builder (guided UI)" in `README.md`.
+- **Marking queue** (`/ui/marking-queue`): every step across every pipeline with no
+  *human* accuracy feedback yet — the exact gap `accuracy.min_human_marked` checks for —
+  grouped by pipeline then step, tagged when a step already has an automatic-only label
+  (failed deterministic check, or an inherited run-level rating). Links out to the run to
+  mark it; stage defaults to `testing` but is filterable to `production` too. See "Marking
+  queue" in `README.md`.

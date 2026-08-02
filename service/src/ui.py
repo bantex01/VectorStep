@@ -16,7 +16,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from .analytics import _pipeline_rollup, _production_only, _step_rollup, _time_range_cutoff
+from .analytics import ALL_STEP_STATUSES, _pipeline_rollup, _production_only, _step_rollup, _time_range_cutoff
 from .analytics import get_agent_versions as _get_agent_versions
 from .db.database import get_session_factory
 from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
@@ -3486,6 +3486,135 @@ async def ui_pipeline_feedback(request: Request, name: str):
         "total_partial": total_partial,
         "total_incorrect": total_incorrect,
         "active_page": "pipelines",
+    })
+
+
+@router.get("/marking-queue", response_class=HTMLResponse)
+async def ui_marking_queue(
+    request: Request,
+    pipeline: str | None = None,
+    team: str | None = None,
+    stage: str = "testing",
+):
+    """Cross-pipeline review queue: every step with no HUMAN accuracy feedback
+    (StepFeedback) — the exact gap `readiness.accuracy.min_human_marked` checks
+    for. A step that already has an automatic label (a failed deterministic
+    check, or an inherited run-level rating) still shows up here, tagged with
+    where that label came from, since neither counts as `human_marked` — see
+    CONFIDENCE-EXPLAINED.md §12.2/§9.
+
+    Filters are additive (pipeline AND team AND stage, all optional). stage
+    defaults to "testing" — the pre-promotion review case — but production
+    pipelines using calibration independently of the testing->production gate
+    need this too, so stage is a real filter, not a hard scope."""
+    def _filtered(q):
+        if pipeline:
+            q = q.where(PipelineRun.pipeline_name == pipeline)
+        if team:
+            q = q.where(PipelineRun.team == team)
+        if stage:
+            q = q.where(PipelineRun.stage == stage)
+        return q
+
+    sf = get_session_factory()
+    async with sf() as session:
+        q = _filtered(
+            select(
+                PipelineStep.run_id, PipelineStep.step_name, PipelineStep.executed_at,
+                PipelineStep.deterministic_passed,
+                PipelineRun.pipeline_name, PipelineRun.team, PipelineRun.stage,
+            )
+            .select_from(PipelineStep)
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .outerjoin(StepFeedback, StepFeedback.step_id == PipelineStep.id)
+            .where(StepFeedback.id.is_(None))
+            .where(PipelineStep.status.in_(ALL_STEP_STATUSES))
+            .order_by(PipelineStep.executed_at.asc())
+        )
+        unmarked_rows = (await session.execute(q)).all()
+
+        run_feedback_ids: set[str] = set()
+        run_ids = {r.run_id for r in unmarked_rows}
+        if run_ids:
+            rf_rows = await session.execute(
+                select(RunFeedback.run_id).where(RunFeedback.run_id.in_(run_ids))
+            )
+            run_feedback_ids = {r[0] for r in rf_rows.all()}
+
+        q = _filtered(
+            select(func.count())
+            .select_from(PipelineStep)
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.status.in_(ALL_STEP_STATUSES))
+        )
+        total_terminal_steps = (await session.execute(q)).scalar() or 0
+
+        # Unfiltered so switching one filter doesn't collapse the others' options.
+        rows = await session.execute(select(PipelineRun.pipeline_name).distinct().order_by(PipelineRun.pipeline_name))
+        pipeline_names = [r[0] for r in rows.all()]
+        rows = await session.execute(
+            select(PipelineRun.team).distinct().where(PipelineRun.team.is_not(None)).order_by(PipelineRun.team)
+        )
+        team_names = [r[0] for r in rows.all()]
+
+    # Group: pipeline -> step-group (fan-out/parallel branches collapse to their
+    # group name, same as readiness._bucket_name) -> individual unmarked items,
+    # oldest first (rows are already ordered that way from the query above).
+    pipelines_by_name: dict[str, dict] = {}
+    for r in unmarked_rows:
+        if r.deterministic_passed is False:
+            provenance = "failed check"
+        elif r.run_id in run_feedback_ids:
+            provenance = "run feedback"
+        else:
+            provenance = None
+
+        p = pipelines_by_name.setdefault(r.pipeline_name, {
+            "name": r.pipeline_name, "stage": r.stage, "steps": {}, "run_ids": set(),
+        })
+        p["run_ids"].add(r.run_id)
+        step_group = r.step_name.split("/", 1)[0]
+        s = p["steps"].setdefault(step_group, {"name": step_group, "items": []})
+        s["items"].append({"run_id": r.run_id, "executed_at": r.executed_at, "provenance": provenance})
+
+    pipeline_list = []
+    total_unmarked_steps = 0
+    for p in pipelines_by_name.values():
+        step_list = []
+        for s in p["steps"].values():
+            s["count"] = len(s["items"])
+            s["oldest"] = s["items"][0]["executed_at"]
+            s["preview"] = s["items"][:5]
+            s["more"] = max(0, s["count"] - 5)
+            step_list.append(s)
+        step_list.sort(key=lambda s: s["count"], reverse=True)
+        step_count = sum(s["count"] for s in step_list)
+        total_unmarked_steps += step_count
+        pipeline_list.append({
+            "name": p["name"], "stage": p["stage"], "steps": step_list,
+            "step_count": step_count, "run_count": len(p["run_ids"]),
+        })
+    pipeline_list.sort(key=lambda p: p["step_count"], reverse=True)
+
+    marked_pct = (
+        round((total_terminal_steps - total_unmarked_steps) / total_terminal_steps * 100)
+        if total_terminal_steps else None
+    )
+
+    return templates.TemplateResponse(request, "marking_queue.html", {
+        "pipelines": pipeline_list,
+        "pipeline_names": pipeline_names,
+        "team_names": team_names,
+        "selected_pipeline": pipeline or "",
+        "selected_team": team or "",
+        "selected_stage": stage or "",
+        "stage_values": ["testing", "production"],
+        "total_pipelines": len(pipeline_list),
+        "total_runs": len({r.run_id for r in unmarked_rows}),
+        "total_unmarked_steps": total_unmarked_steps,
+        "total_terminal_steps": total_terminal_steps,
+        "marked_pct": marked_pct,
+        "active_page": "marking_queue",
     })
 
 

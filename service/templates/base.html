@@ -75,6 +75,13 @@
         </svg>
         Pipelines
       </a>
+      <a href="/ui/marking-queue" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
+        {% if active_page == 'marking_queue' %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
+        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        Marking queue
+      </a>
       <a href="/ui/steps" class="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors
         {% if active_page == 'steps' %}bg-zinc-800 text-indigo-400{% else %}text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100{% endif %}">
         <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">

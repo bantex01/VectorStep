@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% import "_macros.html" as macros %}
+{% block title %}Marking queue — P-Ork{% endblock %}
+{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Marking queue</h1>{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-end mb-6">
+  <form method="get" action="/ui/marking-queue" class="flex items-center gap-2">
+    <select name="pipeline" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="">All pipelines</option>
+      {% for name in pipeline_names %}
+        <option value="{{ name }}" {% if selected_pipeline == name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+    <select name="team" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="">All teams</option>
+      {% for name in team_names %}
+        <option value="{{ name }}" {% if selected_team == name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+    <select name="stage" class="text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="">All stages</option>
+      {% for s in stage_values %}
+        <option value="{{ s }}" {% if selected_stage == s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="text-sm bg-indigo-600 text-white px-3 py-1.5 rounded-md hover:bg-indigo-500 transition-colors">Filter</button>
+    {% if selected_pipeline or selected_team or selected_stage != "testing" %}
+      <a href="/ui/marking-queue" class="text-sm text-zinc-500 hover:text-zinc-300 px-2">Reset</a>
+    {% endif %}
+  </form>
+</div>
+
+<p class="text-xs text-zinc-500 mb-6 leading-relaxed">
+  Steps with no <b class="text-zinc-400">human</b> accuracy feedback yet — the gap
+  <code class="font-mono text-zinc-400">readiness.accuracy.min_human_marked</code> checks for.
+  A step tagged <span class="text-amber-500">failed check</span> or
+  <span class="text-amber-500">run feedback</span> already has an automatic label from a
+  deterministic check or an inherited run-level rating, but neither counts as a human mark.
+  Click a run to review it and submit feedback — nothing can be marked from this page.
+</p>
+
+<!-- Stat cards -->
+<div class="grid grid-cols-4 gap-4 mb-6">
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Pipelines</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_pipelines }}</p>
+    <p class="mt-1 text-xs text-zinc-500">with unmarked steps</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Runs</p>
+    <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_runs }}</p>
+    <p class="mt-1 text-xs text-zinc-500">contain an unmarked step</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Steps unmarked</p>
+    <p class="mt-2 text-3xl font-semibold {% if total_unmarked_steps > 0 %}text-amber-400{% else %}text-zinc-50{% endif %}">
+      {{ total_unmarked_steps }}
+    </p>
+    <p class="mt-1 text-xs text-zinc-500">of {{ total_terminal_steps }} eligible</p>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Coverage</p>
+    {% if marked_pct is not none %}
+      <p class="mt-2 text-3xl font-semibold {% if marked_pct >= 80 %}text-green-400{% elif marked_pct >= 50 %}text-amber-400{% else %}text-red-400{% endif %}">
+        {{ marked_pct }}%
+      </p>
+    {% else %}
+      <p class="mt-2 text-3xl font-semibold text-zinc-600">—</p>
+    {% endif %}
+    <p class="mt-1 text-xs text-zinc-500">of eligible steps human-marked</p>
+  </div>
+
+</div>
+
+{% if pipelines %}
+<div class="space-y-4">
+  {% for p in pipelines %}
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800">
+    <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-2">
+      <div class="flex items-center gap-2">
+        <a href="/ui/pipelines/{{ p.name }}" class="text-sm font-semibold text-zinc-100 hover:text-indigo-400">{{ p.name }}</a>
+        {{ macros.stage_badge(p.stage) }}
+      </div>
+      <span class="text-xs text-zinc-500">{{ p.step_count }} step(s) unmarked across {{ p.run_count }} run(s)</span>
+    </div>
+    <div class="divide-y divide-zinc-800">
+      {% for s in p.steps %}
+      <div class="px-5 py-3">
+        <div class="flex items-center justify-between gap-2 flex-wrap">
+          <span class="text-xs font-mono text-zinc-300">{{ s.name }}</span>
+          <span class="text-xs text-zinc-500">{{ s.count }} unmarked · oldest {{ format_ago(s.oldest) }}</span>
+        </div>
+        <div class="mt-2 flex flex-wrap gap-2">
+          {% for item in s.preview %}
+          <a href="/ui/runs/{{ item.run_id }}"
+             class="inline-flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-mono bg-zinc-800 text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100 transition-colors"
+             title="{{ item.executed_at.isoformat() }}">
+            {{ item.run_id[:8] }}
+            {% if item.provenance %}<span class="text-amber-500">{{ item.provenance }}</span>{% endif %}
+          </a>
+          {% endfor %}
+          {% if s.more %}
+          <a href="/ui/runs?pipeline={{ p.name }}{% if selected_stage %}&stage={{ selected_stage }}{% endif %}"
+             class="inline-flex items-center px-2 py-1 rounded text-[11px] text-indigo-400 hover:text-indigo-300">
+            +{{ s.more }} more →
+          </a>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-10 text-center">
+  <p class="text-sm text-zinc-400">Nothing unmarked — every eligible step matching these filters has human accuracy feedback.</p>
+</div>
+{% endif %}
+
+{% endblock %}
