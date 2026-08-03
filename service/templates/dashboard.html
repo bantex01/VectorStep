@@ -61,6 +61,77 @@
 
 </div>
 
+<!-- Backends / MCP servers / Models configured -->
+<div class="grid grid-cols-3 gap-6 mb-6">
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <h2 class="text-sm font-semibold text-zinc-200 mb-4">Backends</h2>
+    <div class="space-y-3">
+      {% for b in backends %}
+      <div>
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full shrink-0 {{ 'bg-green-500' if b.online else 'bg-red-500' }}"></div>
+          <span class="text-sm font-medium text-zinc-100">{{ b.name }}</span>
+          <span class="text-xs {{ 'text-green-400' if b.online else 'text-red-400' }}">{{ 'online' if b.online else 'offline' }}</span>
+        </div>
+        <p class="mt-0.5 ml-4 text-xs text-zinc-500 truncate" {% if not b.online %}title="{{ b.error }}"{% endif %}>
+          {% if b.online %}{{ b.agent_count }} agent{% if b.agent_count != 1 %}s{% endif %}{% else %}{{ b.error }}{% endif %}
+        </p>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-sm font-semibold text-zinc-200">MCP servers</h2>
+      <a href="/ui/mcp" class="text-xs text-indigo-400 hover:text-indigo-300">View all →</a>
+    </div>
+    {% if mcp_error %}
+      <p class="text-sm text-zinc-500">{{ mcp_error }}</p>
+    {% elif mcp_server_rows %}
+      <p class="text-xs text-zinc-500 mb-3">{{ mcp_running_count }}/{{ mcp_server_rows | length }} running</p>
+      <div class="space-y-2">
+        {% for s in mcp_server_rows %}
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full shrink-0 {{ 'bg-green-500' if s.running else 'bg-red-500' }}"></div>
+          <span class="text-sm text-zinc-200 font-mono truncate">{{ s.name }}</span>
+          {% if s.restart_count %}
+          <span class="text-xs text-amber-400 ml-auto shrink-0">{{ s.restart_count }} restart{% if s.restart_count != 1 %}s{% endif %}</span>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="text-sm text-zinc-500">No MCP servers configured.</p>
+    {% endif %}
+  </div>
+
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-sm font-semibold text-zinc-200">Models configured</h2>
+      <span class="text-xs text-zinc-500">{{ total_model_count }} total</span>
+    </div>
+    {% if models_configured %}
+      <div class="space-y-3">
+        {% for group in models_configured %}
+        <div>
+          <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide mb-1">{{ group.provider }}</p>
+          <div class="flex flex-wrap gap-1">
+            {% for m in group.models %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 font-mono">{{ m.name }}<span class="text-zinc-600 ml-1">×{{ m.agent_count }}</span></span>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="text-sm text-zinc-500">No agents configured.</p>
+    {% endif %}
+  </div>
+
+</div>
+
 <!-- Status breakdown + Runs timeseries -->
 <div class="grid grid-cols-3 gap-6 mb-6">
 

@@ -736,6 +736,8 @@ async def ui_dashboard(request: Request):
     cutoff_24h = utc_now() - timedelta(hours=24)
     cutoff_7d  = utc_now() - timedelta(days=7)
 
+    status_panels = await _dashboard_status_panels()
+
     async with sf() as session:
         rows = await session.execute(_production_only(
             select(PipelineRun.status, func.count().label("n"))
@@ -917,6 +919,7 @@ async def ui_dashboard(request: Request):
         "top_agents": top_agents,
         "top_tools": top_tools,
         "active_page": "dashboard",
+        **status_panels,
     })
 
 
@@ -3927,6 +3930,73 @@ async def _fetch_pork_gateway_mcp() -> tuple[dict, dict, str | None]:
     except Exception as exc:
         logger.debug("P-Ork Gateway MCP endpoints failed: %s", exc)
         return {}, {}, f"Could not reach P-Ork Gateway at {_pork_gateway_base} — is it running?"
+
+
+async def _dashboard_status_panels() -> dict:
+    """Backend/MCP/model status for the dashboard's status panels.
+
+    Deliberately reuses the same reachability checks as /ui/agents and /ui/mcp rather
+    than a fabricated per-provider (Anthropic/OpenRouter/...) health dot — P-Ork never
+    calls providers directly, so "online" here means "the Gateway that talks to them
+    responded," which is the only thing this service can honestly claim to know.
+    """
+    (gw_agents, gw_error), (oc_agents, oc_error), (mcp_tools, mcp_servers, mcp_error) = await asyncio.gather(
+        _fetch_pork_gateway_agents(),
+        _fetch_openclaw_agents(),
+        _fetch_pork_gateway_mcp(),
+    )
+
+    backends = [{
+        "name": "P-Ork Gateway",
+        "online": gw_error is None,
+        "agent_count": len(gw_agents),
+        "error": gw_error,
+    }]
+    if _openclaw_enabled:
+        backends.append({
+            "name": "OpenClaw",
+            "online": oc_error is None,
+            "agent_count": len(oc_agents),
+            "error": oc_error,
+        })
+
+    mcp_server_rows = [
+        {
+            "name": name,
+            "running": (mcp_servers.get(name) or {}).get("running"),
+            "restart_count": (mcp_servers.get(name) or {}).get("restart_count", 0),
+        }
+        for name in sorted(set(mcp_tools) | set(mcp_servers))
+    ]
+    mcp_running_count = sum(1 for s in mcp_server_rows if s["running"])
+
+    # "Configured" = each agent's live primary model, not its failover fallbacks —
+    # fallbacks only ever run when the primary fails, so folding them in here would
+    # overstate what's actually driving day-to-day traffic.
+    models_by_provider: dict[str, Counter] = defaultdict(Counter)
+    for a in gw_agents + oc_agents:
+        model = a.get("model")
+        if not model:
+            continue
+        provider, sep, bare = model.partition("/")
+        if not sep:
+            provider, bare = "unspecified", model
+        models_by_provider[provider][bare] += 1
+
+    models_configured = [
+        {"provider": provider, "models": [{"name": m, "agent_count": n} for m, n in counter.most_common()]}
+        for provider, counter in sorted(models_by_provider.items())
+    ]
+    total_model_count = sum(len(counter) for counter in models_by_provider.values())
+
+    return {
+        "backends": backends,
+        "mcp_server_rows": mcp_server_rows,
+        "mcp_running_count": mcp_running_count,
+        "mcp_error": mcp_error,
+        "models_configured": models_configured,
+        "total_model_count": total_model_count,
+    }
 
 
 async def _fetch_openclaw_agent_files(agent_id: str) -> dict[str, str | None]:
