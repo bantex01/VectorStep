@@ -280,7 +280,7 @@
       {% else %}
         <div class="ml-auto"></div>
       {% endif %}
-      {% if item.pretty or item.trace %}
+      {% if item.pretty or item.trace or item.agent_snapshot %}
         <button @click="open = !open" class="text-xs text-zinc-500 hover:text-zinc-300 shrink-0">
           <svg class="w-4 h-4 transition-transform" :class="open ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
@@ -288,12 +288,15 @@
         </button>
       {% endif %}
     </div>
-    {% if item.pretty or item.trace %}
+    {% if item.pretty or item.trace or item.agent_snapshot %}
     <div x-show="open" x-cloak class="border-t border-zinc-800 divide-y divide-zinc-800">
       {% if item.pretty %}
       <div class="px-4 py-3">
         <pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.pretty }}</pre>
       </div>
+      {% endif %}
+      {% if item.agent_snapshot %}
+      {{ macros.agent_snapshot_panel(item) }}
       {% endif %}
       {% if run.status not in ('running', 'interrupted') and item.step.status != 'running' %}
       {% include "_step_feedback_widget.html" %}
@@ -365,7 +368,7 @@
         </button>
       {% endif %}
 
-      {% if item.pretty or item.verifier_pretty or item.trace %}
+      {% if item.pretty or item.verifier_pretty or item.trace or item.agent_snapshot %}
         <button @click="open = !open" class="text-xs text-zinc-500 hover:text-zinc-300 shrink-0 ml-1">
           <svg class="w-4 h-4 transition-transform" :class="open ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
@@ -405,7 +408,7 @@
       </div>
     </div>
 
-    {% if item.pretty or item.verifier_pretty or item.trace %}
+    {% if item.pretty or item.verifier_pretty or item.trace or item.agent_snapshot %}
     <div x-show="open" x-cloak class="border-t border-zinc-800 divide-y divide-zinc-800">
       {% if item.step.prompt and not item.step.prompt.startswith('{') %}
       <div x-data="{ prompt_open: false }" class="px-4 py-3">
@@ -439,6 +442,9 @@
           <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ item.step.prompt }}</pre>
         </div>
       </div>
+      {% endif %}
+      {% if item.agent_snapshot %}
+      {{ macros.agent_snapshot_panel(item) }}
       {% endif %}
       {% if item.pretty %}
       <div class="px-4 py-4">

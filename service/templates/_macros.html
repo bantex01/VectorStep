@@ -6,6 +6,54 @@
 {%- endif %}
 {%- endmacro %}
 
+{% macro agent_snapshot_panel(item) -%}
+{# Agent soul.md / agent.yaml as they existed when this step ran — lets an
+   operator trace *why* an agent behaved a certain way without leaving the run.
+   `item.agent_snapshot` is an AgentVersionSnapshot row (or None) attached by
+   ui.py's ui_run_detail keyed on item.step.agent_version. #}
+<div x-data="{ soul_open: false, config_open: false }" class="px-4 py-3">
+  <div class="flex items-center gap-3 flex-wrap">
+    {% if item.agent_snapshot.soul_md %}
+    <button @click="soul_open = !soul_open" type="button"
+            class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
+      <svg class="w-3.5 h-3.5 transition-transform" :class="soul_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+      </svg>
+      <span class="uppercase tracking-wide font-medium">Agent soul</span>
+      <span class="text-zinc-600 normal-case">— soul.md as of this run</span>
+    </button>
+    {% endif %}
+    {% if item.agent_snapshot.agent_yaml %}
+    <button @click="config_open = !config_open" type="button"
+            class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
+      <svg class="w-3.5 h-3.5 transition-transform" :class="config_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+      </svg>
+      <span class="uppercase tracking-wide font-medium">Agent config</span>
+      <span class="text-zinc-600 normal-case">— agent.yaml as of this run</span>
+    </button>
+    {% endif %}
+    {% if item.step.agent_version %}
+    <a href="/ui/agents/gateway/{{ (item.step.agent or '').split(':', 1)[-1] }}#agent-versions"
+       class="ml-auto text-[10px] text-zinc-600 hover:text-indigo-400 shrink-0">full version history →</a>
+    {% endif %}
+  </div>
+  {% if not item.agent_snapshot.soul_md and not item.agent_snapshot.agent_yaml %}
+  <p class="text-xs text-zinc-600 mt-1">{{ item.agent_snapshot.note or 'No config text captured for this agent version.' }}</p>
+  {% endif %}
+  {% if item.agent_snapshot.soul_md %}
+  <div x-show="soul_open" x-cloak class="mt-3">
+    <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed p-3 rounded bg-zinc-950 border border-zinc-800 max-h-96 overflow-y-auto">{{ item.agent_snapshot.soul_md }}</pre>
+  </div>
+  {% endif %}
+  {% if item.agent_snapshot.agent_yaml %}
+  <div x-show="config_open" x-cloak class="mt-3">
+    <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed p-3 rounded bg-zinc-950 border border-zinc-800 max-h-96 overflow-y-auto">{{ item.agent_snapshot.agent_yaml }}</pre>
+  </div>
+  {% endif %}
+</div>
+{%- endmacro %}
+
 {% macro feedback_badge(outcome) -%}
 {% if outcome == "correct" %}
 <span class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-green-950 text-green-400 ring-1 ring-inset ring-green-800 text-xs leading-none" title="Marked correct">✓</span>

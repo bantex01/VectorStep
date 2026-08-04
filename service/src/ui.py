@@ -19,7 +19,7 @@ from sqlalchemy.orm import selectinload
 from .analytics import ALL_STEP_STATUSES, _pipeline_rollup, _production_only, _step_rollup, _time_range_cutoff
 from .analytics import get_agent_versions as _get_agent_versions
 from .db.database import get_session_factory
-from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
+from .db.models import AgentVersionSnapshot, PipelineRun, PipelineStep, RunFeedback, StepFeedback
 from .executors.human import pending_count as _pending_approval_count
 from .gateway import gateway_call_safe
 from .models.pipeline import FanOutGroupConfig, ParallelGroupConfig, PipelineConfig
@@ -1149,6 +1149,27 @@ async def ui_run_detail(request: Request, run_id: str):
                         "verifier_pretty": verifier_pretty, "verifier_label": verifier_label,
                         "trace": trace,
                     })
+
+    # Attach each step's agent-version snapshot (soul.md / agent.yaml as they existed
+    # at run time) so the run detail page can show *why* the agent behaved as it did
+    # without navigating away to the agent's version history.
+    agent_versions_needed = {
+        item["step"].agent_version
+        for item in (*display_items, *rerun_prior_items)
+        if item.get("step") is not None and item["step"].agent_version
+    }
+    agent_snapshot_by_version: dict[str, AgentVersionSnapshot] = {}
+    if agent_versions_needed:
+        async with sf() as session:
+            snap_rows = await session.execute(
+                select(AgentVersionSnapshot)
+                .where(AgentVersionSnapshot.agent_version.in_(agent_versions_needed))
+            )
+            agent_snapshot_by_version = {s.agent_version: s for s in snap_rows.scalars().all()}
+    for item in (*display_items, *rerun_prior_items):
+        step = item.get("step")
+        if step is not None and step.agent_version:
+            item["agent_snapshot"] = agent_snapshot_by_version.get(step.agent_version)
 
     feedback = None
     async with sf() as session:

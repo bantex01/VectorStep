@@ -214,6 +214,68 @@ async def test_run_detail_renders_with_bucket_reset(db, client):
     assert "reset" in resp.text.lower()
 
 
+async def test_run_detail_shows_agent_soul_and_config_for_step(db, client):
+    """The Trust panel's agent chip only links out to the agent's full version
+    history — an operator tracing a specific step's behaviour needs the soul.md
+    and agent.yaml that were actually in effect right there in the run, without
+    navigating away."""
+    sf = get_session_factory()
+    async with sf() as session:
+        session.add(PipelineRun(
+            id="run-2", pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}", stage="production",
+            triggered_at=datetime(2026, 1, 1),
+        ))
+        session.add(PipelineStep(
+            id="step-b", run_id="run-2", step_name="investigate", step_index=0, executor="gateway",
+            agent="gateway:sre-triage", model="claude-sonnet-5", provider="anthropic",
+            prompt="Investigate this.", status="completed", executed_at=datetime(2026, 1, 1),
+            agent_version="91f02ab3c7de",
+            parsed_output=__import__("json").dumps({"confidence": 0.9, "summary": "ok"}),
+        ))
+        session.add(AgentVersionSnapshot(
+            agent_version="91f02ab3c7de", agent="gateway:sre-triage",
+            soul_md="You are an SRE triage agent. Escalate anything ambiguous.",
+            agent_yaml="name: sre-triage\nmodel: claude-sonnet-5\n",
+        ))
+        await session.commit()
+
+    resp = await client.get("/ui/runs/run-2")
+
+    assert resp.status_code == 200
+    assert "Agent soul" in resp.text
+    assert "Agent config" in resp.text
+    assert "Escalate anything ambiguous" in resp.text
+    assert "name: sre-triage" in resp.text
+
+
+async def test_run_detail_omits_agent_snapshot_panel_without_snapshot(db, client):
+    """No AgentVersionSnapshot row for this agent_version (e.g. Gateway was
+    unreachable at snapshot time) — the panel must not render at all rather
+    than showing empty/undefined content."""
+    sf = get_session_factory()
+    async with sf() as session:
+        session.add(PipelineRun(
+            id="run-3", pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}", stage="production",
+            triggered_at=datetime(2026, 1, 1),
+        ))
+        session.add(PipelineStep(
+            id="step-c", run_id="run-3", step_name="investigate", step_index=0, executor="gateway",
+            agent="gateway:sre-triage", model="claude-sonnet-5", provider="anthropic",
+            prompt="Investigate this.", status="completed", executed_at=datetime(2026, 1, 1),
+            agent_version="unseen-version",
+            parsed_output=__import__("json").dumps({"confidence": 0.9, "summary": "ok"}),
+        ))
+        await session.commit()
+
+    resp = await client.get("/ui/runs/run-3")
+
+    assert resp.status_code == 200
+    assert "Agent soul" not in resp.text
+    assert "Agent config" not in resp.text
+
+
 async def test_agent_detail_renders_with_agent_versions(db, client):
     sf = get_session_factory()
     async with sf() as session:
