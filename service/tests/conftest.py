@@ -9,6 +9,14 @@ import os
 import sys
 from unittest.mock import MagicMock
 
+# TestClient(app) runs the real FastAPI lifespan, which loads config.yaml —
+# gitignored (host-owned, never committed), so give tests a fixture config
+# instead. setdefault: an explicitly-set CONFIG_PATH (e.g. a dev override) wins.
+os.environ.setdefault(
+    "CONFIG_PATH",
+    os.path.join(os.path.dirname(__file__), "fixtures", "test_config.yaml"),
+)
+
 for _mod in [
     "cryptography",
     "cryptography.hazmat",

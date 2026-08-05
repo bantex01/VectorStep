@@ -1,0 +1,7 @@
+# Minimal config for the test suite. TestClient(app) runs the real FastAPI
+# lifespan (see conftest.py CONFIG_PATH), so this must be valid YAML the
+# startup path can load — every key it reads uses .get() with a safe default,
+# so intentionally sparse. No executors/pricing/live-pricing configured: keeps
+# tests free of network calls and scheduled jobs.
+database:
+  url: sqlite+aiosqlite:///./runs.db
