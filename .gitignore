@@ -53,6 +53,10 @@ htmlcov/
 
 alertmanager/
 service/config.yaml
+/config.yaml
 service/steps/
 runs.db
 service/runs.db
+
+# Pipelines are host-owned runtime config, not distributable examples
+service/pipelines/
