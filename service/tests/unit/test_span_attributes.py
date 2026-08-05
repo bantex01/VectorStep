@@ -37,7 +37,7 @@ class TestPromptHashAttribute:
 
         runner._set_step_span_attributes(span, result, prompt_template=template)
 
-        span.set_attribute.assert_any_call("pork.prompt_hash", prompt_hash(template))
+        span.set_attribute.assert_any_call("vectorstep.prompt_hash", prompt_hash(template))
 
     def test_no_prompt_hash_attribute_when_template_not_passed(self):
         """Parallel groups pass no template — each branch has its own distinct
@@ -49,7 +49,7 @@ class TestPromptHashAttribute:
         runner._set_step_span_attributes(span, result)
 
         calls = [c.args[0] for c in span.set_attribute.call_args_list]
-        assert "pork.prompt_hash" not in calls
+        assert "vectorstep.prompt_hash" not in calls
 
     def test_no_prompt_hash_attribute_for_empty_template(self):
         """Non-LLM steps (webhook/notify/human) have no real prompt_template —
@@ -62,7 +62,7 @@ class TestPromptHashAttribute:
         runner._set_step_span_attributes(span, result, prompt_template="")
 
         calls = [c.args[0] for c in span.set_attribute.call_args_list]
-        assert "pork.prompt_hash" not in calls
+        assert "vectorstep.prompt_hash" not in calls
 
     def test_fan_out_group_template_produces_same_hash_as_a_branch_with_it(self):
         """Sanity check that this is the exact same hashing function used
@@ -75,7 +75,7 @@ class TestPromptHashAttribute:
 
         runner._set_step_span_attributes(span, result, prompt_template=template)
 
-        span.set_attribute.assert_any_call("pork.prompt_hash", prompt_hash(template))
+        span.set_attribute.assert_any_call("vectorstep.prompt_hash", prompt_hash(template))
 
 
 class TestAgentVersionAttribute:
@@ -86,7 +86,7 @@ class TestAgentVersionAttribute:
 
         runner._set_step_span_attributes(span, result)
 
-        span.set_attribute.assert_any_call("pork.agent_version", "91f02ab3c7de")
+        span.set_attribute.assert_any_call("vectorstep.agent_version", "91f02ab3c7de")
 
     def test_no_agent_version_attribute_when_none(self):
         runner = _make_runner()
@@ -96,7 +96,7 @@ class TestAgentVersionAttribute:
         runner._set_step_span_attributes(span, result)
 
         calls = [c.args[0] for c in span.set_attribute.call_args_list]
-        assert "pork.agent_version" not in calls
+        assert "vectorstep.agent_version" not in calls
 
     def test_no_agent_version_attribute_when_no_output_at_all(self):
         runner = _make_runner()
@@ -106,5 +106,5 @@ class TestAgentVersionAttribute:
         runner._set_step_span_attributes(span, result)
 
         calls = [c.args[0] for c in span.set_attribute.call_args_list]
-        assert "pork.agent_version" not in calls
-        assert "pork.prompt_hash" not in calls
+        assert "vectorstep.agent_version" not in calls
+        assert "vectorstep.prompt_hash" not in calls

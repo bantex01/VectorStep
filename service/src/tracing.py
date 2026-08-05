@@ -17,9 +17,9 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExport
 
 logger = logging.getLogger(__name__)
 
-tracer = trace.get_tracer("pork")
+tracer = trace.get_tracer("vectorstep")
 
-_DEFAULT_SERVICE_NAME = "pork-service"
+_DEFAULT_SERVICE_NAME = "vectorstep-service"
 _DEFAULT_OTLP_ENDPOINT = "http://localhost:4318/v1/traces"
 
 _PRIMITIVE_TYPES = (str, int, float, bool)
@@ -97,14 +97,14 @@ def gen_ai_attrs_from_meta(meta: dict) -> dict:
         attrs["gen_ai.response.model"] = model
     duration_ms = meta.get("durationMs")
     if duration_ms is not None:
-        attrs["pork.gateway.duration_ms"] = duration_ms
+        attrs["vectorstep.gateway.duration_ms"] = duration_ms
     return attrs
 
 
 def inject_traceparent(params: dict) -> dict:
     """Inject the current trace context (traceparent/tracestate) into an outbound params dict.
 
-    Forward-compatible with a future P-Ork Gateway that adds its own OTel spans —
+    Forward-compatible with a future VectorStep Gateway that adds its own OTel spans —
     ignored by the current gateway, which passes unknown params through untouched.
     """
     propagate.inject(params)

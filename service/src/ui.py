@@ -3374,7 +3374,7 @@ async def ui_pipeline_detail(request: Request, name: str):
     live_by_key: dict[str, dict] = {}
     if agents_grouped:
         (oc_agents, _), (gw_agents, _) = await asyncio.gather(
-            _fetch_openclaw_agents(), _fetch_pork_gateway_agents(),
+            _fetch_openclaw_agents(), _fetch_vectorstep_gateway_agents(),
         )
         for a in oc_agents:
             live_by_key[f"openclaw:{a.get('id') or a.get('name')}"] = a
@@ -3874,20 +3874,20 @@ async def ui_steps(request: Request, tag: str | None = None):
 
 # Per-executor URLs — overridden at startup by configure() called from main.py lifespan.
 # Defaults allow the service to start without config and fall back gracefully.
-_pork_gateway_base: str = os.environ.get("PORK_GATEWAY_URL", "http://localhost:18780")
+_vectorstep_gateway_base: str = os.environ.get("VECTORSTEP_GATEWAY_URL", "http://localhost:18780")
 _openclaw_ws_url: str = "ws://127.0.0.1:18789/rpc"
 _openclaw_enabled: bool = True  # set False when executors.openclaw is absent from config
 _team_count: int = 0  # number of teams configured under auth.teams — see README §3b
 
 
-def configure(openclaw_ws_url: str = "", pork_gateway_base: str = "", team_count: int = 0) -> None:
+def configure(openclaw_ws_url: str = "", vectorstep_gateway_base: str = "", team_count: int = 0) -> None:
     """Set agent source URLs and team count from config.yaml values. Call from main.py lifespan."""
-    global _openclaw_ws_url, _pork_gateway_base, _openclaw_enabled, _team_count
+    global _openclaw_ws_url, _vectorstep_gateway_base, _openclaw_enabled, _team_count
     _openclaw_enabled = bool(openclaw_ws_url)
     if openclaw_ws_url:
         _openclaw_ws_url = openclaw_ws_url
-    if pork_gateway_base:
-        _pork_gateway_base = pork_gateway_base
+    if vectorstep_gateway_base:
+        _vectorstep_gateway_base = vectorstep_gateway_base
     _team_count = team_count
 
 
@@ -3921,20 +3921,20 @@ async def _fetch_openclaw_agents() -> tuple[list[dict], str | None]:
     return result.get("agents") or [], None
 
 
-async def _fetch_pork_gateway_agents() -> tuple[list[dict], str | None]:
-    """Fetch agents list from the P-Ork Gateway REST /agents endpoint."""
+async def _fetch_vectorstep_gateway_agents() -> tuple[list[dict], str | None]:
+    """Fetch agents list from the VectorStep Gateway REST /agents endpoint."""
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{_pork_gateway_base}/agents")
+            resp = await client.get(f"{_vectorstep_gateway_base}/agents")
             resp.raise_for_status()
             return resp.json().get("agents", []), None
     except Exception as exc:
-        logger.debug("P-Ork Gateway /agents failed: %s", exc)
-        return [], f"Could not reach P-Ork Gateway at {_pork_gateway_base} — is it running?"
+        logger.debug("VectorStep Gateway /agents failed: %s", exc)
+        return [], f"Could not reach VectorStep Gateway at {_vectorstep_gateway_base} — is it running?"
 
 
-async def _fetch_pork_gateway_mcp() -> tuple[dict, dict, str | None]:
-    """Fetch the MCP tool registry + server status from the P-Ork Gateway REST API.
+async def _fetch_vectorstep_gateway_mcp() -> tuple[dict, dict, str | None]:
+    """Fetch the MCP tool registry + server status from the VectorStep Gateway REST API.
 
     GET /mcp/tools returns {server_name: [{name, registeredName, description, inputSchema}, ...]}
     GET /mcp/servers returns {server_name: {running, pid, restart_count}}
@@ -3942,33 +3942,33 @@ async def _fetch_pork_gateway_mcp() -> tuple[dict, dict, str | None]:
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             tools_resp, servers_resp = await asyncio.gather(
-                client.get(f"{_pork_gateway_base}/mcp/tools"),
-                client.get(f"{_pork_gateway_base}/mcp/servers"),
+                client.get(f"{_vectorstep_gateway_base}/mcp/tools"),
+                client.get(f"{_vectorstep_gateway_base}/mcp/servers"),
             )
             tools_resp.raise_for_status()
             servers_resp.raise_for_status()
             return tools_resp.json(), servers_resp.json(), None
     except Exception as exc:
-        logger.debug("P-Ork Gateway MCP endpoints failed: %s", exc)
-        return {}, {}, f"Could not reach P-Ork Gateway at {_pork_gateway_base} — is it running?"
+        logger.debug("VectorStep Gateway MCP endpoints failed: %s", exc)
+        return {}, {}, f"Could not reach VectorStep Gateway at {_vectorstep_gateway_base} — is it running?"
 
 
 async def _dashboard_status_panels() -> dict:
     """Backend/MCP/model status for the dashboard's status panels.
 
     Deliberately reuses the same reachability checks as /ui/agents and /ui/mcp rather
-    than a fabricated per-provider (Anthropic/OpenRouter/...) health dot — P-Ork never
+    than a fabricated per-provider (Anthropic/OpenRouter/...) health dot — VectorStep never
     calls providers directly, so "online" here means "the Gateway that talks to them
     responded," which is the only thing this service can honestly claim to know.
     """
     (gw_agents, gw_error), (oc_agents, oc_error), (mcp_tools, mcp_servers, mcp_error) = await asyncio.gather(
-        _fetch_pork_gateway_agents(),
+        _fetch_vectorstep_gateway_agents(),
         _fetch_openclaw_agents(),
-        _fetch_pork_gateway_mcp(),
+        _fetch_vectorstep_gateway_mcp(),
     )
 
     backends = [{
-        "name": "P-Ork Gateway",
+        "name": "VectorStep Gateway",
         "online": gw_error is None,
         "agent_count": len(gw_agents),
         "error": gw_error,
@@ -4037,14 +4037,14 @@ async def _fetch_openclaw_agent_files(agent_id: str) -> dict[str, str | None]:
     }
 
 
-async def _fetch_pork_gateway_agent_files(agent_id: str) -> dict[str, str | None]:
-    """Fetch soul and agent.yaml from the P-Ork Gateway REST API."""
+async def _fetch_vectorstep_gateway_agent_files(agent_id: str) -> dict[str, str | None]:
+    """Fetch soul and agent.yaml from the VectorStep Gateway REST API."""
     result: dict[str, str | None] = {"soul": None, "tools": None, "identity": None, "agent_file": None}
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             soul_resp, agent_resp = await asyncio.gather(
-                client.get(f"{_pork_gateway_base}/agents/{agent_id}/soul"),
-                client.get(f"{_pork_gateway_base}/agents/{agent_id}/agent"),
+                client.get(f"{_vectorstep_gateway_base}/agents/{agent_id}/soul"),
+                client.get(f"{_vectorstep_gateway_base}/agents/{agent_id}/agent"),
             )
             if soul_resp.status_code == 200:
                 result["soul"] = soul_resp.json().get("content") or soul_resp.text
@@ -4062,7 +4062,7 @@ async def ui_agents(request: Request, executor: str | None = None, model: str | 
     # Fetch from both backends concurrently
     (oc_agents, oc_error), (gw_agents, gw_error) = await asyncio.gather(
         _fetch_openclaw_agents(),
-        _fetch_pork_gateway_agents(),
+        _fetch_vectorstep_gateway_agents(),
     )
 
     # Tag every entry with its executor source so the template and URL routing
@@ -4095,7 +4095,7 @@ async def ui_agents(request: Request, executor: str | None = None, model: str | 
         async def _fetch_gw_soul(agent_id: str) -> str | None:
             try:
                 async with httpx.AsyncClient(timeout=5) as client:
-                    resp = await client.get(f"{_pork_gateway_base}/agents/{agent_id}/soul")
+                    resp = await client.get(f"{_vectorstep_gateway_base}/agents/{agent_id}/soul")
                     if resp.status_code == 200:
                         return resp.json().get("content") or resp.text
             except Exception:
@@ -4259,8 +4259,8 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
         agents_raw, _ = await _fetch_openclaw_agents()
         agent_files = await _fetch_openclaw_agent_files(agent_id)
     else:  # gateway (or any future executor with REST discovery)
-        agents_raw, _ = await _fetch_pork_gateway_agents()
-        agent_files = await _fetch_pork_gateway_agent_files(agent_id)
+        agents_raw, _ = await _fetch_vectorstep_gateway_agents()
+        agent_files = await _fetch_vectorstep_gateway_agent_files(agent_id)
 
     agent_config = next(
         (a for a in agents_raw if a.get("name") == agent_id or a.get("id") == agent_id),
@@ -4429,7 +4429,7 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
         "ago": _format_ago(r.executed_at),
     } for r in recent_rows]
 
-    # Version history is only meaningful for gateway agents — P-Ork has no
+    # Version history is only meaningful for gateway agents — VectorStep has no
     # equivalent content-hash mechanism for openclaw (SPEC-prompt-versioning.md §6d).
     agent_versions = await _get_agent_versions(sf, agent_id) if executor == "gateway" else []
 
@@ -4455,13 +4455,13 @@ async def ui_agent_detail(request: Request, executor: str, agent_id: str):
 
 @router.get("/mcp", response_class=HTMLResponse)
 async def ui_mcp(request: Request):
-    """Browse the MCP tool registry exposed by the P-Ork Gateway.
+    """Browse the MCP tool registry exposed by the VectorStep Gateway.
 
     OpenClaw isn't included here — it has no REST endpoint for tool
     introspection (the gateway executor is the only one that exposes
     GET /mcp/tools and GET /mcp/servers).
     """
-    tools_by_server, servers_status, error = await _fetch_pork_gateway_mcp()
+    tools_by_server, servers_status, error = await _fetch_vectorstep_gateway_mcp()
 
     servers = []
     for name in sorted(set(tools_by_server) | set(servers_status)):

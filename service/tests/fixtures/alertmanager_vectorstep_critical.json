@@ -10,12 +10,12 @@
   "commonLabels": {
     "alertname": "HighErrorRate",
     "environment": "prod",
-    "service": "pork",
+    "service": "vectorstep",
     "severity": "critical"
   },
   "commonAnnotations": {
-    "summary": "Error rate for pork exceeded 5% for 5 minutes",
-    "description": "The pork service in prod is returning errors at 7.3%, breaching the 5% SLO threshold."
+    "summary": "Error rate for vectorstep exceeded 5% for 5 minutes",
+    "description": "The vectorstep service in prod is returning errors at 7.3%, breaching the 5% SLO threshold."
   },
   "externalURL": "http://alertmanager:9093",
   "alerts": [
@@ -24,13 +24,13 @@
       "labels": {
         "alertname": "HighErrorRate",
         "environment": "prod",
-        "service": "pork",
+        "service": "vectorstep",
         "severity": "critical",
-        "pipeline": "pork-triage-test"
+        "pipeline": "vectorstep-triage-test"
       },
       "annotations": {
-        "summary": "Error rate for pork exceeded 5% for 5 minutes",
-        "description": "The pork service in prod is returning errors at 7.3%, breaching the 5% SLO threshold."
+        "summary": "Error rate for vectorstep exceeded 5% for 5 minutes",
+        "description": "The vectorstep service in prod is returning errors at 7.3%, breaching the 5% SLO threshold."
       },
       "startsAt": "2026-04-16T10:00:00Z",
       "endsAt": "0001-01-01T00:00:00Z",

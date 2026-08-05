@@ -1,4 +1,4 @@
-# P-Ork Orchestration Service
+# VectorStep Orchestration Service
 
 ## Project Overview
 
@@ -12,7 +12,7 @@ The service is designed to be:
 
 Primary use case is observability automation (alert triage, Grafana investigation, bounded remediation) but the design is intentionally general purpose.
 
-> **Authoring/inspecting pipelines from an MCP client?** See [§15e](#15e-the-p-ork-service-mcp) — the companion **P-Ork Service MCP** (a separate repo) exposes pipeline/step authoring, run inspection, and operational + judged-accuracy analytics as MCP tools for Claude Code/Desktop, over this service's JSON API (§15c/§15d).
+> **Authoring/inspecting pipelines from an MCP client?** See [§15e](#15e-the-vectorstep-service-mcp) — the companion **VectorStep Service MCP** (a separate repo) exposes pipeline/step authoring, run inspection, and operational + judged-accuracy analytics as MCP tools for Claude Code/Desktop, over this service's JSON API (§15c/§15d).
 
 > **New to the trust vector (S/V/G/D) and calibration?** See [`CONFIDENCE-EXPLAINED.md`](CONFIDENCE-EXPLAINED.md) for a plain-language walkthrough of how confidence is derived and every knob that affects it, before diving into the technical reference below ("Verifier Trigger Configuration", "Grounding (shadow mode)", "Deterministic checks & enforced grounding", "Calibration").
 
@@ -25,7 +25,7 @@ Primary use case is observability automation (alert triage, Grafana investigatio
 - **Pydantic v2** — normalised context schema, pipeline config models, LLM output validation
 - **SQLAlchemy (async)** — pipeline run storage; SQLite (`aiosqlite`) for zero-infra local dev, PostgreSQL (`asyncpg`) recommended for production — see §Database below
 - **httpx** — async HTTP client for webhook executor and notification delivery
-- **websockets** — async WebSocket client for OpenClaw and P-Ork Gateway executors
+- **websockets** — async WebSocket client for OpenClaw and VectorStep Gateway executors
 - **Jinja2** — prompt template rendering (`{{variable}}` syntax in YAML configs) and HTML UI templates
 - **PyYAML** — pipeline config loading
 - **APScheduler 3.x** — in-process cron scheduler for time-triggered pipeline runs
@@ -79,7 +79,7 @@ service/
 │   │   ├── base.py             # BaseExecutor abstract class
 │   │   ├── openclaw_ws.py      # OpenClaw executor — Gateway WebSocket API (Ed25519 auth)
 │   │   ├── openclaw.py         # OpenClaw executor — CLI subprocess (legacy, not registered)
-│   │   │   ├── gateway.py          # P-Ork Gateway executor — WebSocket API (token auth)
+│   │   │   ├── gateway.py          # VectorStep Gateway executor — WebSocket API (token auth)
 │   │   ├── human.py            # Human-in-the-loop executor (Telegram/Slack/Teams, per-team routing)
 │   │   ├── pipeline.py         # Sub-pipeline executor — calls another pipeline by name
 │   │   └── webhook.py          # Webhook output executor (HTTP POST)
@@ -221,7 +221,7 @@ Each parser populates `NormalisedContext.fingerprint` — the dedup key:
 
 #### Dedup check
 
-On `POST /webhook`, after the pipeline is resolved and before a run is started, P-Ork
+On `POST /webhook`, after the pipeline is resolved and before a run is started, VectorStep
 looks for an existing `pipeline_runs` row with the same `pipeline_name` + `fingerprint`:
 
 - **In-flight** (`status="running"`) — **always** suppressed, regardless of config. This
@@ -286,7 +286,7 @@ never duplicated, only that one run_id is left unrealized.
 ### 3b. Team Attribution
 
 To show LLM token spend broken down by owning team/department, every run is
-tagged with a `team` — used for the `pork_pipeline_tokens_total` metric (§15a)
+tagged with a `team` — used for the `vectorstep_pipeline_tokens_total` metric (§15a)
 and the `GET /runs?team=` filter (§15).
 
 **Team comes from the Bearer token that authenticated the webhook, not from a
@@ -301,10 +301,10 @@ token" — a natural gate.
 auth:
   teams:
     - name: payments
-      token: ${PORK_WEBHOOK_TOKEN_PAYMENTS}
+      token: ${VECTORSTEP_WEBHOOK_TOKEN_PAYMENTS}
     - name: platform
-      token: ${PORK_WEBHOOK_TOKEN_PLATFORM}
-  # token: ${PORK_WEBHOOK_TOKEN}   # legacy single-token form, still supported
+      token: ${VECTORSTEP_WEBHOOK_TOKEN_PLATFORM}
+  # token: ${VECTORSTEP_WEBHOOK_TOKEN}   # legacy single-token form, still supported
 ```
 
 Generate each team's token with `openssl rand -hex 24` (or any other source of
@@ -349,7 +349,7 @@ steps will undercount regardless of this feature.
 
 Every pipeline has a `stage: testing | production` field. `testing` is the
 **default** — an unmarked or newly-authored pipeline is fully executable and
-fully observable inside P-Ork's own UI, but inert to the outside world and
+fully observable inside VectorStep's own UI, but inert to the outside world and
 excluded from every aggregate metric. `production` is today's pre-existing
 behaviour. Promotion is a one-line YAML diff, reviewed in git like any other
 config change, applied with `POST /reload`/SIGHUP — **there is no UI toggle**,
@@ -376,7 +376,7 @@ have happened instead of silently doing nothing:
 | `notifications:` block (§9a) | Forced to the `log` channel regardless of configured channel; run log gets a `notification_suppressed_testing` event instead of `notification_sent`. |
 | `executor: notify` (§10c) | The HTTP call is skipped; the rendered body is logged and the step returns a synthetic success (`confidence=1.0`, `raw_response.suppressed_testing=true`) so downstream steps still run. |
 | Step-level `on_failure.webhook` (§10b) | Skipped entirely; a `step_failure_webhook_suppressed_testing` run-log event records the URL that would have been called. |
-| `executor: human` (§9 "human") | The external channel (Telegram/Slack/Teams) is **not** sent — but the approval is still registered in P-Ork's own UI (`/ui/approvals` and the run-detail banner), so a real Approve/Reject decision can be made. A Reject still resolves to `confidence=0.0` and drives `on_low_confidence`/downstream `when:` exactly as in production. Unlike production, a timeout **auto-approves** (`confidence=1.0`) rather than failing the step, so a forgotten testing approval never wedges the pipeline. A testing pipeline with no `human_approval` config at all still works — the channel is never resolved/built when testing. |
+| `executor: human` (§9 "human") | The external channel (Telegram/Slack/Teams) is **not** sent — but the approval is still registered in VectorStep's own UI (`/ui/approvals` and the run-detail banner), so a real Approve/Reject decision can be made. A Reject still resolves to `confidence=0.0` and drives `on_low_confidence`/downstream `when:` exactly as in production. Unlike production, a timeout **auto-approves** (`confidence=1.0`) rather than failing the step, so a forgotten testing approval never wedges the pipeline. A testing pipeline with no `human_approval` config at all still works — the channel is never resolved/built when testing. |
 
 All four gates key off a single `_testing` boolean the runner injects into every
 step's Jinja2/executor context (`{{ _testing }}` is available in prompts, though
@@ -401,7 +401,7 @@ deliberate manual actions, not real ingestion traffic.
 #### Metrics and UI exclusion
 
 A `stage: testing` run contributes **zero** to every aggregate/rollup surface:
-`GET /metrics` (all series, including `pork_human_approvals_pending`, which
+`GET /metrics` (all series, including `vectorstep_human_approvals_pending`, which
 excludes testing approvals from its in-memory gauge the same way the
 DB-backed counters do), the dashboard's stat cards and top-agents/top-tools
 cards, the runs-page stat cards, pipeline success/accuracy bars, the
@@ -561,7 +561,7 @@ budget:                          # optional — omit to run with no token limit
 
 **Token budget guardrail:** if `budget.max_tokens` is set, the runner accumulates `input_tokens + output_tokens` from each completed step (including all branches of parallel/fan-out groups) and aborts the run with `status=aborted` if the total exceeds the ceiling. The check runs after each successful step — a step that's already failed or escalated won't trigger a second abort. A `budget_exceeded` event is appended to the run log.
 
-Token counts come from `meta.agentMeta.usage` in the P-Ork Gateway response. Steps using other executors (`openclaw`, `human`, `webhook`) contribute 0 tokens to the accumulator — set `max_tokens` conservatively if your pipeline mixes executor types.
+Token counts come from `meta.agentMeta.usage` in the VectorStep Gateway response. Steps using other executors (`openclaw`, `human`, `webhook`) contribute 0 tokens to the accumulator — set `max_tokens` conservatively if your pipeline mixes executor types.
 
 ---
 
@@ -669,7 +669,7 @@ class LLMOutput(BaseModel):
 | `reasoning` | No | Recommended for triage/analysis steps; improves verifier quality. |
 | `artifacts` | No | `{name: content}` dict. Runner writes each value to disk; content is not stored in the database. See §5a. |
 | `model` | No | Do not include — the executor sets this from API metadata. |
-| `provider` | No | Do not include — the `gateway` executor sets this from `agentMeta.provider` (the P-Ork Gateway provider that served the call, e.g. `anthropic`/`openrouter`/`azure`). `None` for other executors. |
+| `provider` | No | Do not include — the `gateway` executor sets this from `agentMeta.provider` (the VectorStep Gateway provider that served the call, e.g. `anthropic`/`openrouter`/`azure`). `None` for other executors. |
 | `raw_response` | No | Do not include — set by the executor. |
 | Any extra field | No | Freely add domain fields (`jira_ticket`, `action`, etc.). All are stored and accessible downstream. |
 
@@ -793,7 +793,7 @@ Two verifier **modes** are available:
 > change. New pipelines should prefer the new names; they describe the *role*
 > (correlated critique vs. blind corroboration) rather than an adversarial framing.
 
-**`verifier.max_trace_chars`** (default 1500, `critic` mode only) caps the transcript the same way `grounding.max_trace_chars` does — same truncation caveat applies: a claim whose evidence lands past the cutoff is invisible to the critic, and if the Gateway itself already truncated that tool result before P-Ork received it (`executor_config.trace_max_chars`, §8), no amount of raising this setting recovers it. See the "two independent truncation points" note under Grounding (§16) — it applies identically here.
+**`verifier.max_trace_chars`** (default 1500, `critic` mode only) caps the transcript the same way `grounding.max_trace_chars` does — same truncation caveat applies: a claim whose evidence lands past the cutoff is invisible to the critic, and if the Gateway itself already truncated that tool result before VectorStep received it (`executor_config.trace_max_chars`, §8), no amount of raising this setting recovers it. See the "two independent truncation points" note under Grounding (§16) — it applies identically here.
 
 See `samples/pipelines/trust-vector-remediation.yaml` for `critic` and `independent`
 used side by side — cheap corroboration on a step that only informs, versus blind
@@ -1056,24 +1056,24 @@ Executors are registered by name in `src/executors/__init__.py` and referenced b
 
 ---
 
-#### `gateway` — P-Ork Gateway WebSocket
+#### `gateway` — VectorStep Gateway WebSocket
 
-**`executor: gateway`** — Invokes agents via the P-Ork Gateway WebSocket API. Token-based auth (no device identity required). The P-Ork Gateway is a separate service that can run different model backends (Anthropic, OpenRouter, Ollama, Google) and MCP tool configurations independent of OpenClaw.
+**`executor: gateway`** — Invokes agents via the VectorStep Gateway WebSocket API. Token-based auth (no device identity required). The VectorStep Gateway is a separate service that can run different model backends (Anthropic, OpenRouter, Ollama, Google) and MCP tool configurations independent of OpenClaw.
 
 `executor_config` keys:
 
 | Key | Required | Description |
 |---|---|---|
-| `agent` | **Yes** | P-Ork Gateway agent name |
+| `agent` | **Yes** | VectorStep Gateway agent name |
 | `session_key` | No | Jinja2 template; must start with `agent:{agent-name}:`. Default: `agent:{{agent}}:pipeline:{{pipeline_run_id}}:{{step_name}}` |
 | `model` | No | Model override string, e.g. `anthropic/claude-sonnet-4-6`, `openrouter/...`, `ollama-cloud/...` |
 | `thinking_level` | No | Thinking level override: `low\|medium\|high` etc. |
 | `timeout_seconds` | No | Per-request timeout override (default: 1200) |
-| `trace_max_chars` | No | Overrides the Gateway's `limits.trace_tool_result_max_chars` (default 3000) for this step's `tool_result` trace events only — sent as `traceToolResultMax` on the agent request. Only affects the trace copy recorded/streamed for observability (and what `grounding.max_trace_chars` has available to hand the judge, see §16) — the agent's own conversation always sees the full, untruncated tool output regardless of this setting. Raise it on steps whose tools return long content if grounding or a human reviewing the trace is drawing false conclusions from evidence that was cut off before the Gateway ever sent it to P-Ork. |
+| `trace_max_chars` | No | Overrides the Gateway's `limits.trace_tool_result_max_chars` (default 3000) for this step's `tool_result` trace events only — sent as `traceToolResultMax` on the agent request. Only affects the trace copy recorded/streamed for observability (and what `grounding.max_trace_chars` has available to hand the judge, see §16) — the agent's own conversation always sees the full, untruncated tool output regardless of this setting. Raise it on steps whose tools return long content if grounding or a human reviewing the trace is drawing false conclusions from evidence that was cut off before the Gateway ever sent it to VectorStep. |
 
 Requires `executors.gateway.url` (WebSocket) and `executors.gateway.rest_url` (REST) in `config.yaml`.
 
-The P-Ork Gateway exposes three REST endpoints consumed by P-Ork:
+The VectorStep Gateway exposes three REST endpoints consumed by VectorStep:
 
 | Endpoint | Purpose |
 |---|---|
@@ -1095,7 +1095,7 @@ The P-Ork Gateway exposes three REST endpoints consumed by P-Ork:
 
 The `prompt_template` renders to the approval message text. Default timeout is 300s.
 
-**Which channel a run uses is resolved per-team, not per-pipeline.** The same `executor: human` step works unchanged for every team — P-Ork looks up the run's `team` (resolved from the webhook auth token, §3b) against `human_approval.teams` in `config.yaml`, falling back to `human_approval.default`, falling back to the legacy Telegram-only config if `human_approval` is omitted entirely. This keeps team onboarding a config-only change (like issuing a token, §3b) rather than requiring a new executor or a pipeline fork per team.
+**Which channel a run uses is resolved per-team, not per-pipeline.** The same `executor: human` step works unchanged for every team — VectorStep looks up the run's `team` (resolved from the webhook auth token, §3b) against `human_approval.teams` in `config.yaml`, falling back to `human_approval.default`, falling back to the legacy Telegram-only config if `human_approval` is omitted entirely. This keeps team onboarding a config-only change (like issuing a token, §3b) rather than requiring a new executor or a pipeline fork per team.
 
 ```yaml
 - name: approve-remediation
@@ -1114,7 +1114,7 @@ The `prompt_template` renders to the approval message text. Default timeout is 3
 
 ```yaml
 human_approval:
-  ui_base_url: https://pork.internal.example.com   # required for the msteams channel — see below
+  ui_base_url: https://vectorstep.internal.example.com   # required for the msteams channel — see below
   default:
     channel: telegram
   teams:
@@ -1134,7 +1134,7 @@ human_approval:
 |---|---|---|
 | `telegram` | Inline-keyboard Approve/Reject buttons, resolved by the existing Telegram long-poll (`notifications/telegram_poller.py`). Requires a **separate** Telegram bot from OpenClaw (Telegram only allows one simultaneous `getUpdates` poller per bot token). | `human_approval.*.telegram.{bot_token,chat_id}`, or falls back to `notifications.telegram` |
 | `slack` | Interactive Approve/Reject buttons via a Slack app's Socket Mode connection (`notifications/slack_poller.py`) — no public HTTPS endpoint needed, free on any Slack plan. | `human_approval.*.slack.{bot_token,app_token,channel_id}` |
-| `msteams` | One-way notification (via a Power Automate webhook flow) linking to a P-Ork web page (`GET /ui/approvals/{token}`) where the human clicks Approve/Reject. Real interactive Adaptive Card buttons in Teams need a registered Azure Bot with a public callback endpoint — this deployment doesn't expose one, so Teams gets a notify-and-click-through flow instead. | `human_approval.*.msteams.webhook_url`, `human_approval.ui_base_url` |
+| `msteams` | One-way notification (via a Power Automate webhook flow) linking to a VectorStep web page (`GET /ui/approvals/{token}`) where the human clicks Approve/Reject. Real interactive Adaptive Card buttons in Teams need a registered Azure Bot with a public callback endpoint — this deployment doesn't expose one, so Teams gets a notify-and-click-through flow instead. | `human_approval.*.msteams.webhook_url`, `human_approval.ui_base_url` |
 
 If `human_approval` is omitted entirely, every `human` step behaves exactly as before this feature existed — the single global `notifications.telegram` bot/chat, no team awareness required.
 
@@ -1276,7 +1276,7 @@ Per-notification `config:` keys:
 | Key | Default | Description |
 |---|---|---|
 | `level` | `warning` | Log level: `debug` / `info` / `warning` / `error` / `critical`. Also accepts `warn` as an alias. |
-| `logger` | `pork.notifications` | Logger name. Override to route to a specific logger hierarchy. |
+| `logger` | `vectorstep.notifications` | Logger name. Override to route to a specific logger hierarchy. |
 
 ```yaml
 notifications:
@@ -1293,7 +1293,7 @@ notifications:
       template: "PIPELINE ABORTED: {{pipeline_name}} — {{step_summary}}"
       config:
         level: warning
-        logger: pork.ops            # route to a separate logger for ops tooling
+        logger: vectorstep.ops            # route to a separate logger for ops tooling
 ```
 
 The `log` channel is the recommended zero-setup choice for development and for production environments that already aggregate application logs centrally. Add `telegram` or `webhook` alongside it for real-time alerting.
@@ -1463,7 +1463,7 @@ steps:
         payload:
           summary: "{{context.summary}}"
           severity: "{{context.severity}}"
-          source: pork
+          source: vectorstep
           custom_details:
             triage_summary: "{{steps.triage.output.summary}}"
             confidence: "{{steps.triage.output.confidence}}"
@@ -1576,7 +1576,7 @@ retry:
 | `duration_ms` | int | |
 | `executed_at` | datetime | |
 | `artifacts` | json, nullable | `{key: reference}` map — references are opaque strings pointing to artifact files on disk. Content is not stored in the DB. |
-| `agent_trace` | json, nullable | Ordered execution trace from the P-Ork Gateway executor — array of `{type, ...}` objects. `type` is one of: `llm_call` (iteration marker), `thinking` (extended thinking block), `text` (response text), `tool_call` (MCP tool invoked with arguments), `tool_result` (MCP tool response). **Not truncated** — the full content the Gateway returns on its final `ok` frame is stored and rendered as-is; only the ephemeral *live* SSE tail (§Live tail) truncates content (at 200 chars) for a fast in-progress preview, never the persisted record. If a `tool_result`'s content looks cut off on a *completed* run, that truncation happened upstream (the Gateway server or the MCP tool itself), not in this column. NULL for all other executors (`openclaw`, `human`, `webhook`). |
+| `agent_trace` | json, nullable | Ordered execution trace from the VectorStep Gateway executor — array of `{type, ...}` objects. `type` is one of: `llm_call` (iteration marker), `thinking` (extended thinking block), `text` (response text), `tool_call` (MCP tool invoked with arguments), `tool_result` (MCP tool response). **Not truncated** — the full content the Gateway returns on its final `ok` frame is stored and rendered as-is; only the ephemeral *live* SSE tail (§Live tail) truncates content (at 200 chars) for a fast in-progress preview, never the persisted record. If a `tool_result`'s content looks cut off on a *completed* run, that truncation happened upstream (the Gateway server or the MCP tool itself), not in this column. NULL for all other executors (`openclaw`, `human`, `webhook`). |
 | `verifier_agent` | str, nullable | `executor:agent-name` for the verifier call (mirrors `agent` above), e.g. `gateway:principal-sre`. NULL if no verifier ran, or for rows persisted before this column existed. |
 | `verifier_model` | str, nullable | Actual model used by the verifier call, from executor metadata. NULL if no verifier ran. |
 | `verifier_provider` | str, nullable | Gateway provider key for the verifier call (gateway executor only). NULL if no verifier ran or the verifier used a non-gateway executor. |
@@ -1691,7 +1691,7 @@ GET /health
 
 See §15c for the pipeline/step-library/agent read + analytics endpoints and
 §15d for the write/validate/delete endpoints — both added for the
-[P-Ork Service MCP](#15e-the-p-ork-service-mcp) (a separate repo).
+[VectorStep Service MCP](#15e-the-vectorstep-service-mcp) (a separate repo).
 
 ### 15a. Prometheus Metrics
 
@@ -1706,19 +1706,19 @@ default, see §3c) contributes to none of them, including the metrics that query
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `pork_pipeline_runs_total` | counter | `pipeline`, `status` | Total runs by pipeline and terminal status |
-| `pork_pipeline_runs_in_progress` | gauge | — | Runs currently in `status=running` |
-| `pork_pipeline_steps_total` | counter | `pipeline`, `step_name`, `executor`, `agent`, `model`, `provider`, `status` | Total steps by pipeline, step, executor, agent, model, provider, and status. `pipeline`/`step_name`/`model`/`provider` are what let a Grafana dashboard reconstruct the per-step and per-model success-rate breakdowns the Pipelines/Steps/Agents Insights UI pages (below) compute directly from the DB — the UI is for a quick look, this metric is for a real dashboard or alert. NULL agent/model/provider (non-gateway executors, or a gateway build predating the `provider` field) are bucketed as `""`. |
-| `pork_pipeline_step_duration_seconds` | histogram | `pipeline`, `step_name`, `executor`, `agent`, `model`, `provider` | Step execution duration (buckets: 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, +Inf seconds) |
-| `pork_verifier_runs_total` | counter | `agent` | Steps where a verifier ran, by primary agent |
-| `pork_verifier_overrides_total` | counter | `agent` | Verifier runs where the verifier lowered the primary's effective confidence |
-| `pork_pipeline_tokens_total` | counter | `team`, `pipeline`, `step_name`, `executor`, `agent`, `model`, `provider`, `direction` | Cumulative input/output tokens consumed, broken down by owning team (§3b) for cost attribution. `direction` is `input`/`output`. NULL team/model/provider are bucketed as `""` rather than dropped, so unattributed spend stays visible. Steps from executors that don't report tokens (`openclaw`, `human`, `webhook`) are excluded rather than padded as zero. |
-| `pork_human_approval_decisions_total` | counter | `team`, `pipeline`, `decision` | Cumulative `human` step (§9 `executor: human`) approve/reject decisions. `decision` is `approved`/`rejected`, derived from `primary_confidence` (1.0/0.0 — see the executor's contract). Timeouts leave `primary_confidence` NULL and are excluded rather than miscounted as either outcome. NULL team is bucketed as `""`. |
-| `pork_pipeline_feedback_total` | counter | `pipeline`, `outcome` | Cumulative human accuracy feedback (§Accuracy feedback — the same data backing `/ui/pipelines/{name}/feedback`). `outcome` is `correct`/`partial`/`incorrect`. |
-| `pork_step_feedback_total` | counter | `pipeline`, `step_name`, `agent`, `model`, `provider`, `outcome` | Cumulative per-step human accuracy feedback (§Accuracy feedback), production-scoped. `outcome` is `correct`/`partial`/`incorrect`. |
-| `pork_step_grounding_score` | histogram | `pipeline`, `step_name`, `agent`, `model`, `provider` | Shadow-mode grounding score (G) distribution per step (§Grounding (shadow mode)), production-scoped (buckets: 0.1, 0.2, ..., 1.0, +Inf). Only steps with a `grounding:` block that produced a score contribute — NULL/not-computed steps are excluded, not padded as zero. |
-| `pork_step_deterministic_check_total` | counter | `pipeline`, `step_name`, `outcome` | Cumulative whole-step deterministic-check outcomes (§Deterministic checks & enforced grounding (Phase 1)), production-scoped. `outcome` is `passed`/`failed` — `passed` only when every declared check for that step run passed. Steps with no `deterministic_checks:` declared are excluded. |
-| `pork_human_approvals_pending` | gauge | `team` | Currently pending `human` step approvals, awaiting a response on whichever channel (Telegram/Slack/Teams) that team is routed to (§ "human — Human-in-the-Loop"). Unlike every other metric here this isn't derived from the database — pending approvals are in-memory only — so it reflects only this process's current state, not a historical/cumulative total. NULL team is bucketed as `""`. Always emits at least a zero-valued series so the metric doesn't disappear from dashboards when nothing's pending. Excludes `stage=testing` pending approvals, same as every other series on this page — see §3c. |
+| `vectorstep_pipeline_runs_total` | counter | `pipeline`, `status` | Total runs by pipeline and terminal status |
+| `vectorstep_pipeline_runs_in_progress` | gauge | — | Runs currently in `status=running` |
+| `vectorstep_pipeline_steps_total` | counter | `pipeline`, `step_name`, `executor`, `agent`, `model`, `provider`, `status` | Total steps by pipeline, step, executor, agent, model, provider, and status. `pipeline`/`step_name`/`model`/`provider` are what let a Grafana dashboard reconstruct the per-step and per-model success-rate breakdowns the Pipelines/Steps/Agents Insights UI pages (below) compute directly from the DB — the UI is for a quick look, this metric is for a real dashboard or alert. NULL agent/model/provider (non-gateway executors, or a gateway build predating the `provider` field) are bucketed as `""`. |
+| `vectorstep_pipeline_step_duration_seconds` | histogram | `pipeline`, `step_name`, `executor`, `agent`, `model`, `provider` | Step execution duration (buckets: 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, +Inf seconds) |
+| `vectorstep_verifier_runs_total` | counter | `agent` | Steps where a verifier ran, by primary agent |
+| `vectorstep_verifier_overrides_total` | counter | `agent` | Verifier runs where the verifier lowered the primary's effective confidence |
+| `vectorstep_pipeline_tokens_total` | counter | `team`, `pipeline`, `step_name`, `executor`, `agent`, `model`, `provider`, `direction` | Cumulative input/output tokens consumed, broken down by owning team (§3b) for cost attribution. `direction` is `input`/`output`. NULL team/model/provider are bucketed as `""` rather than dropped, so unattributed spend stays visible. Steps from executors that don't report tokens (`openclaw`, `human`, `webhook`) are excluded rather than padded as zero. |
+| `vectorstep_human_approval_decisions_total` | counter | `team`, `pipeline`, `decision` | Cumulative `human` step (§9 `executor: human`) approve/reject decisions. `decision` is `approved`/`rejected`, derived from `primary_confidence` (1.0/0.0 — see the executor's contract). Timeouts leave `primary_confidence` NULL and are excluded rather than miscounted as either outcome. NULL team is bucketed as `""`. |
+| `vectorstep_pipeline_feedback_total` | counter | `pipeline`, `outcome` | Cumulative human accuracy feedback (§Accuracy feedback — the same data backing `/ui/pipelines/{name}/feedback`). `outcome` is `correct`/`partial`/`incorrect`. |
+| `vectorstep_step_feedback_total` | counter | `pipeline`, `step_name`, `agent`, `model`, `provider`, `outcome` | Cumulative per-step human accuracy feedback (§Accuracy feedback), production-scoped. `outcome` is `correct`/`partial`/`incorrect`. |
+| `vectorstep_step_grounding_score` | histogram | `pipeline`, `step_name`, `agent`, `model`, `provider` | Shadow-mode grounding score (G) distribution per step (§Grounding (shadow mode)), production-scoped (buckets: 0.1, 0.2, ..., 1.0, +Inf). Only steps with a `grounding:` block that produced a score contribute — NULL/not-computed steps are excluded, not padded as zero. |
+| `vectorstep_step_deterministic_check_total` | counter | `pipeline`, `step_name`, `outcome` | Cumulative whole-step deterministic-check outcomes (§Deterministic checks & enforced grounding (Phase 1)), production-scoped. `outcome` is `passed`/`failed` — `passed` only when every declared check for that step run passed. Steps with no `deterministic_checks:` declared are excluded. |
+| `vectorstep_human_approvals_pending` | gauge | `team` | Currently pending `human` step approvals, awaiting a response on whichever channel (Telegram/Slack/Teams) that team is routed to (§ "human — Human-in-the-Loop"). Unlike every other metric here this isn't derived from the database — pending approvals are in-memory only — so it reflects only this process's current state, not a historical/cumulative total. NULL team is bucketed as `""`. Always emits at least a zero-valued series so the metric doesn't disappear from dashboards when nothing's pending. Excludes `stage=testing` pending approvals, same as every other series on this page — see §3c. |
 
 Dollar-cost conversion is intentionally not provided — there's no per-model
 pricing table yet, so this metric is raw token counts only.
@@ -1745,7 +1745,7 @@ observability:
     enabled: true
     exporter: otlp          # otlp | console
     endpoint: http://localhost:4318/v1/traces   # OTLP/HTTP collector endpoint
-    service_name: pork-service
+    service_name: vectorstep-service
 ```
 
 `exporter: console` prints spans to stdout — useful for local verification without a
@@ -1755,25 +1755,25 @@ Grafana Alloy/Tempo).
 **Span hierarchy** — each pipeline run is its own trace root:
 
 ```
-pipeline.run: <team>/<pipeline>       (pork.pipeline.name, pork.run.id, pork.source, pork.team, pork.run.status)
-├── <step name>                       (pork.span.kind=step, pork.executor, pork.agent, confidences, pork.model, pork.provider, pork.prompt_hash, pork.agent_version)
-│   ├── gen_ai.<executor>             (pork.span.kind=gen_ai — the LLM call itself)
-│   └── <step>:verifier|:independent   (pork.span.kind=verifier, pork.verifier.mode, pork.confidence)
+pipeline.run: <team>/<pipeline>       (vectorstep.pipeline.name, vectorstep.run.id, vectorstep.source, vectorstep.team, vectorstep.run.status)
+├── <step name>                       (vectorstep.span.kind=step, vectorstep.executor, vectorstep.agent, confidences, vectorstep.model, vectorstep.provider, vectorstep.prompt_hash, vectorstep.agent_version)
+│   ├── gen_ai.<executor>             (vectorstep.span.kind=gen_ai — the LLM call itself)
+│   └── <step>:verifier|:independent   (vectorstep.span.kind=verifier, vectorstep.verifier.mode, vectorstep.confidence)
 │       └── gen_ai.<executor>
-├── <group name>                      (pork.span.kind=parallel_group, pork.join_strategy, pork.branch_count, pork.agent_version)
-│   ├── <branch name>                 (pork.span.kind=branch, pork.executor, pork.agent, pork.confidence, pork.model, pork.provider)
+├── <group name>                      (vectorstep.span.kind=parallel_group, vectorstep.join_strategy, vectorstep.branch_count, vectorstep.agent_version)
+│   ├── <branch name>                 (vectorstep.span.kind=branch, vectorstep.executor, vectorstep.agent, vectorstep.confidence, vectorstep.model, vectorstep.provider)
 │   │   └── gen_ai.<executor>
 │   └── ... (concurrent siblings)
-├── <fan_out name>                    (pork.span.kind=fan_out, pork.join_strategy, pork.prompt_hash, pork.agent_version)
-│   ├── <fan_out name>/0              (pork.span.kind=branch, pork.executor, pork.agent, pork.confidence)
+├── <fan_out name>                    (vectorstep.span.kind=fan_out, vectorstep.join_strategy, vectorstep.prompt_hash, vectorstep.agent_version)
+│   ├── <fan_out name>/0              (vectorstep.span.kind=branch, vectorstep.executor, vectorstep.agent, vectorstep.confidence)
 │   │   └── gen_ai.<executor>
 │   └── ... (one branch per runtime list item)
 └── ...
 ```
 
-`pork.prompt_hash`/`pork.agent_version` (SPEC-prompt-versioning.md) are set on the `<step name>` span (from that step's own `prompt_template`) and the `<fan_out name>` group span (all branches of a fan-out share one template, so a single hash is meaningful there) — but deliberately **not** on individual branch spans or the `<group name>` parallel_group span's `prompt_hash`, since each parallel branch has its own distinct template and no single hash would be meaningful at the group level. `pork.agent_version` is set wherever a single agent's output is available, including the parallel group span. Neither is added as a Prometheus metric label — see `SPEC-prompt-versioning.md`'s discussion of why (unbounded cardinality: every prompt/agent edit mints a new, permanently-retained label value).
+`vectorstep.prompt_hash`/`vectorstep.agent_version` (SPEC-prompt-versioning.md) are set on the `<step name>` span (from that step's own `prompt_template`) and the `<fan_out name>` group span (all branches of a fan-out share one template, so a single hash is meaningful there) — but deliberately **not** on individual branch spans or the `<group name>` parallel_group span's `prompt_hash`, since each parallel branch has its own distinct template and no single hash would be meaningful at the group level. `vectorstep.agent_version` is set wherever a single agent's output is available, including the parallel group span. Neither is added as a Prometheus metric label — see `SPEC-prompt-versioning.md`'s discussion of why (unbounded cardinality: every prompt/agent edit mints a new, permanently-retained label value).
 
-The root span name is `pipeline.run: <team>/<pipeline-name>` when a team is attributed (e.g. `pipeline.run: payments/alert-triage-critical`), or `pipeline.run: <pipeline-name>` for unattributed runs. This makes the Name column in Grafana Tempo immediately useful without needing to expand attributes. `pork.team` is also set as a span attribute when present, so traces can be filtered/grouped by team in PromQL or Tempo query expressions.
+The root span name is `pipeline.run: <team>/<pipeline-name>` when a team is attributed (e.g. `pipeline.run: payments/alert-triage-critical`), or `pipeline.run: <pipeline-name>` for unattributed runs. This makes the Name column in Grafana Tempo immediately useful without needing to expand attributes. `vectorstep.team` is also set as a span attribute when present, so traces can be filtered/grouped by team in PromQL or Tempo query expressions.
 
 Each `pipeline_runs.logs` event (`step_started`, `verifier_ran`, `branch_completed`,
 etc. — see §14) is also recorded as a **span event** on the current span, so the
@@ -1786,20 +1786,20 @@ structured run log and the trace timeline tell the same story from two angles.
 | `gen_ai.system` | Executor name (`openclaw`, `openclaw_ws`, `gateway`) |
 | `gen_ai.request.model` | Model override requested, if any |
 | `gen_ai.response.model` | Actual model used, from executor metadata |
-| `pork.gateway.duration_ms` | Backend-reported call duration |
-| `pork.agent` | Agent name |
+| `vectorstep.gateway.duration_ms` | Backend-reported call duration |
+| `vectorstep.agent` | Agent name |
 
-**Forward compatibility with the P-Ork Gateway:** every `gen_ai.*` span injects the
+**Forward compatibility with the VectorStep Gateway:** every `gen_ai.*` span injects the
 current `traceparent`/`tracestate` (W3C Trace Context) into the outbound `agent`
-request sent to the OpenClaw/P-Ork Gateway WebSocket APIs. Today's gateways ignore
-these extra params. Once the P-Ork Gateway adds its own OTel instrumentation, its
+request sent to the OpenClaw/VectorStep Gateway WebSocket APIs. Today's gateways ignore
+these extra params. Once the VectorStep Gateway adds its own OTel instrumentation, its
 LLM/tool-call spans will automatically nest under the corresponding `gen_ai.*` span —
 giving one connected trace from webhook → pipeline → step → individual LLM/tool calls,
-with no further changes needed on the P-Ork side.
+with no further changes needed on the VectorStep side.
 
 ### 15c. Pipeline/Step/Agent Read + Analytics Endpoints
 
-Added so the [P-Ork Service MCP](#15e-the-p-ork-service-mcp) can author and inspect
+Added so the [VectorStep Service MCP](#15e-the-vectorstep-service-mcp) can author and inspect
 pipelines without importing this codebase. The analytics endpoints share their
 aggregation queries with the `/ui/insights/*` pages (`src/analytics.py`), so the
 numbers they return can never drift from what the UI shows for the same data.
@@ -1817,7 +1817,7 @@ GET /steps
 GET /steps/{name}
 # → {"config": {...}, "yaml": "..."}  — 404 if unknown
 
-# Agents merged across OpenClaw + P-Ork Gateway backends — read-only. A down
+# Agents merged across OpenClaw + VectorStep Gateway backends — read-only. A down
 # backend contributes an empty slice plus an 'errors' entry, never a 500.
 GET /agents
 # → {"agents": [{"name": "...", "executor": "openclaw"|"gateway", "model": "..."}], "errors": {}}
@@ -1906,7 +1906,7 @@ GET /steps/{name}/calibration?bin_width=0.1&n_min=20
 #     "recommendation": "runs scoring ~90% here are only 75% correct..." or null
 #   }, ...]}  — sorted by total_n desc
 
-# Every prompt template version P-Ork has recorded for this step, newest first —
+# Every prompt template version VectorStep has recorded for this step, newest first —
 # "did that prompt edit actually help?" made answerable with data. Each version
 # carries its diff against the version before it (null for the oldest) and its
 # own calibration data scoped to just that version. NOT time_range/stage scoped,
@@ -1922,15 +1922,15 @@ GET /steps/{name}/versions
 # history. "diff_from_previous" is null both for this entry and for whichever
 # real version comes right after it (nothing to diff against).
 
-# Every Gateway agent_version P-Ork has a snapshot for, newest first — the only
+# Every Gateway agent_version VectorStep has a snapshot for, newest first — the only
 # place recoverable text for an agent_version survives once the Gateway agent
 # moves on to a newer config. `name` is the bare agent name (no "gateway:"
-# prefix). 404 if P-Ork has no snapshot rows for this agent at all.
+# prefix). 404 if VectorStep has no snapshot rows for this agent at all.
 GET /agents/{name}/versions
 # → {"agent": "gateway:...", "versions": [{"agent_version", "soul_md", "agent_yaml",
 #     "note", "first_seen_at", "last_seen_at", "diff_from_previous", "used_by_steps": [...]
 #   }, ...]}  — sorted by first_seen_at desc. `note` (instead of soul_md/agent_yaml
-#   text) means P-Ork couldn't confirm that snapshot, not that the agent had no config.
+#   text) means VectorStep couldn't confirm that snapshot, not that the agent had no config.
 # Same synthetic-entry behaviour as /steps/{name}/versions above, for rows where
 # PipelineStep.agent_version IS NULL — "agent_version": null, "soul_md"/"agent_yaml":
 # null, "note" explains why in plain language, "used_by_steps" is still real.
@@ -1994,10 +1994,10 @@ resolution, both of which can otherwise show up as the same status code.
 verbatim — these endpoints never resolve or inline an environment value into
 a stored file.
 
-### 15e. The P-Ork Service MCP
+### 15e. The VectorStep Service MCP
 
-The endpoints in §15c/§15d exist to back **P-Ork Service MCP**, a separate,
-standalone repository (sibling to this one — see the project's `P-Ork*`
+The endpoints in §15c/§15d exist to back **VectorStep Service MCP**, a separate,
+standalone repository (sibling to this one — see the project's `VectorStep*`
 naming convention) that exposes them as
 [MCP](https://modelcontextprotocol.io) tools for Claude Code/Desktop: pipeline
 and step-library authoring (with the same server-side validation this
@@ -2007,9 +2007,9 @@ analytics above, and manual run/feedback actions.
 It is a thin `httpx` client — the **only** coupling between the two repos is
 this HTTP API; the MCP has no import-level dependency on this codebase and
 does not touch the database or YAML files directly. It holds one bearer
-token (`PORK_WEBHOOK_TOKEN`) sent on every call, required only where this
+token (`VECTORSTEP_WEBHOOK_TOKEN`) sent on every call, required only where this
 service already requires it. See that repo's README for configuration
-(`PORK_BASE_URL`, `PORK_WEBHOOK_TOKEN`) and its tool list.
+(`VECTORSTEP_BASE_URL`, `VECTORSTEP_WEBHOOK_TOKEN`) and its tool list.
 
 ---
 
@@ -2030,7 +2030,7 @@ The web UI is served under `/ui` and provides the following pages:
 | Marking queue | `/ui/marking-queue` | Cross-pipeline review queue of steps with no **human** accuracy feedback yet, grouped by pipeline then step, oldest first, with pipeline/team/stage (default `testing`) additive filters and stat cards (pipelines/runs/steps affected, marked coverage %) — see "Marking queue". Links out to `/ui/runs/{id}` to actually mark; nothing is markable from this page itself |
 | Steps | `/ui/steps` | Step library — all named steps with executor/agent, tags, pipeline usage, copy-ref button, a **tag filter** (`?tag=`), and a per-pipeline/agent/model breakdown table (runs, success rate, avg tokens) for steps with run history |
 | Agents | `/ui/agents` | Unified agent library across all executor backends, with per-agent step success rate, avg duration, avg tokens in/out per step, configured model + fallback models (gateway agents), which pipelines use each agent, and **executor**/**model** filters (`?executor=`/`?model=`, the latter matching either the primary or a fallback model) |
-| MCP Tools | `/ui/mcp` | Live MCP tool/server registry — every tool's schema, and each server's running/pid/restart_count, fetched from the P-Ork Gateway's `GET /mcp/tools` and `GET /mcp/servers`. Config-and-schema browsing only; see Insights — MCP for call-usage analytics |
+| MCP Tools | `/ui/mcp` | Live MCP tool/server registry — every tool's schema, and each server's running/pid/restart_count, fetched from the VectorStep Gateway's `GET /mcp/tools` and `GET /mcp/servers`. Config-and-schema browsing only; see Insights — MCP for call-usage analytics |
 | Schedules | `/ui/schedules` | Active cron schedules with next-run times |
 | Insights — Overview | `/ui/insights` | Run/failure/token/accuracy totals, runs by team, and MCP tool-use counts, over a selectable time range (24h/7d/30d/all-time) — production only |
 | Insights — Pipelines | `/ui/insights/pipelines` | Per-pipeline run/failure/duration/token totals, top-pipelines table, and a per-pipeline drilldown (status/accuracy breakdown, timeseries, recent runs, and a step/agent/model breakdown table) — production only |
@@ -2064,13 +2064,13 @@ When the run finishes the page reloads automatically to show the final state. A 
 
 ### Agent trace
 
-Each step's expanded detail panel includes a collapsible **Agent trace** section showing the complete internal execution trace: LLM call markers, extended thinking blocks, response text, every tool call with arguments, and every tool result. This is available for **`executor: gateway` steps only** — the gateway streams each event back to P-Ork as it fires, which stores the full trace in `pipeline_steps.agent_trace`.
+Each step's expanded detail panel includes a collapsible **Agent trace** section showing the complete internal execution trace: LLM call markers, extended thinking blocks, response text, every tool call with arguments, and every tool result. This is available for **`executor: gateway` steps only** — the gateway streams each event back to VectorStep as it fires, which stores the full trace in `pipeline_steps.agent_trace`.
 
 The trace toggle label shows a count of LLM calls and tool calls at a glance (e.g. `3 LLM calls, 12 tool calls`). Tool result content is truncated at 3 000 chars in the stored trace; full content is always available in the gateway's own logs at `DEBUG` level.
 
 The same events that populate this panel also appear in the **live tail** during the step's execution — the detail panel is the persistent post-run record; the live tail is the real-time view.
 
-For `openclaw` steps, `agent_trace` is NULL — OpenClaw does not expose intermediate events to P-Ork.
+For `openclaw` steps, `agent_trace` is NULL — OpenClaw does not expose intermediate events to VectorStep.
 
 ### Accuracy feedback
 
@@ -2100,7 +2100,7 @@ An optional notes field lets you record why — useful context when reviewing pa
 **Per-step feedback.** In addition to run-level feedback, you can mark an individual step *execution* correct/partial/incorrect. The control appears inside each finished step's expanded detail panel (same collapsible body as the parsed output and agent trace), so marking is optional and sparse — mark only the step(s) you have an opinion on. Fan-out branches (`triage/0`, `triage/1`, ...) are marked independently, since each is its own step execution.
 
 - **Steps Insights** (`/ui/insights/steps`) — the pipeline/agent/model breakdown table has an **Accuracy** column, and the per-step drilldown has an **Accuracy** mini-card, both computed as `correct / total_marked` over the selected time range, production-scoped.
-- `pork_step_feedback_total` (see §Metrics) exposes the same counts for Grafana/alerting.
+- `vectorstep_step_feedback_total` (see §Metrics) exposes the same counts for Grafana/alerting.
 
 Per-step feedback is currently pure data collection — it does not affect gating or flow control. It's a building block for future work on calibrating trust scores against real outcomes.
 
@@ -2126,11 +2126,11 @@ steps:
 
 **`max_trace_chars` — truncation, not a hallucination.** The transcript handed to the judge truncates each `tool_result`/agent-text event at `max_trace_chars`, with a trailing `…`. A claim whose supporting evidence lands past that cutoff is genuinely invisible to the judge — that shows up looking exactly like "the primary agent is making things up," when actually the trace transcript just didn't include the relevant part. Steps whose tools return long content (a full document read, a large query result) should raise this; the default (1500) is tuned for cheap, short evidence, not long reads.
 
-**There are two independent truncation points, and raising this one alone may not be enough.** `grounding.max_trace_chars` only controls how much of the trace P-Ork *already has* it hands to the judge. The Gateway itself caps each `tool_result` event's content **before P-Ork ever receives it** (`limits.trace_tool_result_max_chars`, default 3000, in the Gateway's own config) — if a tool result was truncated there, no `grounding.max_trace_chars` setting on the P-Ork side can recover the missing part, because it was never sent. Use the primary step's `executor_config.trace_max_chars` (§8, `gateway` executor) to raise the Gateway-side cap for that step, *then* raise `grounding.max_trace_chars` here to match — otherwise you've just moved the same cutoff from the judge's transcript-formatting step to the Gateway's own capture step. Either cutoff being too low produces the identical symptom (a claim that looks unsupported but genuinely wasn't), so if grounding keeps flagging claims you believe are backed by real evidence, check both.
+**There are two independent truncation points, and raising this one alone may not be enough.** `grounding.max_trace_chars` only controls how much of the trace VectorStep *already has* it hands to the judge. The Gateway itself caps each `tool_result` event's content **before VectorStep ever receives it** (`limits.trace_tool_result_max_chars`, default 3000, in the Gateway's own config) — if a tool result was truncated there, no `grounding.max_trace_chars` setting on the VectorStep side can recover the missing part, because it was never sent. Use the primary step's `executor_config.trace_max_chars` (§8, `gateway` executor) to raise the Gateway-side cap for that step, *then* raise `grounding.max_trace_chars` here to match — otherwise you've just moved the same cutoff from the judge's transcript-formatting step to the Gateway's own capture step. Either cutoff being too low produces the identical symptom (a claim that looks unsupported but genuinely wasn't), so if grounding keeps flagging claims you believe are backed by real evidence, check both.
 
 **Soft failure.** Like the verifier, a grounding call that errors or times out logs a warning and records `grounding_score = NULL` with the error captured in the report — it never breaks or delays the step. When the failure is specifically the judge's own output not parsing as JSON — most commonly because a step with many load-bearing claims produced a per-claim evidence list long enough to hit the judge agent's output-length ceiling mid-generation — the report's `raw_output` field carries the judge's full, untruncated text (not just the 500-character snippet in the log/exception message), so a reviewer can tell "genuinely truncated" apart from "malformed from the start." When the failure is a timeout instead — `grounding.timeout_seconds` (default 120, per-step override) elapsing before the judge responds at all — there's no response to show `raw_output` for, but the error message itself now says so explicitly (`"grounding call timed out after 120s"`) rather than the blank string `asyncio.TimeoutError` carries by default; a step whose trace/claim count needs longer should raise `grounding.timeout_seconds` directly rather than relying on the (deliberately conservative) default.
 
-**The `grounding-judge` agent contract.** Grounding calls a gateway agent (configured on the **P-Ork Gateway**, not in this repo) whose only job is a constrained cross-reference — it cannot browse or add outside knowledge. It receives:
+**The `grounding-judge` agent contract.** Grounding calls a gateway agent (configured on the **VectorStep Gateway**, not in this repo) whose only job is a constrained cross-reference — it cannot browse or add outside knowledge. It receives:
 
 1. the original task given to the primary agent (its rendered `prompt_template` — the same thing a `critic`-mode verifier sees, see §6),
 2. the primary agent's structured output (`summary`, `next_step_context`, `reasoning`), and
@@ -2145,9 +2145,9 @@ The judge's prompt is explicit that (1) is *given, trusted input* — a claim th
 - **`reasoning.claims`** — a list of `{ "claim": str, "supported": bool, "evidence": str }`, one per load-bearing claim identified.
 - **`next_step_context`** — unused, `""`.
 
-The persisted `trust_report.grounding` also records **which** agent/model actually judged this run — `agent` (from `grounding.agent` config), plus `model`/`provider` read straight from the judge's own response metadata (both `null` when grounding didn't compute, e.g. an error or no trace) — and `prompt`: the judge's own fully-rendered prompt (the `_GROUNDING_PROMPT_TEMPLATE` with the original task, primary's response, and trace all substituted in), so a reviewer can see exactly what the judge was shown, not just what it concluded. `raw_output` carries the exact text the judge replied with — not just the `summary`/`claims` fields P-Ork extracted from it — for both a successful parse and a parse failure (the executor stashes it onto `LLMOutput.raw_response["response_text"]` the same way it stashes `prompt`; on failure, `LLMParseError.raw_text` carries the full, untruncated text rather than the 500-char snippet in the log/exception message). `prompt` and `raw_output` are populated for `gateway`/`openclaw` executor grounding calls; `null` for others.
+The persisted `trust_report.grounding` also records **which** agent/model actually judged this run — `agent` (from `grounding.agent` config), plus `model`/`provider` read straight from the judge's own response metadata (both `null` when grounding didn't compute, e.g. an error or no trace) — and `prompt`: the judge's own fully-rendered prompt (the `_GROUNDING_PROMPT_TEMPLATE` with the original task, primary's response, and trace all substituted in), so a reviewer can see exactly what the judge was shown, not just what it concluded. `raw_output` carries the exact text the judge replied with — not just the `summary`/`claims` fields VectorStep extracted from it — for both a successful parse and a parse failure (the executor stashes it onto `LLMOutput.raw_response["response_text"]` the same way it stashes `prompt`; on failure, `LLMParseError.raw_text` carries the full, untruncated text rather than the 500-char snippet in the log/exception message). `prompt` and `raw_output` are populated for `gateway`/`openclaw` executor grounding calls; `null` for others.
 
-**Where it surfaces.** Each grounded step's expanded detail panel shows a **"Trust (shadow)"** widget: self-report (S) vs. verifier (V, if any, with its own agent/model shown alongside) vs. grounding (G, with its judging agent/model shown alongside), a divergence flag when `|G − S| ≥ 0.2`, and the per-claim ✓/✗ breakdown with evidence. A **Prompt** disclosure (collapsed by default) shows what the judge was asked; a matching **Answer** disclosure right below it shows the judge's raw reply text (`trust_report.grounding.raw_output`) — present for a successful grounding pass and, just as importantly, for one that failed to parse, so a reviewer isn't limited to the `computed: false` / error-message summary and can see exactly what the judge actually returned. `pork_step_grounding_score` (see §Metrics) exposes the score distribution for Grafana.
+**Where it surfaces.** Each grounded step's expanded detail panel shows a **"Trust (shadow)"** widget: self-report (S) vs. verifier (V, if any, with its own agent/model shown alongside) vs. grounding (G, with its judging agent/model shown alongside), a divergence flag when `|G − S| ≥ 0.2`, and the per-claim ✓/✗ breakdown with evidence. A **Prompt** disclosure (collapsed by default) shows what the judge was asked; a matching **Answer** disclosure right below it shows the judge's raw reply text (`trust_report.grounding.raw_output`) — present for a successful grounding pass and, just as importantly, for one that failed to parse, so a reviewer isn't limited to the `computed: false` / error-message summary and can see exactly what the judge actually returned. `vectorstep_step_grounding_score` (see §Metrics) exposes the score distribution for Grafana.
 
 **The Trust panel isn't just for grounded steps.** Any step with a verifier — even with no grounding, deterministic checks, or calibration configured — gets a "Trust (shadow)" panel too, so how S and V combined is never invisible. A **"How was this calculated?"** button reveals a plain-language, numbers-first walkthrough of that specific run: self-report → verifier combine → calibration (if enforced) → grounding (if configured) → deterministic checks (if declared) → the final figure and what it decided. No config keys, just what actually happened on this run — built from the same `trust_report` data, not a re-derivation from the pipeline's current config.
 
@@ -2258,10 +2258,10 @@ a real problem.")
 **not** muted by `stage: testing`; muting them would make it impossible to test check
 logic in a testing pipeline. `human`-type checks **do** inherit `executor: human`'s
 existing testing-stage behaviour (external channel not sent; the decision is made via
-P-Ork's own `/ui/approvals`; a timeout auto-approves).
+VectorStep's own `/ui/approvals`; a timeout auto-approves).
 
 **Unsandboxed by design.** A `shell` check runs with the full environment and
-permissions of the P-Ork process — there is no sandboxing or resource-limiting. This is
+permissions of the VectorStep process — there is no sandboxing or resource-limiting. This is
 a deliberate choice for a single-operator, self-hosted deployment where the operator
 already fully controls pipeline YAML and already has executors capable of far more (MCP
 tools, OpenClaw). Revisit this if the deployment model ever becomes multi-tenant.
@@ -2288,7 +2288,7 @@ steps:
 (enforced)"** instead of "(shadow)" for any step where grounding or a deterministic
 check actually participated in the gate, with a `Combined trust` figure alongside S/V/G,
 a `Checks (D)` PASS/FAIL chip, and a per-check ✓/✗ list (name, type, detail).
-`pork_step_deterministic_check_total` (see §Metrics) exposes check outcomes for
+`vectorstep_step_deterministic_check_total` (see §Metrics) exposes check outcomes for
 Grafana.
 
 See `samples/pipelines/trust-vector-remediation.yaml` for a complete worked example of
@@ -2549,7 +2549,7 @@ call — the builder is a thin client over `POST .../preview` (the same read-onl
 described above), which validates the candidate config through the real `ReadinessConfig`
 and hands back generated YAML. You paste the snippet into the pipeline's YAML file yourself
 and ship it through the normal `POST /reload` + git review workflow (§3c) — the builder
-never touches the file on disk, and P-Ork's git-controlled-config posture is unchanged.
+never touches the file on disk, and VectorStep's git-controlled-config posture is unchanged.
 
 #### Marking queue
 
@@ -2587,7 +2587,7 @@ Agents are uniquely identified by `executor:name` — e.g. `openclaw:sre-investi
 | Executor | Agent list | Agent files |
 |---|---|---|
 | `openclaw` | OpenClaw Gateway WS — `agents.list` RPC | `agents.files.get` RPC — `SOUL.md`, `TOOLS.md`, `IDENTITY.md` tabs |
-| `gateway` | P-Ork Gateway REST — `GET /agents` | `GET /agents/{name}/soul` (Soul tab) · `GET /agents/{name}/agent` (Config tab — raw `agent.yaml`) |
+| `gateway` | VectorStep Gateway REST — `GET /agents` | `GET /agents/{name}/soul` (Soul tab) · `GET /agents/{name}/agent` (Config tab — raw `agent.yaml`) |
 
 Both backends are queried concurrently. If one is unreachable, the other's agents still show with a warning banner. If both fail, stub entries from DB run history are surfaced.
 
@@ -2617,7 +2617,7 @@ step_library_dir: ./steps            # reusable step definitions; omit to disabl
 
 database:
   url: sqlite+aiosqlite:///./runs.db
-  # url: postgresql+asyncpg://user:password@localhost:5432/pork   # production — see §Database
+  # url: postgresql+asyncpg://user:password@localhost:5432/vectorstep   # production — see §Database
 
 notifications:
   telegram:
@@ -2628,9 +2628,9 @@ executors:
   openclaw:
     url: ws://127.0.0.1:18789/rpc      # OpenClaw Gateway WebSocket URL
   gateway:
-    url: ws://localhost:18780/ws        # P-Ork Gateway WebSocket URL
-    token: ${PORK_GATEWAY_TOKEN}        # Bearer token; empty string for local dev
-    rest_url: http://localhost:18780    # P-Ork Gateway REST base URL (used by Agents UI)
+    url: ws://localhost:18780/ws        # VectorStep Gateway WebSocket URL
+    token: ${VECTORSTEP_GATEWAY_TOKEN}        # Bearer token; empty string for local dev
+    rest_url: http://localhost:18780    # VectorStep Gateway REST base URL (used by Agents UI)
 
 logging:
   level: INFO
@@ -2654,10 +2654,10 @@ auth:
   teams:                               # per-team tokens — see §3b. Each team's token resolves
                                        # the `team` attribution on every run it authenticates.
     - name: payments
-      token: ${PORK_WEBHOOK_TOKEN_PAYMENTS}
+      token: ${VECTORSTEP_WEBHOOK_TOKEN_PAYMENTS}
     - name: platform
-      token: ${PORK_WEBHOOK_TOKEN_PLATFORM}
-  # token: ${PORK_WEBHOOK_TOKEN}       # legacy single-token form — still supported if `teams`
+      token: ${VECTORSTEP_WEBHOOK_TOKEN_PLATFORM}
+  # token: ${VECTORSTEP_WEBHOOK_TOKEN}       # legacy single-token form — still supported if `teams`
                                        # is omitted; every run's team is then unattributed (None).
                                        # If both `teams` and `token` are set, `teams` wins.
                                        # Omit this whole block (or leave empty) to run unauthenticated.
@@ -2669,7 +2669,7 @@ observability:
     enabled: false                     # omit this block (or set false) to disable tracing entirely
     exporter: otlp                     # otlp | console — see §15b
     endpoint: http://localhost:4318/v1/traces
-    service_name: pork-service
+    service_name: vectorstep-service
 
 calibration:                           # omit this block entirely for the defaults shown below
   n_min: 20                            # marked outcomes required before a bucket is "validated"
@@ -2693,10 +2693,10 @@ The ORM layer (SQLAlchemy async) is dialect-agnostic — switching backends is a
 
 **Setup (Postgres):**
 ```bash
-createdb pork
+createdb vectorstep
 # config.yaml:
 database:
-  url: postgresql+asyncpg://user:password@localhost:5432/pork
+  url: postgresql+asyncpg://user:password@localhost:5432/vectorstep
 ```
 
 Tables and migrations run automatically on startup (`create_tables()` in
@@ -2721,29 +2721,29 @@ described in §3a at the database layer, not just the application-level pre-chec
 - OpenClaw installed via nvm: `~/.nvm/versions/node/v22.22.2/bin/openclaw`
 - Config: `~/.openclaw/openclaw.json`
 - OpenClaw Gateway: `openclaw gateway --port 18789`
-- P-Ork Gateway: separate service in `../P-Ork-Gateway`, runs on port 18780
+- VectorStep Gateway: separate service in `../VectorStep-Gateway`, runs on port 18780
 - Telegram bot `@alexdclaw_bot` — OpenClaw notifications
-- Separate Telegram bot for P-Ork HITL approval steps (different bot required)
+- Separate Telegram bot for VectorStep HITL approval steps (different bot required)
 - MCP servers configured: `filesystem`, `grafana`, `grafana_google`, `tavily`, `atlassian`
 - Providers: Anthropic, OpenRouter (free tier), Ollama Cloud (`ollama-cloud/` prefix)
 
 ### OpenClaw Identity Files
 
-The `openclaw` executor authenticates to the OpenClaw Gateway using **Ed25519 device-signature auth**. The required files are created automatically by OpenClaw — they are not something P-Ork creates:
+The `openclaw` executor authenticates to the OpenClaw Gateway using **Ed25519 device-signature auth**. The required files are created automatically by OpenClaw — they are not something VectorStep creates:
 
 | File | Created by | Purpose |
 |---|---|---|
 | `~/.openclaw/identity/device.json` | OpenClaw on first run / `openclaw configure` | Device ID + Ed25519 private key |
 | `~/.openclaw/identity/device-auth.json` | OpenClaw device authorisation flow | Operator token + scopes |
 
-**Co-located setup (P-Ork and OpenClaw on the same machine):** the files are already present and everything works automatically.
+**Co-located setup (VectorStep and OpenClaw on the same machine):** the files are already present and everything works automatically.
 
 **Remote OpenClaw (gateway on a different machine):**
-1. Copy `~/.openclaw/identity/` from the OpenClaw machine to the P-Ork machine (or mount it as a Kubernetes Secret)
+1. Copy `~/.openclaw/identity/` from the OpenClaw machine to the VectorStep machine (or mount it as a Kubernetes Secret)
 2. Set `executors.openclaw.identity_dir` in `config.yaml` to the path where you copied the files
-3. On the OpenClaw machine, confirm P-Ork's device is approved: `openclaw devices list`
+3. On the OpenClaw machine, confirm VectorStep's device is approved: `openclaw devices list`
 
-**If the files are missing:** P-Ork logs a warning at startup and the `openclaw` executor is still registered, but any pipeline step using `executor: openclaw` will fail with a clear `FileNotFoundError` until the files are in place. The service continues to run normally — only openclaw steps are affected.
+**If the files are missing:** VectorStep logs a warning at startup and the `openclaw` executor is still registered, but any pipeline step using `executor: openclaw` will fail with a clear `FileNotFoundError` until the files are in place. The service continues to run normally — only openclaw steps are affected.
 
 ---
 
@@ -2785,12 +2785,12 @@ pytest
 
 By default the suite runs against SQLite — a fresh per-test temp-file DB, no setup
 required. To run the same tests against Postgres instead (exercising the
-Postgres-only migration branch in `create_tables()`), point `PORK_TEST_DATABASE_URL`
+Postgres-only migration branch in `create_tables()`), point `VECTORSTEP_TEST_DATABASE_URL`
 at a throwaway database:
 
 ```bash
-createdb pork_test
-PORK_TEST_DATABASE_URL=postgresql+asyncpg://localhost:5432/pork_test pytest
+createdb vectorstep_test
+VECTORSTEP_TEST_DATABASE_URL=postgresql+asyncpg://localhost:5432/vectorstep_test pytest
 ```
 
 Isolation on Postgres is via a `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`

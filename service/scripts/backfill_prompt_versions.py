@@ -210,7 +210,7 @@ async def run(config_path: str, dry_run: bool) -> None:
     step_library_dir = config.get("step_library_dir", "./steps")
     pipeline_dir = config.get("pipeline_config_dir", "./pipelines")
     gateway_cfg = config.get("executors", {}).get("gateway", {})
-    rest_url = gateway_cfg.get("rest_url") or os.environ.get("PORK_GATEWAY_URL", "http://localhost:18780")
+    rest_url = gateway_cfg.get("rest_url") or os.environ.get("VECTORSTEP_GATEWAY_URL", "http://localhost:18780")
     calibration_cfg = config.get("calibration", {})
     n_min = calibration_cfg.get("n_min", 20)
     bin_width = calibration_cfg.get("bin_width", 0.1)

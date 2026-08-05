@@ -108,7 +108,7 @@ class OpenClawExecutor(BaseExecutor):
 
         with tracer.start_as_current_span(
             "gen_ai.openclaw",
-            attributes={"gen_ai.system": "openclaw", "pork.agent": agent},
+            attributes={"gen_ai.system": "openclaw", "vectorstep.agent": agent},
         ) as span:
             raw = await self._call_agent(agent, session_key, prompt, timeout, thinking_level)
             span.set_attributes(gen_ai_attrs_from_meta(raw.get("result", {}).get("meta", {})))

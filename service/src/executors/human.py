@@ -49,7 +49,7 @@ def configure(
     legacy_telegram: notifications.telegram config, used as the fallback channel when a
         team has no human_approval entry at all (keeps pre-existing deployments working
         unchanged).
-    ui_base_url: base URL P-Ork's own UI is reachable at, used to build the
+    ui_base_url: base URL VectorStep's own UI is reachable at, used to build the
         /ui/approvals/{token} link sent to the Teams channel.
     """
     global _human_approval_cfg, _legacy_telegram_cfg, _ui_base_url
@@ -188,7 +188,7 @@ class SlackApprovalChannel:
                 {"type": "section", "text": {"type": "mrkdwn", "text": text}},
                 {
                     "type": "actions",
-                    "block_id": f"pork_approval:{token}",
+                    "block_id": f"vectorstep_approval:{token}",
                     "elements": [
                         {
                             "type": "button",
@@ -219,10 +219,10 @@ class SlackApprovalChannel:
 
 class TeamsApprovalChannel:
     """Posts a one-way notification to a Microsoft Teams channel (via a Power Automate
-    webhook flow) linking to P-Ork's own /ui/approvals/{token} page.
+    webhook flow) linking to VectorStep's own /ui/approvals/{token} page.
 
     Teams Adaptive Card actions need a public Bot Framework callback endpoint, which this
-    deployment doesn't expose — so the decision is made in P-Ork's UI instead of in-Teams.
+    deployment doesn't expose — so the decision is made in VectorStep's UI instead of in-Teams.
     """
 
     def __init__(self, webhook_url: str, ui_base_url: str):

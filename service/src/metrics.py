@@ -225,7 +225,7 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
     )
 
 
-class PorkCollector(Collector):
+class VectorStepCollector(Collector):
     """One-shot collector populated with data fetched just before a scrape."""
 
     def __init__(self, data: MetricsData):
@@ -235,7 +235,7 @@ class PorkCollector(Collector):
         data = self._data
 
         runs_total = CounterMetricFamily(
-            "pork_pipeline_runs_total",
+            "vectorstep_pipeline_runs_total",
             "Total pipeline runs by pipeline and terminal status",
             labels=["pipeline", "status"],
         )
@@ -244,13 +244,13 @@ class PorkCollector(Collector):
         yield runs_total
 
         yield GaugeMetricFamily(
-            "pork_pipeline_runs_in_progress",
+            "vectorstep_pipeline_runs_in_progress",
             "Pipeline runs currently in status=running",
             value=data.runs_in_progress,
         )
 
         steps_total = CounterMetricFamily(
-            "pork_pipeline_steps_total",
+            "vectorstep_pipeline_steps_total",
             "Total pipeline steps by pipeline, step, executor, agent, model, provider, and status",
             labels=["pipeline", "step_name", "executor", "agent", "model", "provider", "status"],
         )
@@ -265,12 +265,12 @@ class PorkCollector(Collector):
         yield self._grounding_histogram(data.grounding_scores)
 
         verifier_runs = CounterMetricFamily(
-            "pork_verifier_runs_total",
+            "vectorstep_verifier_runs_total",
             "Total steps where a verifier ran, by primary agent",
             labels=["agent"],
         )
         verifier_overrides = CounterMetricFamily(
-            "pork_verifier_overrides_total",
+            "vectorstep_verifier_overrides_total",
             "Total verifier runs where the verifier lowered the primary's effective confidence",
             labels=["agent"],
         )
@@ -281,7 +281,7 @@ class PorkCollector(Collector):
         yield verifier_overrides
 
         token_totals = CounterMetricFamily(
-            "pork_pipeline_tokens_total",
+            "vectorstep_pipeline_tokens_total",
             "Cumulative LLM tokens consumed, by team, pipeline, step, executor, agent, model, provider, and direction",
             labels=["team", "pipeline", "step_name", "executor", "agent", "model", "provider", "direction"],
         )
@@ -292,7 +292,7 @@ class PorkCollector(Collector):
         yield token_totals
 
         decisions_total = CounterMetricFamily(
-            "pork_human_approval_decisions_total",
+            "vectorstep_human_approval_decisions_total",
             "Total human-in-the-loop approve/reject decisions, by team, pipeline, and decision",
             labels=["team", "pipeline", "decision"],
         )
@@ -301,7 +301,7 @@ class PorkCollector(Collector):
         yield decisions_total
 
         feedback_total = CounterMetricFamily(
-            "pork_pipeline_feedback_total",
+            "vectorstep_pipeline_feedback_total",
             "Total human accuracy feedback submissions, by pipeline and outcome",
             labels=["pipeline", "outcome"],
         )
@@ -310,7 +310,7 @@ class PorkCollector(Collector):
         yield feedback_total
 
         step_feedback_total = CounterMetricFamily(
-            "pork_step_feedback_total",
+            "vectorstep_step_feedback_total",
             "Total human accuracy feedback submissions per step, by pipeline, step, agent, model, provider, and outcome",
             labels=["pipeline", "step_name", "agent", "model", "provider", "outcome"],
         )
@@ -321,7 +321,7 @@ class PorkCollector(Collector):
         yield step_feedback_total
 
         deterministic_total = CounterMetricFamily(
-            "pork_step_deterministic_check_total",
+            "vectorstep_step_deterministic_check_total",
             "Total deterministic-check step outcomes, by pipeline, step, and outcome",
             labels=["pipeline", "step_name", "outcome"],
         )
@@ -344,7 +344,7 @@ class PorkCollector(Collector):
             pending_by_team[item.get("team") or ""] += 1
 
         gauge = GaugeMetricFamily(
-            "pork_human_approvals_pending",
+            "vectorstep_human_approvals_pending",
             "Currently pending human-in-the-loop approvals, by team",
             labels=["team"],
         )
@@ -364,7 +364,7 @@ class PorkCollector(Collector):
             grouped[(pipeline, step_name, executor, agent or "", model or "", provider or "")].append(seconds)
 
         hist = HistogramMetricFamily(
-            "pork_pipeline_step_duration_seconds",
+            "vectorstep_pipeline_step_duration_seconds",
             "Pipeline step execution duration in seconds, by pipeline, step, executor, agent, model, and provider",
             labels=["pipeline", "step_name", "executor", "agent", "model", "provider"],
         )
@@ -387,7 +387,7 @@ class PorkCollector(Collector):
             grouped[(pipeline, step_name, agent or "", model or "", provider or "")].append(g)
         _BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, float("inf"))
         hist = HistogramMetricFamily(
-            "pork_step_grounding_score",
+            "vectorstep_step_grounding_score",
             "Shadow-mode grounding score (G) distribution per step, by pipeline, step, agent, model, provider",
             labels=["pipeline", "step_name", "agent", "model", "provider"],
         )

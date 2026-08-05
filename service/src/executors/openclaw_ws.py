@@ -178,7 +178,7 @@ class OpenClawWSExecutor(BaseExecutor):
             "gen_ai.openclaw_ws",
             attributes={
                 "gen_ai.system": "openclaw_ws",
-                "pork.agent": agent,
+                "vectorstep.agent": agent,
                 "gen_ai.request.model": model or "",
             },
         ) as span:
@@ -284,7 +284,7 @@ class OpenClawWSExecutor(BaseExecutor):
             # NOTE: inject_traceparent() is intentionally NOT called here.
             # The OpenClaw gateway does not accept unknown params (like W3C
             # traceparent) and rejects the request with a validation error.
-            # Trace context propagation is only used with the P-Ork Gateway
+            # Trace context propagation is only used with the VectorStep Gateway
             # executor, which explicitly supports it.
 
             agent_req_id = str(uuid.uuid4())

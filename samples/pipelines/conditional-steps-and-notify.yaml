@@ -95,7 +95,7 @@ steps:
         payload:
           summary: "{{context.summary}}"
           severity: "{{context.severity}}"
-          source: pork
+          source: vectorstep
           custom_details:
             triage_summary: "{{steps.triage.output.summary}}"
             confidence: "{{steps.triage.output.confidence}}"
@@ -130,7 +130,7 @@ notifications:
         Alert: {{context.summary}} (confidence {{confidence | round(2)}})
       config:
         level: error          # debug | info | warning | error | critical (default: warning)
-        logger: pork.notifications  # logger name (default: pork.notifications)
+        logger: vectorstep.notifications  # logger name (default: vectorstep.notifications)
     - channel: telegram
       template: |
         🚨 Alert triage failed with low confidence.

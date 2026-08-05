@@ -1,6 +1,6 @@
 """Tests for shadow-mode grounding (SPEC-grounding-shadow.md): trace formatting,
 _run_grounding, _build_trust_report, the shadow-means-no-gate-change guarantee,
-persistence, migration, and the pork_step_grounding_score metric."""
+persistence, migration, and the vectorstep_step_grounding_score metric."""
 import asyncio
 import json
 from datetime import datetime
@@ -10,7 +10,7 @@ from sqlalchemy import inspect, select
 from src.db.database import create_tables, get_session_factory
 from src.db.models import PipelineStep
 from src.executors.base import LLMParseError
-from src.metrics import MetricsData, PorkCollector, fetch_metrics_data
+from src.metrics import MetricsData, VectorStepCollector, fetch_metrics_data
 from src.models.context import NormalisedContext
 from src.models.llm import LLMOutput
 from src.models.pipeline import GroundingConfig, PipelineConfig, StepConfig, TriggerConfig
@@ -512,7 +512,7 @@ def _find_family(families, name):
     return next(f for f in families if f.name == name)
 
 
-def test_collect_emits_pork_step_grounding_score():
+def test_collect_emits_vectorstep_step_grounding_score():
     data = MetricsData(
         run_counts=[], runs_in_progress=0, step_counts=[], step_durations=[],
         verifier_counts=[], token_usage=[], human_decisions=[], feedback_counts=[],
@@ -523,10 +523,10 @@ def test_collect_emits_pork_step_grounding_score():
         ],
         deterministic_check_counts=[],
     )
-    families = list(PorkCollector(data).collect())
-    family = _find_family(families, "pork_step_grounding_score")
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_step_grounding_score")
 
-    sum_sample = next(s for s in family.samples if s.name == "pork_step_grounding_score_sum")
+    sum_sample = next(s for s in family.samples if s.name == "vectorstep_step_grounding_score_sum")
     assert sum_sample.value == 0.9 + 0.3
     assert sum_sample.labels["pipeline"] == "p"
     assert sum_sample.labels["step_name"] == "investigate"
@@ -534,7 +534,7 @@ def test_collect_emits_pork_step_grounding_score():
     assert sum_sample.labels["model"] == "claude-sonnet-5"
     assert sum_sample.labels["provider"] == "anthropic"
 
-    count_sample = next(s for s in family.samples if s.name == "pork_step_grounding_score_count")
+    count_sample = next(s for s in family.samples if s.name == "vectorstep_step_grounding_score_count")
     assert count_sample.value == 2
 
 

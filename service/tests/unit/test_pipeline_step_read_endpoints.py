@@ -1,5 +1,5 @@
-"""Tests for the new read endpoints added for the P-Ork Service MCP
-(SPEC-pork-service-mcp.md §5a): GET /pipelines/{name}, GET /steps,
+"""Tests for the new read endpoints added for the VectorStep Service MCP
+(SPEC-vectorstep-service-mcp.md §5a): GET /pipelines/{name}, GET /steps,
 GET /steps/{name}, GET /agents; plus the new stage filter on GET /runs
 (needed for the list_runs tool's stage? parameter)."""
 from datetime import datetime
@@ -126,10 +126,10 @@ async def test_list_agents_merges_backends_and_fails_soft(monkeypatch, client):
         return [{"id": "oc-1", "model": "claude-sonnet-5"}], None
 
     async def fake_gateway():
-        return [], "Could not reach P-Ork Gateway at http://x — is it running?"
+        return [], "Could not reach VectorStep Gateway at http://x — is it running?"
 
     monkeypatch.setattr(main, "_fetch_openclaw_agents", fake_openclaw)
-    monkeypatch.setattr(main, "_fetch_pork_gateway_agents", fake_gateway)
+    monkeypatch.setattr(main, "_fetch_vectorstep_gateway_agents", fake_gateway)
 
     resp = await client.get("/agents")
 

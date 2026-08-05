@@ -27,14 +27,14 @@ class LogNotifier:
 
     Per-notification config keys (under notification.config):
         level   — log level: debug | info | warning | error | critical (default: warning)
-        logger  — logger name (default: pork.notifications)
+        logger  — logger name (default: vectorstep.notifications)
     """
 
     async def send(self, notification: NotificationConfig, context: dict) -> None:
         cfg = notification.config
         level_str = str(cfg.get("level", "warning")).lower()
         level = _LEVELS.get(level_str, logging.WARNING)
-        logger_name = cfg.get("logger", "pork.notifications")
+        logger_name = cfg.get("logger", "vectorstep.notifications")
 
         log = logging.getLogger(logger_name)
         message = _jinja_env.from_string(notification.template).render(**context).strip()

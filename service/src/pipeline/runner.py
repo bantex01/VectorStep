@@ -340,11 +340,11 @@ class PipelineRunner:
         with start_root_span(
             _span_name,
             attributes={
-                "pork.pipeline.name": pipeline.name,
-                "pork.run.id": run_id,
-                "pork.source": normalised.source,
-                **({"pork.team": normalised.team} if normalised.team else {}),
-                **({"pork.parent_run_id": parent_run_id} if parent_run_id else {}),
+                "vectorstep.pipeline.name": pipeline.name,
+                "vectorstep.run.id": run_id,
+                "vectorstep.source": normalised.source,
+                **({"vectorstep.team": normalised.team} if normalised.team else {}),
+                **({"vectorstep.parent_run_id": parent_run_id} if parent_run_id else {}),
             },
         ) as run_span:
             result = await self._run_pipeline_body(
@@ -353,9 +353,9 @@ class PipelineRunner:
                 initial_step_outputs=initial_step_outputs,
                 parent_run_id=parent_run_id,
             )
-            run_span.set_attribute("pork.run.status", result.status)
+            run_span.set_attribute("vectorstep.run.status", result.status)
             if result.abort_reason:
-                run_span.set_attribute("pork.run.abort_reason", result.abort_reason)
+                run_span.set_attribute("vectorstep.run.abort_reason", result.abort_reason)
             if result.status == "failed":
                 run_span.set_status(Status(StatusCode.ERROR))
 
@@ -572,30 +572,30 @@ class PipelineRunner:
     # Sequential step execution
     # ------------------------------------------------------------------
 
-    def _inject_pork_context(self, ctx: dict, normalised: "NormalisedContext") -> None:
+    def _inject_vectorstep_context(self, ctx: dict, normalised: "NormalisedContext") -> None:
         """Inject internal runner references so executor: pipeline can call sub-pipelines."""
         if self._pipeline_registry is not None:
-            ctx["_pork_runner"] = self
-            ctx["_pork_normalised"] = normalised
-            ctx["_pork_registry"] = self._pipeline_registry
+            ctx["_vectorstep_runner"] = self
+            ctx["_vectorstep_normalised"] = normalised
+            ctx["_vectorstep_registry"] = self._pipeline_registry
 
     @staticmethod
     def _set_step_span_attributes(
         span, result: "StepResult", prompt_template: str | None = None,
     ) -> None:
-        span.set_attribute("pork.step.status", result.status)
+        span.set_attribute("vectorstep.step.status", result.status)
         if result.effective_confidence is not None:
-            span.set_attribute("pork.confidence.effective", result.effective_confidence)
+            span.set_attribute("vectorstep.confidence.effective", result.effective_confidence)
         if result.output:
-            span.set_attribute("pork.confidence.primary", result.output.confidence)
+            span.set_attribute("vectorstep.confidence.primary", result.output.confidence)
             if result.output.model:
-                span.set_attribute("pork.model", result.output.model)
+                span.set_attribute("vectorstep.model", result.output.model)
             if result.output.provider:
-                span.set_attribute("pork.provider", result.output.provider)
+                span.set_attribute("vectorstep.provider", result.output.provider)
             if result.output.agent_version:
-                span.set_attribute("pork.agent_version", result.output.agent_version)
+                span.set_attribute("vectorstep.agent_version", result.output.agent_version)
         if result.verifier_output:
-            span.set_attribute("pork.confidence.verifier", result.verifier_output.confidence)
+            span.set_attribute("vectorstep.confidence.verifier", result.verifier_output.confidence)
         # prompt_template is only passed where a single template unambiguously applies
         # to this span (a plain step, or a fan-out group — all its branches share one
         # template). A parallel group's branches each have their own distinct template,
@@ -603,7 +603,7 @@ class PipelineRunner:
         if prompt_template is not None:
             h = prompt_hash(prompt_template)
             if h is not None:
-                span.set_attribute("pork.prompt_hash", h)
+                span.set_attribute("vectorstep.prompt_hash", h)
         if result.status == "failed":
             span.set_status(Status(StatusCode.ERROR))
 
@@ -621,9 +621,9 @@ class PipelineRunner:
         with tracer.start_as_current_span(
             step.name,
             attributes={
-                "pork.span.kind": "step",
-                "pork.executor": step.executor,
-                "pork.agent": agent,
+                "vectorstep.span.kind": "step",
+                "vectorstep.executor": step.executor,
+                "vectorstep.agent": agent,
             },
         ) as span:
             result = await self._run_step_impl(
@@ -668,7 +668,7 @@ class PipelineRunner:
                 pipeline, normalised, run_id, step.name, step_outputs,
                 artifact_store=self._artifact_store,
             )
-            self._inject_pork_context(ctx, normalised)
+            self._inject_vectorstep_context(ctx, normalised)
             if loop_cfg:
                 ctx["loop"] = {
                     "iteration": iteration,
@@ -1002,9 +1002,9 @@ class PipelineRunner:
         with tracer.start_as_current_span(
             group.name,
             attributes={
-                "pork.span.kind": "parallel_group",
-                "pork.join_strategy": group.join,
-                "pork.branch_count": len(group.steps),
+                "vectorstep.span.kind": "parallel_group",
+                "vectorstep.join_strategy": group.join,
+                "vectorstep.branch_count": len(group.steps),
             },
         ) as span:
             result = await self._run_parallel_group_impl(
@@ -1028,7 +1028,7 @@ class PipelineRunner:
             pipeline, normalised, run_id, group.name, step_outputs,
             artifact_store=self._artifact_store,
         )
-        self._inject_pork_context(ctx, normalised)
+        self._inject_vectorstep_context(ctx, normalised)
 
         logger.info(
             "Executing parallel group '%s' — %d branch(es)", group.name, len(group.steps)
@@ -1161,8 +1161,8 @@ class PipelineRunner:
         with tracer.start_as_current_span(
             fan_out.name,
             attributes={
-                "pork.span.kind": "fan_out",
-                "pork.join_strategy": fan_out.join,
+                "vectorstep.span.kind": "fan_out",
+                "vectorstep.join_strategy": fan_out.join,
             },
         ) as span:
             result = await self._run_fan_out_impl(
@@ -1190,7 +1190,7 @@ class PipelineRunner:
             pipeline, normalised, run_id, fan_out.name, step_outputs,
             artifact_store=self._artifact_store,
         )
-        self._inject_pork_context(base_ctx, normalised)
+        self._inject_vectorstep_context(base_ctx, normalised)
 
         # Resolve `over` — Jinja2 render always returns a string; ast.literal_eval handles
         # Python repr of lists (e.g. "['a', 'b']"); json.loads covers valid JSON arrays.
@@ -1406,17 +1406,17 @@ class PipelineRunner:
         with tracer.start_as_current_span(
             branch.name,
             attributes={
-                "pork.span.kind": "branch",
-                "pork.executor": branch.executor,
-                "pork.agent": agent,
+                "vectorstep.span.kind": "branch",
+                "vectorstep.executor": branch.executor,
+                "vectorstep.agent": agent,
             },
         ) as span:
             output = await self._run_parallel_branch_impl(branch, ctx, run_log, run_id)
-            span.set_attribute("pork.confidence", output.confidence)
+            span.set_attribute("vectorstep.confidence", output.confidence)
             if output.model:
-                span.set_attribute("pork.model", output.model)
+                span.set_attribute("vectorstep.model", output.model)
             if output.provider:
-                span.set_attribute("pork.provider", output.provider)
+                span.set_attribute("vectorstep.provider", output.provider)
             if getattr(output, "failed", False):
                 span.set_status(Status(StatusCode.ERROR))
             return output
@@ -1544,11 +1544,11 @@ class PipelineRunner:
         span_name = f"{step.name}:independent" if verifier.mode == "independent" else f"{step.name}:verifier"
         with tracer.start_as_current_span(
             span_name,
-            attributes={"pork.span.kind": "verifier", "pork.verifier.mode": verifier.mode},
+            attributes={"vectorstep.span.kind": "verifier", "vectorstep.verifier.mode": verifier.mode},
         ) as span:
             output = await self._run_verifier_impl(step, ctx, primary_output, run_log)
             if output is not None:
-                span.set_attribute("pork.confidence", output.confidence)
+                span.set_attribute("vectorstep.confidence", output.confidence)
             else:
                 span.set_status(Status(StatusCode.ERROR))
             return output
@@ -1688,7 +1688,7 @@ class PipelineRunner:
 
         with tracer.start_as_current_span(
             f"{step.name}:grounding",
-            attributes={"pork.span.kind": "grounding", "pork.agent": grounding.agent},
+            attributes={"vectorstep.span.kind": "grounding", "vectorstep.agent": grounding.agent},
         ) as span:
             try:
                 executor = self._get_executor(grounding.executor)
@@ -1720,7 +1720,7 @@ class PipelineRunner:
                 return None, error_report, 0
 
             g = max(0.0, min(1.0, float(out.confidence)))
-            span.set_attribute("pork.grounding.score", g)
+            span.set_attribute("vectorstep.grounding.score", g)
             claims = (out.reasoning or {}).get("claims") if out.reasoning else None
             _gi, _go = self._extract_usage(out.raw_response)
             _log_event(run_log, "info", "grounding_ran",

@@ -1,5 +1,5 @@
 """Tests for service/src/analytics.py and the JSON /stats endpoints it powers
-(SPEC-pork-service-mcp.md §4/§5b/§6/§9).
+(SPEC-vectorstep-service-mcp.md §4/§5b/§6/§9).
 
 Covers: operational rollups (run/status counts, tokens, duration avg/p95),
 judged accuracy (RunFeedback/StepFeedback), production-vs-testing/all stage

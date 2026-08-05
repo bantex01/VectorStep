@@ -1,7 +1,7 @@
 # Template: Dedup-Aware Alert Triage
 #
 # Demonstrates trigger.dedup (see README §3a) — a per-pipeline override of the
-# webhook deduplication window described in IMPROVEMENTS_PORK.md.
+# webhook deduplication window described in IMPROVEMENTS_VECTORSTEP.md.
 #
 # Dedup applies automatically to alertmanager-sourced webhooks with NO config
 # needed — every alert carries a fingerprint (Alertmanager's own per-alert

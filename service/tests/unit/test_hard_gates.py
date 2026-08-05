@@ -1,7 +1,7 @@
 """Tests for deterministic checks (D) + grounding as an opt-in gate (SPEC-hard-gates.md):
 config parsing, the three check-type evaluators, request_decision, the HumanExecutor
 regression guarantee, _run_deterministic_checks, the gate integration (the critical
-tests), persistence, migration, and the pork_step_deterministic_check_total metric."""
+tests), persistence, migration, and the vectorstep_step_deterministic_check_total metric."""
 import asyncio
 import json
 from datetime import datetime
@@ -14,7 +14,7 @@ from sqlalchemy import inspect, select
 from src.db.database import create_tables, get_session_factory
 from src.db.models import PipelineStep
 from src.executors import human
-from src.metrics import MetricsData, PorkCollector, fetch_metrics_data
+from src.metrics import MetricsData, VectorStepCollector, fetch_metrics_data
 from src.models.context import NormalisedContext
 from src.models.llm import LLMOutput
 from src.models.pipeline import (
@@ -778,7 +778,7 @@ def _find_family(families, sample_name):
     return next(f for f in families if any(s.name == sample_name for s in f.samples))
 
 
-def test_collect_emits_pork_step_deterministic_check_total():
+def test_collect_emits_vectorstep_step_deterministic_check_total():
     data = MetricsData(
         run_counts=[], runs_in_progress=0, step_counts=[], step_durations=[],
         verifier_counts=[], token_usage=[], human_decisions=[], feedback_counts=[],
@@ -788,8 +788,8 @@ def test_collect_emits_pork_step_deterministic_check_total():
             ("p", "investigate", "failed", 1),
         ],
     )
-    families = list(PorkCollector(data).collect())
-    family = _find_family(families, "pork_step_deterministic_check_total")
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_step_deterministic_check_total")
 
     by_outcome = {s.labels["outcome"]: s.value for s in family.samples}
     assert by_outcome["passed"] == 3

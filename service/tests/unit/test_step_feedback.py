@@ -1,5 +1,5 @@
 """Tests for per-step accuracy feedback: POST/GET /runs/{run_id}/steps/{step_name}/feedback,
-the Steps Insights rollup, and the pork_step_feedback_total metric."""
+the Steps Insights rollup, and the vectorstep_step_feedback_total metric."""
 from datetime import datetime
 
 import httpx
@@ -8,7 +8,7 @@ import pytest
 from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep, StepFeedback
 from src.main import app
-from src.metrics import MetricsData, PorkCollector, fetch_metrics_data
+from src.metrics import MetricsData, VectorStepCollector, fetch_metrics_data
 
 
 @pytest.fixture
@@ -194,7 +194,7 @@ async def test_steps_insights_rollup_includes_accuracy(db, client):
 # Metric
 # ---------------------------------------------------------------------------
 
-def test_collect_emits_pork_step_feedback_total():
+def test_collect_emits_vectorstep_step_feedback_total():
     data = MetricsData(
         run_counts=[], runs_in_progress=0, step_counts=[], step_durations=[],
         verifier_counts=[], token_usage=[], human_decisions=[], feedback_counts=[],
@@ -205,8 +205,8 @@ def test_collect_emits_pork_step_feedback_total():
         grounding_scores=[],
         deterministic_check_counts=[],
     )
-    families = list(PorkCollector(data).collect())
-    family = _find_family(families, "pork_step_feedback_total")
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_step_feedback_total")
 
     by_outcome = {s.labels["outcome"]: (s.value, s.labels) for s in family.samples}
     assert by_outcome["correct"][0] == 3

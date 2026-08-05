@@ -55,9 +55,9 @@ def _make_ctx(pipeline_name="sub-pipeline", normalised=None, runner=None, regist
     reg = registry if registry is not None else {pipeline_name: sub_pipeline}
     return {
         "pipeline_run_id": "parent-run-1",
-        "_pork_runner": mock_runner,
-        "_pork_normalised": normalised,
-        "_pork_registry": reg,
+        "_vectorstep_runner": mock_runner,
+        "_vectorstep_normalised": normalised,
+        "_vectorstep_registry": reg,
     }, mock_runner
 
 
@@ -82,9 +82,9 @@ async def test_pipeline_executor_unknown_pipeline():
 async def test_pipeline_executor_missing_registry():
     ctx = {
         "pipeline_run_id": "parent-run-1",
-        "_pork_runner": MagicMock(),
-        "_pork_normalised": _make_normalised(),
-        # _pork_registry intentionally absent
+        "_vectorstep_runner": MagicMock(),
+        "_vectorstep_normalised": _make_normalised(),
+        # _vectorstep_registry intentionally absent
     }
     step = StepConfig(name="s", executor="pipeline", executor_config={"pipeline": "sub"})
     with pytest.raises(RuntimeError, match="pipeline_registry"):
@@ -249,8 +249,8 @@ async def test_pipeline_executor_context_override_team():
 # Runner context injection
 # ---------------------------------------------------------------------------
 
-async def test_runner_injects_pork_context_when_registry_set():
-    """Runner should inject _pork_* keys into step context when registry is configured."""
+async def test_runner_injects_vectorstep_context_when_registry_set():
+    """Runner should inject _vectorstep_* keys into step context when registry is configured."""
     from src.pipeline.runner import PipelineRunner
 
     received_ctx: dict = {}
@@ -279,14 +279,14 @@ async def test_runner_injects_pork_context_when_registry_set():
         run_id="run-1", step_outputs={}, run_log=[],
     )
 
-    assert "_pork_runner" in received_ctx
-    assert "_pork_normalised" in received_ctx
-    assert "_pork_registry" in received_ctx
-    assert received_ctx["_pork_registry"] == {"my-sub": sub_pipeline}
+    assert "_vectorstep_runner" in received_ctx
+    assert "_vectorstep_normalised" in received_ctx
+    assert "_vectorstep_registry" in received_ctx
+    assert received_ctx["_vectorstep_registry"] == {"my-sub": sub_pipeline}
 
 
-async def test_runner_no_pork_context_without_registry():
-    """Runner should not inject _pork_* keys when no pipeline_registry is set."""
+async def test_runner_no_vectorstep_context_without_registry():
+    """Runner should not inject _vectorstep_* keys when no pipeline_registry is set."""
     from src.pipeline.runner import PipelineRunner
 
     received_ctx: dict = {}
@@ -309,5 +309,5 @@ async def test_runner_no_pork_context_without_registry():
         run_id="run-1", step_outputs={}, run_log=[],
     )
 
-    assert "_pork_runner" not in received_ctx
-    assert "_pork_registry" not in received_ctx
+    assert "_vectorstep_runner" not in received_ctx
+    assert "_vectorstep_registry" not in received_ctx
