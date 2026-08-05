@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Agents — P-Ork{% endblock %}
+{% block title %}Agents — VectorStep{% endblock %}
 {% block page_heading %}
 <h1 class="text-2xl font-semibold text-zinc-50">Agents</h1>
 {% if all_executors or all_models %}
@@ -183,7 +183,7 @@
   {% if selected_executor or selected_model %}
     No agents match the selected filters. <a href="/ui/agents" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">Clear filter</a>
   {% else %}
-    No agents found. Make sure at least one executor backend (OpenClaw Gateway or P-Ork Gateway) is reachable.
+    No agents found. Make sure at least one executor backend (OpenClaw Gateway or VectorStep Gateway) is reachable.
   {% endif %}
 </div>
 {% endif %}

@@ -39,7 +39,7 @@ steps:
     on_low_confidence: abort
     on_abort: rejected
     prompt_template: |
-      <b>P-Ork approval request</b>
+      <b>VectorStep approval request</b>
 
       Pipeline: <code>{{pipeline_name}}</code>
       Run: <code>{{pipeline_run_id}}</code>

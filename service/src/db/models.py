@@ -108,10 +108,10 @@ class StepPromptVersion(Base):
 
 
 class AgentVersionSnapshot(Base):
-    """Snapshot of a Gateway agent's definition at the version P-Ork observed.
+    """Snapshot of a Gateway agent's definition at the version VectorStep observed.
 
-    P-Ork cannot compute this hash itself — the Gateway owns the algorithm and the
-    source files. On seeing an unknown agent_version, P-Ork asks the Gateway for the
+    VectorStep cannot compute this hash itself — the Gateway owns the algorithm and the
+    source files. On seeing an unknown agent_version, VectorStep asks the Gateway for the
     current definition and stores it ONLY if the Gateway's reported current version
     matches the one being resolved. If the operator changed the agent again in
     between, text stays NULL and `note` records why — an honest gap beats a

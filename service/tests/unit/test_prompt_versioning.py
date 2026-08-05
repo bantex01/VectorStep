@@ -380,7 +380,7 @@ async def test_record_agent_version_stores_note_when_gateway_reports_different_c
         row = await session.get(AgentVersionSnapshot, "91f02ab3c7de")
     assert row.soul_md is None
     assert row.agent_yaml is None
-    assert row.note == "agent config changed before P-Ork could snapshot this version"
+    assert row.note == "agent config changed before VectorStep could snapshot this version"
 
 
 async def test_record_agent_version_stores_note_when_gateway_unreachable(db):

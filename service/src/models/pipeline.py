@@ -181,7 +181,7 @@ class ReadinessConfig(BaseModel):
 
 class ShellCheckConfig(BaseModel):
     """Run a shell command; evaluate its output. `run` is executed via the shell (so
-    pipes/redirects work, e.g. `curl ... | jq ...`), inheriting the P-Ork process's
+    pipes/redirects work, e.g. `curl ... | jq ...`), inheriting the VectorStep process's
     environment and permissions — deliberately unsandboxed, see README §8."""
     type: Literal["shell"] = "shell"
     name: str

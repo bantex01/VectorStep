@@ -112,7 +112,7 @@ async def record_agent_version(
             soul_md = data.get("soul_md")
             agent_yaml = data.get("agent_yaml")
         else:
-            note = "agent config changed before P-Ork could snapshot this version"
+            note = "agent config changed before VectorStep could snapshot this version"
 
     await _upsert(session, AgentVersionSnapshot(
         agent_version=agent_version, agent=agent, soul_md=soul_md, agent_yaml=agent_yaml,

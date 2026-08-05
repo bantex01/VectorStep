@@ -63,14 +63,14 @@ def test_ampersand_and_quotes_in_plain_text_are_escaped():
 
 def test_realistic_approval_test_message_renders_correctly():
     text = (
-        "<b>P-Ork approval request</b>\n\n"
+        "<b>VectorStep approval request</b>\n\n"
         "Pipeline: <code>approval-test</code>\n"
         "Run: <code>6d55bf1f-c231-42b1-9afd-4bb3271452d8</code>\n\n"
         "Pre-check: Pre-check complete — ready for human approval\n\n"
         "Approve to continue to the post-approval step, or reject to abort."
     )
     result = _render(text)
-    assert "<b>P-Ork approval request</b>" in result
+    assert "<b>VectorStep approval request</b>" in result
     assert "<code>approval-test</code>" in result
     assert "<code>6d55bf1f-c231-42b1-9afd-4bb3271452d8</code>" in result
     assert "&lt;" not in result  # every tag in this message was recognized and restored
