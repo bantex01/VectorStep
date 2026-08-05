@@ -75,6 +75,18 @@ class PipelineStep(Base):
     agent_trace: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: ordered trace events
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    verifier_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    verifier_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    grounding_model: Mapped[str | None] = mapped_column(String, nullable=True)  # actual model used by the grounding judge
+    grounding_provider: Mapped[str | None] = mapped_column(String, nullable=True)
+    grounding_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    grounding_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Priced once at step-save time from pricing.currency's rate table (SPEC-cost-accounting.md).
+    # NULL = no rate matched the step's provider/model (unpriced), never 0 — 0 means an
+    # operator explicitly priced that provider/model at zero (e.g. local Ollama). Never
+    # recomputed later: historical cost reflects the rate in force when the tokens were
+    # bought, even after the pricing table changes.
+    cost: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     run: Mapped["PipelineRun"] = relationship("PipelineRun", back_populates="steps")
 

@@ -2,6 +2,8 @@
 vectorstep_pipeline_feedback_total, and vectorstep_human_approvals_pending."""
 from datetime import datetime
 
+import pytest
+
 from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep, RunFeedback
 from src.executors import human
@@ -15,6 +17,9 @@ def _empty_metrics_data(
     step_feedback_counts=None,
     grounding_scores=None,
     deterministic_check_counts=None,
+    cost_usage=None,
+    approx_cost_usage=None,
+    team_budget_ratios=None,
 ) -> MetricsData:
     return MetricsData(
         run_counts=[],
@@ -23,6 +28,9 @@ def _empty_metrics_data(
         step_durations=[],
         verifier_counts=[],
         token_usage=token_usage or [],
+        cost_usage=cost_usage or [],
+        approx_cost_usage=approx_cost_usage or [],
+        team_budget_ratios=team_budget_ratios or [],
         human_decisions=human_decisions or [],
         feedback_counts=feedback_counts or [],
         step_feedback_counts=step_feedback_counts or [],
@@ -308,3 +316,212 @@ def test_pending_approvals_gauge_grouped_by_team():
         assert by_team == {"barkham": 2, "": 1}
     finally:
         human._pending_meta.clear()
+
+
+# ---------------------------------------------------------------------------
+# vectorstep_pipeline_cost_total / vectorstep_team_budget_ratio
+# (SPEC-cost-accounting.md)
+# ---------------------------------------------------------------------------
+
+def test_collect_emits_vectorstep_pipeline_cost_total_with_expected_labels():
+    data = _empty_metrics_data(cost_usage=[
+        ("payments", "alert-triage", "triage", "gateway", "sre-triage", "claude-sonnet-4-6", "anthropic", 0.0105),
+    ])
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_pipeline_cost_total")
+
+    assert family.samples[0].labels == {
+        "pipeline": "alert-triage", "team": "payments",
+        "model": "claude-sonnet-4-6", "provider": "anthropic",
+    }
+    assert family.samples[0].value == pytest.approx(0.0105)
+
+
+def test_collect_pipeline_cost_total_collapses_finer_dimensions_without_duplicates():
+    # cost_usage is grouped by step_name/executor/agent too — this metric's labels
+    # are coarser (pipeline/team/model/provider), so two rows differing only in
+    # step_name must collapse into ONE summed sample, never two duplicate label-sets
+    # (which would be invalid Prometheus exposition).
+    data = _empty_metrics_data(cost_usage=[
+        ("payments", "alert-triage", "triage", "gateway", "agent-a", "claude-sonnet-4-6", "anthropic", 0.01),
+        ("payments", "alert-triage", "summarise", "gateway", "agent-b", "claude-sonnet-4-6", "anthropic", 0.02),
+    ])
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_pipeline_cost_total")
+
+    assert len(family.samples) == 1
+    assert family.samples[0].value == pytest.approx(0.03)
+
+
+def test_collect_buckets_null_team_and_model_as_empty_string_for_cost():
+    data = _empty_metrics_data(cost_usage=[
+        (None, "scheduled-pipeline", "triage", "gateway", "agent-x", None, None, 0.5),
+    ])
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_pipeline_cost_total")
+
+    assert family.samples[0].labels["team"] == ""
+    assert family.samples[0].labels["model"] == ""
+    assert family.samples[0].labels["provider"] == ""
+
+
+def test_collect_emits_vectorstep_pipeline_approx_cost_total_separately_from_real():
+    # Real and approximate cost must never share a metric — this is a distinct
+    # series, even when both happen to have data for the same pipeline.
+    data = _empty_metrics_data(
+        cost_usage=[("payments", "alert-triage", "triage", "gateway", "agent-a", "claude-sonnet-4-6", "anthropic", 1.0)],
+        approx_cost_usage=[("payments", "alert-triage", "other-step", "gateway", "agent-b", "gpt-5", "openai", 0.25)],
+    )
+    families = list(VectorStepCollector(data).collect())
+    real_family = _find_family(families, "vectorstep_pipeline_cost_total")
+    approx_family = _find_family(families, "vectorstep_pipeline_approx_cost_total")
+
+    assert real_family.samples[0].value == pytest.approx(1.0)
+    assert approx_family.samples[0].value == pytest.approx(0.25)
+    assert approx_family.samples[0].labels == {
+        "pipeline": "alert-triage", "team": "payments", "model": "gpt-5", "provider": "openai",
+    }
+
+
+def test_collect_approx_cost_total_empty_when_no_unpriced_steps():
+    data = _empty_metrics_data()
+    families = list(VectorStepCollector(data).collect())
+    # CounterMetricFamily strips the "_total" suffix from .name (prometheus_client
+    # appends it back in the exposition format) — the samples themselves are what
+    # carry the full "..._total" name, so an empty family has no sample to check.
+    family = next(f for f in families if f.name == "vectorstep_pipeline_approx_cost")
+
+    assert family.samples == []
+
+
+async def test_fetch_metrics_data_approx_cost_usage_empty_when_live_pricing_disabled(db):
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        session.add(PipelineRun(
+            id="run-1", pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}", team="payments",
+        ))
+        session.add(PipelineStep(
+            id="step-unpriced", run_id="run-1", step_name="s1", step_index=0,
+            executor="gateway", agent="a", model="claude-sonnet-4-6", provider="anthropic",
+            prompt="", status="completed", executed_at=datetime(2026, 1, 1),
+            input_tokens=1000, output_tokens=500, cost=None,
+        ))
+        await session.commit()
+
+    metrics_data = await fetch_metrics_data(session_factory)
+
+    assert metrics_data.approx_cost_usage == []
+
+
+async def test_fetch_metrics_data_approx_cost_usage_populated_when_enabled(db):
+    from src import live_pricing, pricing
+
+    original_table = pricing.get_table()
+    original_catalog = live_pricing.get_catalog()
+    try:
+        pricing.configure({"currency": "USD", "live_pricing": {"enabled": True}})
+        live_pricing._catalog = [
+            {"id": "anthropic/claude-3.5-sonnet", "pricing": {"prompt": "0.000003", "completion": "0.000015"}},
+        ]
+
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            session.add(PipelineRun(
+                id="run-1", pipeline_name="p", source="generic", status="completed",
+                normalised_context="{}", raw_payload="{}", team="payments",
+            ))
+            session.add(PipelineStep(
+                id="step-unpriced", run_id="run-1", step_name="s1", step_index=0,
+                executor="gateway", agent="a", model="claude-sonnet-4-6", provider="anthropic",
+                prompt="", status="completed", executed_at=datetime(2026, 1, 1),
+                input_tokens=1000, output_tokens=500, cost=None,
+            ))
+            # Already priced — must not also appear in approx_cost_usage.
+            session.add(PipelineStep(
+                id="step-priced", run_id="run-1", step_name="s2", step_index=1,
+                executor="gateway", agent="a", model="claude-sonnet-4-6", provider="anthropic",
+                prompt="", status="completed", executed_at=datetime(2026, 1, 1),
+                input_tokens=1000, output_tokens=500, cost=0.05,
+            ))
+            await session.commit()
+
+        metrics_data = await fetch_metrics_data(session_factory)
+
+        assert len(metrics_data.approx_cost_usage) == 1
+        row = metrics_data.approx_cost_usage[0]
+        assert row[2] == "s1"  # step_name
+        expected = 1000 * 3.0 / 1_000_000 + 500 * 15.0 / 1_000_000
+        assert row[-1] == pytest.approx(expected)
+    finally:
+        pricing._table = original_table
+        live_pricing._catalog = original_catalog
+
+
+def test_collect_emits_team_budget_ratio_only_for_teams_with_a_budget():
+    data = _empty_metrics_data(team_budget_ratios=[("payments", 0.6), ("platform", 1.2)])
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_team_budget_ratio")
+
+    by_team = {s.labels["team"]: s.value for s in family.samples}
+    assert by_team == {"payments": 0.6, "platform": 1.2}
+
+
+async def test_fetch_metrics_data_excludes_unpriced_steps_from_cost_usage(db):
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        session.add(PipelineRun(
+            id="run-1", pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}", team="payments",
+        ))
+        session.add(PipelineStep(
+            id="step-priced", run_id="run-1", step_name="s1", step_index=0,
+            executor="gateway", agent="a", model="m", provider="anthropic", prompt="", status="completed",
+            executed_at=datetime(2026, 1, 1), input_tokens=100, output_tokens=50, cost=0.005,
+        ))
+        session.add(PipelineStep(
+            id="step-unpriced", run_id="run-1", step_name="s2", step_index=1,
+            executor="gateway", agent="b", model="unknown", provider="mystery", prompt="", status="completed",
+            executed_at=datetime(2026, 1, 1), input_tokens=10, output_tokens=5, cost=None,
+        ))
+        await session.commit()
+
+    metrics_data = await fetch_metrics_data(session_factory)
+
+    assert len(metrics_data.cost_usage) == 1
+    team, pipeline, step_name, executor, agent, model, provider, cost_sum = metrics_data.cost_usage[0]
+    assert (team, pipeline, step_name) == ("payments", "p", "s1")
+    assert cost_sum == pytest.approx(0.005)
+
+
+async def test_fetch_metrics_data_team_budget_ratios_from_month_to_date_spend(db):
+    from datetime import timezone
+    from src import pricing
+    from src.utils import utc_now
+
+    original = pricing.get_table()
+    try:
+        pricing.configure({"currency": "USD", "team_budgets": {"payments": 10.0}})
+        now = utc_now()
+
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            session.add(PipelineRun(
+                id="run-1", pipeline_name="p", source="generic", status="completed",
+                normalised_context="{}", raw_payload="{}", team="payments",
+                triggered_at=now, completed_at=now,
+            ))
+            session.add(PipelineStep(
+                id="step-1", run_id="run-1", step_name="s1", step_index=0,
+                executor="gateway", agent="a", model="m", provider="anthropic", prompt="", status="completed",
+                executed_at=now, input_tokens=100, output_tokens=50, cost=2.0,
+            ))
+            await session.commit()
+
+        metrics_data = await fetch_metrics_data(session_factory)
+
+        assert metrics_data.team_budget_ratios == [("payments", pytest.approx(0.2))]
+    finally:
+        pricing._table = original

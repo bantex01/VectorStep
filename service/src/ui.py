@@ -18,6 +18,8 @@ from sqlalchemy.orm import selectinload
 
 from .analytics import ALL_STEP_STATUSES, _pipeline_rollup, _production_only, _step_rollup, _time_range_cutoff
 from .analytics import get_agent_versions as _get_agent_versions
+from .analytics import get_team_month_to_date_spend as _get_team_month_to_date_spend
+from . import live_pricing, pricing
 from .db.database import get_session_factory
 from .db.models import AgentVersionSnapshot, PipelineRun, PipelineStep, RunFeedback, StepFeedback
 from .executors.human import pending_count as _pending_approval_count
@@ -613,6 +615,8 @@ async def _fetch_step_agent_model_combo(
                 func.coalesce(func.sum(PipelineStep.input_tokens), 0),
                 func.coalesce(func.sum(PipelineStep.output_tokens), 0),
                 func.avg(PipelineStep.duration_ms),
+                func.coalesce(func.sum(PipelineStep.cost), 0.0),
+                func.count(PipelineStep.id) - func.count(PipelineStep.cost),
             )
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .group_by(
@@ -626,17 +630,20 @@ async def _fetch_step_agent_model_combo(
         raw = rows.all()
 
     combo: dict[tuple[str | None, str, str, str | None, str | None, str | None], dict] = {}
-    for team, pipeline_name, step_name, agent, provider, model, status, n, in_tok, out_tok, avg_dur_ms in raw:
+    for (team, pipeline_name, step_name, agent, provider, model, status, n, in_tok, out_tok,
+         avg_dur_ms, cost_sum, unpriced) in raw:
         key = (team, pipeline_name, step_name, agent, provider, model)
         c = combo.setdefault(key, {
             "total": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0,
-            "duration_sum_ms": 0.0, "duration_n": 0,
+            "duration_sum_ms": 0.0, "duration_n": 0, "cost": 0.0, "unpriced_steps": 0,
         })
         c["total"] += n
         if status == "failed":
             c["failed"] += n
         c["input_tokens"] += in_tok
         c["output_tokens"] += out_tok
+        c["cost"] += cost_sum
+        c["unpriced_steps"] += unpriced
         if avg_dur_ms is not None:
             # Postgres/asyncpg returns avg(integer_column) as decimal.Decimal, not
             # float (SQLite returns a plain float) — cast so this doesn't crash
@@ -694,6 +701,20 @@ _OUTCOME_CLASSES = {
 }
 
 
+def _approx_cost_for_step(step: PipelineStep) -> tuple[float | None, bool]:
+    """Best-effort OpenRouter-catalog cost for a step with no real (manual)
+    price — never computed for an already-priced step. Returns
+    (approx_cost, is_native): is_native means step.provider genuinely IS
+    "openrouter" (a live price for the exact API that was called, not a
+    cross-provider guess against a different provider's model) — used to color
+    the badge green rather than amber (SPEC-live-pricing.md)."""
+    if step.cost is not None:
+        return None, False
+    rate = live_pricing.resolve_approx_rate(live_pricing.get_catalog(), step.provider, step.model)
+    cost = live_pricing.approx_step_cost(rate, step.input_tokens, step.output_tokens)
+    return cost, (cost is not None and step.provider == "openrouter")
+
+
 async def _feedback_by_run_id(session, run_ids: list[str]) -> dict[str, str]:
     """outcome for each run_id that has feedback — absent key means unmarked.
 
@@ -707,9 +728,25 @@ async def _feedback_by_run_id(session, run_ids: list[str]) -> dict[str, str]:
     )
     return dict(rows.all())
 
+def _format_cost(value: float | None, precision: int = 2) -> str | None:
+    """`$12.34` for USD, `12.34 EUR` otherwise (SPEC-cost-accounting.md §4 — currency
+    is a display label, not a conversion). None (unpriced, or no rate configured)
+    passes through as None so a template can choose its own "not priced" wording
+    rather than this filter silently rendering "$0.00" for an unknown cost.
+    precision=4 is used only on the step-detail sub-cent case; everywhere else
+    is 2dp."""
+    if value is None:
+        return None
+    table = pricing.get_table()
+    currency = table.currency if table else "USD"
+    formatted = f"{value:,.{precision}f}"
+    return f"${formatted}" if currency == "USD" else f"{formatted} {currency}"
+
+
 templates.env.filters["to_yaml"] = _to_yaml
 templates.env.filters["tojson"] = _to_json
 templates.env.filters["format_number"] = lambda n: f"{int(n):,}"
+templates.env.filters["format_cost"] = _format_cost
 templates.env.filters["telegram_html"] = _telegram_html_to_safe_html
 templates.env.globals.update({
     "status_classes": _status_classes,
@@ -1080,6 +1117,7 @@ async def ui_run_detail(request: Request, run_id: str):
             })
         else:
             trust = json.loads(step.trust_report) if step.trust_report else None
+            approx_cost, approx_is_native = _approx_cost_for_step(step)
             display_items.append({
                 "type": "step",
                 "name": step.step_name,
@@ -1092,6 +1130,8 @@ async def ui_run_detail(request: Request, run_id: str):
                 "trust": trust,
                 "confidence_narrative": _confidence_narrative(trust, step.status) if trust else None,
                 "step_config_summary": _step_config_summary(trust) if trust else None,
+                "approx_cost": approx_cost,
+                "approx_is_native": approx_is_native,
             })
 
     normalised = json.loads(run.normalised_context) if run.normalised_context else {}
@@ -1099,6 +1139,9 @@ async def ui_run_detail(request: Request, run_id: str):
 
     total_input_tokens = sum(s.input_tokens or 0 for s in run.steps)
     total_output_tokens = sum(s.output_tokens or 0 for s in run.steps)
+    priced_steps = [s for s in run.steps if s.cost is not None]
+    total_cost = sum(s.cost for s in priced_steps) if priced_steps else None
+    unpriced_steps = sum(1 for s in run.steps if s.cost is None)
 
     # Re-run support: load prior steps from the original run so the UI can show
     # the full picture (replayed steps + new steps together).
@@ -1198,6 +1241,8 @@ async def ui_run_detail(request: Request, run_id: str):
         "run_log": run_log,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
+        "total_cost": total_cost,
+        "unpriced_steps": unpriced_steps,
         "feedback": feedback,
         "step_feedback_by_name": step_feedback_by_name,
         "pending_approvals": pending_approvals,
@@ -1502,6 +1547,15 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         tokens_by_model = rows.all()
 
+        # Distinct (provider, model) pairs actually used — feeds the live-pricing
+        # reference panel below. Not time_range-scoped: "models you use" is a
+        # standing fact about the deployment, not a windowed metric.
+        rows = await session.execute(
+            select(PipelineStep.provider, PipelineStep.model).distinct()
+            .where(PipelineStep.model.is_not(None))
+        )
+        distinct_provider_models = rows.all()
+
         q = (
             select(RunFeedback.outcome, func.count().label("n"))
             .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
@@ -1649,6 +1703,28 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
     feedback_total = sum(feedback_by_outcome.values())
     feedback_correct = feedback_by_outcome.get("correct", 0)
 
+    # Live-pricing reference panel (SPEC-live-pricing.md) — only rendered when
+    # pricing.live_pricing.enabled and the catalog has actually been fetched at
+    # least once. Never touches real cost; purely informational.
+    live_pricing_rows = []
+    _table = pricing.get_table()
+    if _table and _table.live_pricing.enabled:
+        catalog = live_pricing.get_catalog()
+        for provider, model in distinct_provider_models:
+            rate = live_pricing.resolve_approx_rate(catalog, provider, model)
+            if rate is None:
+                continue
+            live_pricing_rows.append({
+                "provider": provider or "(unknown)",
+                "model": model,
+                "openrouter_id": rate.openrouter_id,
+                "input_per_mtok": rate.input_per_mtok,
+                "output_per_mtok": rate.output_per_mtok,
+                "is_native": provider == "openrouter",
+            })
+        live_pricing_rows.sort(key=lambda r: (r["provider"], r["model"]))
+    live_pricing_last_refreshed = live_pricing.last_refreshed()
+
     return templates.TemplateResponse(request, "insights_overview.html", {
         "time_range": time_range,
         "range_label": range_label,
@@ -1668,6 +1744,8 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         "llm_calls_chart": llm_calls_chart, "llm_ts": llm_ts,
         "model_token_chart": model_token_chart, "tokens_ts": tokens_ts,
         "tool_chart": tool_chart,
+        "live_pricing_rows": live_pricing_rows,
+        "live_pricing_last_refreshed": live_pricing_last_refreshed,
         "active_page": "insights_overview",
     })
 
@@ -1684,6 +1762,7 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
     run_counts = {name: r["runs_total"] for name, r in rollup.items()}
     failed_counts = {name: r["status_counts"].get("failed", 0) for name, r in rollup.items()}
     token_totals = {name: (r["tokens"]["input"], r["tokens"]["output"]) for name, r in rollup.items()}
+    cost_totals = {name: (r["cost"]["total"], r["cost"]["unpriced_steps"]) for name, r in rollup.items()}
     teams_by_pipeline: dict[str, list[str]] = {name: list(r["teams"]) for name, r in rollup.items()}
     avg_duration_by_pipeline = {
         name: r["duration_seconds"]["avg"] for name, r in rollup.items()
@@ -1777,6 +1856,7 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         escalation_rate = round(escalated / n * 100) if n else None
         avg_dur = avg_duration_by_pipeline.get(name)
         inp, out = token_totals.get(name, (0, 0))
+        cost_sum, unpriced_steps = cost_totals.get(name, (0.0, 0))
 
         runs_ts_data = [runs_by_bucket_pipeline[name].get(b, 0) for b in bucket_labels]
         duration_ts_data = [
@@ -1812,6 +1892,8 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
             "avg_duration": _format_seconds(avg_dur),
             "input_tokens": inp,
             "output_tokens": out,
+            "cost": cost_sum,
+            "unpriced_steps": unpriced_steps,
             "status_breakdown": sc,
             "runs_ts": {"labels": bucket_labels, "data": runs_ts_data},
             "duration_ts": {"labels": bucket_labels, "data": duration_ts_data},
@@ -1856,6 +1938,8 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
             "avg_duration_secs": avg_duration_by_pipeline.get(name),
             "input_tokens": token_totals.get(name, (0, 0))[0],
             "output_tokens": token_totals.get(name, (0, 0))[1],
+            "cost": cost_totals.get(name, (0.0, 0))[0],
+            "unpriced_steps": cost_totals.get(name, (0.0, 0))[1],
             "teams": sorted(teams_by_pipeline.get(name, [])),
             "feedback_total": fb_total,
             "accuracy_pct": round(fb_correct / fb_total * 100) if fb_total else None,
@@ -1880,6 +1964,9 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         "output": [r["output_tokens"] for r in token_chart_rows],
     }
 
+    total_cost = sum(r["cost"] for r in pipeline_rows) or None
+    total_unpriced_steps = sum(r["unpriced_steps"] for r in pipeline_rows)
+
     return templates.TemplateResponse(request, "insights_pipelines.html", {
         "time_range": time_range,
         "range_label": range_label,
@@ -1890,6 +1977,9 @@ async def ui_insights_pipelines(request: Request, time_range: str = "7d"):
         "min_duration_secs": min_duration_secs,
         "overall_avg_duration_secs": overall_avg_duration_secs,
         "max_duration_secs": max_duration_secs,
+        "total_cost": total_cost,
+        "total_unpriced_steps": total_unpriced_steps,
+        "currency": pricing.get_table().currency if pricing.get_table() else "USD",
         "drilldown_data": drilldown_data,
         "insights_feedback_total": insights_feedback_total,
         "insights_accuracy_pct": insights_accuracy_pct,
@@ -2457,7 +2547,7 @@ async def ui_insights_providers(request: Request, time_range: str = "7d"):
                 PipelineRun.pipeline_name, PipelineStep.step_name, PipelineStep.agent,
                 PipelineStep.provider, PipelineStep.model, PipelineStep.status,
                 PipelineStep.run_id, PipelineStep.executed_at, PipelineStep.duration_ms,
-                PipelineStep.input_tokens, PipelineStep.output_tokens,
+                PipelineStep.input_tokens, PipelineStep.output_tokens, PipelineStep.cost,
             )
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineStep.executor == "gateway", PipelineStep.model.is_not(None))
@@ -2474,6 +2564,7 @@ async def ui_insights_providers(request: Request, time_range: str = "7d"):
     run_counts: dict[str, int] = defaultdict(int)
     failed_counts: dict[str, int] = defaultdict(int)
     token_totals: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    cost_totals: dict[str, list] = defaultdict(lambda: [0.0, 0])
     duration_sum: dict[str, float] = defaultdict(float)
     duration_n: dict[str, int] = defaultdict(int)
     status_counts_by_provider: dict[str, dict[str, int]] = defaultdict(dict)
@@ -2487,6 +2578,8 @@ async def ui_insights_providers(request: Request, time_range: str = "7d"):
             failed_counts[provider] += 1
         token_totals[provider][0] += r.input_tokens or 0
         token_totals[provider][1] += r.output_tokens or 0
+        cost_totals[provider][0] += r.cost or 0.0
+        cost_totals[provider][1] += 1 if r.cost is None else 0
         if r.duration_ms is not None:
             duration_sum[provider] += r.duration_ms
             duration_n[provider] += 1
@@ -2583,6 +2676,8 @@ async def ui_insights_providers(request: Request, time_range: str = "7d"):
                 "duration": _format_seconds(r.duration_ms / 1000) if r.duration_ms is not None else None,
             })
 
+        cost_sum, unpriced_steps = cost_totals.get(name, [0.0, 0])
+
         drilldown_data[name] = {
             "run_count": n,
             "failed_count": failed,
@@ -2591,6 +2686,8 @@ async def ui_insights_providers(request: Request, time_range: str = "7d"):
             "avg_duration": _format_seconds(avg_dur),
             "input_tokens": inp,
             "output_tokens": out,
+            "cost": cost_sum,
+            "unpriced_steps": unpriced_steps,
             "status_breakdown": sc,
             "runs_ts": {"labels": bucket_labels, "data": runs_ts_data},
             "duration_ts": {"labels": bucket_labels, "data": duration_ts_data},
@@ -2615,6 +2712,8 @@ async def ui_insights_providers(request: Request, time_range: str = "7d"):
             "avg_duration_secs": avg_duration_by_provider.get(name),
             "input_tokens": token_totals.get(name, [0, 0])[0],
             "output_tokens": token_totals.get(name, [0, 0])[1],
+            "cost": cost_totals.get(name, [0.0, 0])[0],
+            "unpriced_steps": cost_totals.get(name, [0.0, 0])[1],
             "models": sorted(models_by_provider.get(name, [])),
         })
 
@@ -2649,6 +2748,7 @@ async def ui_insights_providers(request: Request, time_range: str = "7d"):
         "overall_avg_duration_secs": overall_avg_duration_secs,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
+        "currency": pricing.get_table().currency if pricing.get_table() else "USD",
         "drilldown_data": drilldown_data,
         "active_page": "insights_providers",
     })
@@ -2673,7 +2773,7 @@ async def ui_insights_models(request: Request, time_range: str = "7d"):
                 PipelineRun.pipeline_name, PipelineStep.step_name, PipelineStep.agent,
                 PipelineStep.provider, PipelineStep.model, PipelineStep.status,
                 PipelineStep.run_id, PipelineStep.executed_at, PipelineStep.duration_ms,
-                PipelineStep.input_tokens, PipelineStep.output_tokens,
+                PipelineStep.input_tokens, PipelineStep.output_tokens, PipelineStep.cost,
             )
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
             .where(PipelineStep.executor == "gateway", PipelineStep.model.is_not(None))
@@ -2687,6 +2787,7 @@ async def ui_insights_models(request: Request, time_range: str = "7d"):
     run_counts: dict[str, int] = defaultdict(int)
     failed_counts: dict[str, int] = defaultdict(int)
     token_totals: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    cost_totals: dict[str, list] = defaultdict(lambda: [0.0, 0])
     duration_sum: dict[str, float] = defaultdict(float)
     duration_n: dict[str, int] = defaultdict(int)
     status_counts_by_model: dict[str, dict[str, int]] = defaultdict(dict)
@@ -2700,6 +2801,8 @@ async def ui_insights_models(request: Request, time_range: str = "7d"):
             failed_counts[model] += 1
         token_totals[model][0] += r.input_tokens or 0
         token_totals[model][1] += r.output_tokens or 0
+        cost_totals[model][0] += r.cost or 0.0
+        cost_totals[model][1] += 1 if r.cost is None else 0
         if r.duration_ms is not None:
             duration_sum[model] += r.duration_ms
             duration_n[model] += 1
@@ -2796,6 +2899,8 @@ async def ui_insights_models(request: Request, time_range: str = "7d"):
                 "duration": _format_seconds(r.duration_ms / 1000) if r.duration_ms is not None else None,
             })
 
+        cost_sum, unpriced_steps = cost_totals.get(name, [0.0, 0])
+
         drilldown_data[name] = {
             "run_count": n,
             "failed_count": failed,
@@ -2804,6 +2909,8 @@ async def ui_insights_models(request: Request, time_range: str = "7d"):
             "avg_duration": _format_seconds(avg_dur),
             "input_tokens": inp,
             "output_tokens": out,
+            "cost": cost_sum,
+            "unpriced_steps": unpriced_steps,
             "status_breakdown": sc,
             "runs_ts": {"labels": bucket_labels, "data": runs_ts_data},
             "duration_ts": {"labels": bucket_labels, "data": duration_ts_data},
@@ -2828,6 +2935,8 @@ async def ui_insights_models(request: Request, time_range: str = "7d"):
             "avg_duration_secs": avg_duration_by_model.get(name),
             "input_tokens": token_totals.get(name, [0, 0])[0],
             "output_tokens": token_totals.get(name, [0, 0])[1],
+            "cost": cost_totals.get(name, [0.0, 0])[0],
+            "unpriced_steps": cost_totals.get(name, [0.0, 0])[1],
             "agents": sorted(agents_by_model.get(name, [])),
         })
 
@@ -2862,6 +2971,7 @@ async def ui_insights_models(request: Request, time_range: str = "7d"):
         "overall_avg_duration_secs": overall_avg_duration_secs,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
+        "currency": pricing.get_table().currency if pricing.get_table() else "USD",
         "drilldown_data": drilldown_data,
         "active_page": "insights_models",
     })
@@ -3157,11 +3267,14 @@ async def ui_insights_teams(request: Request, time_range: str = "7d"):
     avg_duration_by_team = {t: sum(v) / len(v) for t, v in durations_by_team.items() if v}
 
     token_totals: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    cost_totals: dict[str, list] = defaultdict(lambda: [0.0, 0])
     breakdown_combo_by_team: dict[str, list] = defaultdict(list)
     for (team, pipeline_name, step_name, agent, provider, model), c in step_combo.items():
         tk = norm_team(team)
         token_totals[tk][0] += c["input_tokens"]
         token_totals[tk][1] += c["output_tokens"]
+        cost_totals[tk][0] += c["cost"]
+        cost_totals[tk][1] += c["unpriced_steps"]
         breakdown_combo_by_team[tk].append((pipeline_name, step_name, agent, provider, model, c))
 
     breakdown_by_team: dict[str, list[dict]] = defaultdict(list)
@@ -3225,6 +3338,7 @@ async def ui_insights_teams(request: Request, time_range: str = "7d"):
         escalation_rate = round(escalated / n * 100) if n else None
         avg_dur = avg_duration_by_team.get(name)
         inp, out = token_totals.get(name, [0, 0])
+        cost_sum, unpriced_steps = cost_totals.get(name, [0.0, 0])
 
         runs_ts_data = [runs_by_bucket_team[name].get(b, 0) for b in bucket_labels]
         duration_ts_data = [
@@ -3241,6 +3355,8 @@ async def ui_insights_teams(request: Request, time_range: str = "7d"):
             "avg_duration": _format_seconds(avg_dur),
             "input_tokens": inp,
             "output_tokens": out,
+            "cost": cost_sum,
+            "unpriced_steps": unpriced_steps,
             "status_breakdown": sc,
             "runs_ts": {"labels": bucket_labels, "data": runs_ts_data},
             "duration_ts": {"labels": bucket_labels, "data": duration_ts_data},
@@ -3261,6 +3377,7 @@ async def ui_insights_teams(request: Request, time_range: str = "7d"):
     team_rows = []
     for name, n in sorted(run_counts.items(), key=lambda t: t[1], reverse=True):
         inp, out = token_totals.get(name, [0, 0])
+        cost_sum, unpriced_steps = cost_totals.get(name, [0.0, 0])
         team_rows.append({
             "name": name,
             "run_count": n,
@@ -3268,8 +3385,17 @@ async def ui_insights_teams(request: Request, time_range: str = "7d"):
             "avg_duration_secs": avg_duration_by_team.get(name),
             "input_tokens": inp,
             "output_tokens": out,
+            "cost": cost_sum,
+            "unpriced_steps": unpriced_steps,
             "pipelines": sorted(pipelines_by_team.get(name, [])),
         })
+
+    # Month-to-date spend vs pricing.team_budgets — advisory only, deliberately NOT
+    # scoped by the page's time_range selector (a budget is always "this calendar
+    # month", not "the last 7/30 days"). See get_team_month_to_date_spend.
+    team_budgets_raw = await _get_team_month_to_date_spend(sf)
+    team_budgets = {row["team"]: row for row in team_budgets_raw.values() if row["budget"] is not None}
+    currency = pricing.get_table().currency if pricing.get_table() else "USD"
 
     token_chart_rows = sorted(
         (r for r in team_rows if r["input_tokens"] or r["output_tokens"]),
@@ -3306,6 +3432,8 @@ async def ui_insights_teams(request: Request, time_range: str = "7d"):
         "total_output_tokens": total_output_tokens,
         "total_pipelines_used": total_pipelines_used,
         "drilldown_data": drilldown_data,
+        "team_budgets": team_budgets,
+        "currency": currency,
         "active_page": "insights_teams",
     })
 

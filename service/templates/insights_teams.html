@@ -28,7 +28,7 @@
 </div>
 
 <!-- Headline cards -->
-<div class="grid grid-cols-5 gap-4 mb-6">
+<div class="grid grid-cols-6 gap-4 mb-6">
   <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
     <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Teams</p>
     <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_team_count }}</p>
@@ -65,7 +65,48 @@
     <p class="mt-2 text-3xl font-semibold text-zinc-50">{{ total_pipelines_used }}</p>
     <p class="mt-1 text-xs text-zinc-500">distinct, across all teams</p>
   </div>
+  <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5">
+    <p class="text-xs font-medium text-zinc-500 uppercase tracking-wide">Cost</p>
+    <p id="headline-cost" class="mt-2 text-3xl font-semibold text-zinc-50">—</p>
+    <p class="mt-1 text-xs text-zinc-500">{{ range_label }}</p>
+  </div>
 </div>
+
+<!-- Month-to-date team budgets (advisory — see README §Cost accounting) -->
+{% if team_budgets %}
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5 mb-6">
+  <h2 class="text-sm font-semibold text-zinc-200 mb-1">Month-to-date budgets</h2>
+  <p class="text-xs text-zinc-500 mb-4">Advisory only — a team going over its monthly budget never blocks a run. Enforcement is per-pipeline via <code class="text-zinc-400">budget.max_usd</code>.</p>
+  <div class="space-y-3">
+    {% for team, row in team_budgets.items() | sort(attribute='0') %}
+    {% set pct = (row.ratio * 100) if row.ratio is not none else None %}
+    <div>
+      <div class="flex items-center justify-between text-sm mb-1">
+        <span class="font-medium text-zinc-200">{{ team }}</span>
+        <span class="text-zinc-400">
+          {{ row.spend | format_cost }} / {{ row.budget | format_cost }}
+          {% if pct is not none %}<span class="text-zinc-500">({{ pct | round | int }}%)</span>{% endif %}
+        </span>
+      </div>
+      <div class="w-full bg-zinc-800 rounded-full h-2">
+        <div class="h-2 rounded-full {% if pct is none %}bg-zinc-700{% elif pct >= 100 %}bg-red-500{% elif pct >= 80 %}bg-amber-500{% else %}bg-indigo-500{% endif %}"
+             style="width: {{ [pct or 0, 100] | min }}%"></div>
+      </div>
+      {% if row.unpriced_steps %}
+        <p class="text-xs text-zinc-500 mt-1">
+          unpriced steps this month: {{ row.unpriced_steps }}
+          {% if row.approx_spend %}
+            <span class="text-amber-400/90" title="Best-effort OpenRouter reference pricing for this month's unpriced steps — not included in the spend/budget figures above.">
+              (+ ~{{ row.approx_spend | format_cost }} approx, not counted above)
+            </span>
+          {% endif %}
+        </p>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
 
 <!-- Timeseries charts -->
 <div class="grid grid-cols-2 gap-6 mb-6">
@@ -120,6 +161,7 @@
         <th class="text-left px-5 py-3 font-medium">Failures</th>
         <th class="text-left px-5 py-3 font-medium">Avg duration</th>
         <th class="text-left px-5 py-3 font-medium">Tokens</th>
+        <th class="text-left px-5 py-3 font-medium">Cost</th>
         <th class="text-left px-5 py-3 font-medium">Pipelines</th>
       </tr>
     </thead>
@@ -145,7 +187,7 @@
 
   <div class="p-5">
     <!-- Mini cards -->
-    <div class="grid grid-cols-4 gap-4 mb-5">
+    <div class="grid grid-cols-5 gap-4 mb-5">
       <div class="bg-zinc-800/60 rounded-lg p-4">
         <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Runs</p>
         <p id="dd-runs" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
@@ -162,6 +204,11 @@
         <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Tokens</p>
         <p id="dd-tokens" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
         <p id="dd-tokens-sub" class="text-xs text-zinc-500 mt-0.5"></p>
+      </div>
+      <div class="bg-zinc-800/60 rounded-lg p-4">
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Cost</p>
+        <p id="dd-cost" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
+        <p id="dd-cost-sub" class="text-xs text-zinc-500 mt-0.5"></p>
       </div>
     </div>
 
@@ -247,6 +294,20 @@
     return h + 'h ' + rm + 'm';
   }
 
+  const CURRENCY = {{ currency | tojson | safe }};
+  function fmtCost(value) {
+    if (value == null) return null;
+    const formatted = value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return CURRENCY === 'USD' ? `$${formatted}` : `${formatted} ${CURRENCY}`;
+  }
+  // A $0.00 total that coincides with unpriced steps means nothing in this group
+  // was actually priced — show "not priced" rather than a misleading free $0.00.
+  function costDisplay(cost, unpriced) {
+    const title = unpriced ? `unpriced steps: ${unpriced}` : '';
+    if (cost === 0 && unpriced > 0) return { text: 'not priced', title };
+    return { text: fmtCost(cost) ?? '—', title };
+  }
+
   // ── Runs / tokens over time ──────────────────────────────────────────────────
 
   function mkLine(id, ts) {
@@ -301,6 +362,15 @@
 
   const teamRows = {{ team_rows | tojson | safe }};
 
+  const headlineCostEl = document.getElementById('headline-cost');
+  if (headlineCostEl) {
+    const totalCost = teamRows.reduce((sum, r) => sum + r.cost, 0);
+    const totalUnpriced = teamRows.reduce((sum, r) => sum + r.unpriced_steps, 0);
+    const cost = costDisplay(totalCost, totalUnpriced);
+    headlineCostEl.textContent = cost.text;
+    headlineCostEl.title = cost.title;
+  }
+
   function renderTopTeams(sortBy) {
     let sorted = [...teamRows];
     if (sortBy === 'runs')     sorted.sort((a, b) => b.run_count - a.run_count);
@@ -317,12 +387,14 @@
       const durStr = r.avg_duration_secs != null ? fmtSecs(r.avg_duration_secs) : '—';
       const failCls = r.failed_count > 0 ? 'text-red-400' : 'text-zinc-500';
       const pipelines = r.pipelines.map(p => `<a href="/ui/pipelines/${p}" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 hover:text-indigo-400">${p}</a>`).join(' ');
+      const cost = costDisplay(r.cost, r.unpriced_steps);
       return `<tr class="hover:bg-zinc-800 transition-colors">
         <td class="px-5 py-3 text-sm font-medium text-zinc-100">${r.name}</td>
         <td class="px-5 py-3 text-sm text-zinc-200">${r.run_count.toLocaleString()}</td>
         <td class="px-5 py-3 text-sm ${failCls}">${r.failed_count.toLocaleString()}</td>
         <td class="px-5 py-3 text-sm text-zinc-200">${durStr}</td>
         <td class="px-5 py-3 text-sm text-zinc-200" title="${tokTitle}">${tokStr}</td>
+        <td class="px-5 py-3 text-sm text-zinc-200" title="${cost.title}">${cost.text}</td>
         <td class="px-5 py-3"><div class="flex gap-1 flex-wrap">${pipelines}</div></td>
       </tr>`;
     }).join('');
@@ -368,6 +440,10 @@
     const total = d.input_tokens + d.output_tokens;
     document.getElementById('dd-tokens').textContent = total > 0 ? total.toLocaleString() : '—';
     document.getElementById('dd-tokens-sub').textContent = total > 0 ? `↑${d.input_tokens.toLocaleString()} ↓${d.output_tokens.toLocaleString()}` : '';
+
+    const cost = costDisplay(d.cost, d.unpriced_steps);
+    document.getElementById('dd-cost').textContent = cost.text;
+    document.getElementById('dd-cost-sub').textContent = cost.title;
 
     // Pipelines used
     document.getElementById('dd-pipelines').innerHTML = d.pipelines.length

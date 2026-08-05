@@ -338,10 +338,12 @@ exist in the one place it's actually used.
   can be overridden per-call via `context: {team: "..."}` like any other
   field.
 
-Out of scope for now: converting tokens to a dollar figure (no per-model
-pricing table exists yet), and fixing the `openclaw` executor's lack of token
-reporting (see §4's token budget note) — a team running mostly `openclaw`
-steps will undercount regardless of this feature.
+Token-to-money conversion is covered separately — see **§Cost accounting**.
+The `openclaw` executor's lack of token reporting (see §4's token budget note)
+still applies there too: a team running mostly `openclaw` steps will
+undercount regardless of this feature, which is why every cost aggregate
+carries an "unpriced steps" annotation rather than silently showing a
+possibly-partial total as if it were complete.
 
 ---
 
@@ -430,6 +432,23 @@ that page always reflect production only, independent of this filter.
 See `samples/pipelines/stage-testing-example.yaml` for a complete worked example
 covering all three testing-gated executor paths (`notify`, `on_failure.webhook`,
 `human`) plus muted pipeline `notifications:`, with the promotion comment inline.
+
+---
+
+### 3d. Cost accounting
+
+Tokens (§3b) are converted to money via an operator-maintained `pricing:`
+table in `config.yaml` (currency/rates, `budget.max_usd`, advisory
+`team_budgets`) — no bundled or auto-fetched prices. Verifier and
+grounding-judge tokens are priced too, folded into each step's `cost`. An
+optional, clearly-disclaimed *approximate* pricing source
+(`pricing.live_pricing`, from OpenRouter's public catalog) can fill in for
+otherwise-unpriced steps — shown in the UI as a distinct amber/green badge,
+its own Prometheus metric, never blended with real cost.
+
+Full detail (pricing resolution rules, NULL-vs-zero semantics, live/approx
+mechanics, and where cost surfaces across the UI/API/metrics) is in the
+VectorStep-Website docs — `operations/cost-accounting.md` — rather than here.
 
 ---
 
@@ -555,13 +574,19 @@ schedule:                        # optional — omit for webhook-only pipelines
     service: my-service
     environment: prod
 
-budget:                          # optional — omit to run with no token limit
+budget:                          # optional — omit to run with no token/cost limit
   max_tokens: 50000              # abort run if accumulated tokens across all steps exceeds this
+  max_usd: 5.00                  # abort run if accumulated cost across all steps exceeds this (see §Cost accounting)
+  include_approx_cost: false     # let an unpriced step's live/approximate OpenRouter cost count toward max_usd (default false)
 ```
+
+At least one of `max_tokens`/`max_usd` is required if `budget:` is present at all; both may be set together (whichever trips first aborts the run and names which limit it was). `max_cost` is accepted as an alias for `max_usd`. `include_approx_cost` can also be set per-step (`StepConfig.include_approx_cost: true|false`), overriding the pipeline's default for that one step — see §Cost accounting's live/approximate pricing subsection.
 
 **Token budget guardrail:** if `budget.max_tokens` is set, the runner accumulates `input_tokens + output_tokens` from each completed step (including all branches of parallel/fan-out groups) and aborts the run with `status=aborted` if the total exceeds the ceiling. The check runs after each successful step — a step that's already failed or escalated won't trigger a second abort. A `budget_exceeded` event is appended to the run log.
 
 Token counts come from `meta.agentMeta.usage` in the VectorStep Gateway response. Steps using other executors (`openclaw`, `human`, `webhook`) contribute 0 tokens to the accumulator — set `max_tokens` conservatively if your pipeline mixes executor types.
+
+**Cost budget guardrail:** `budget.max_usd` behaves exactly like `max_tokens`, accumulating each step's persisted `cost` (in `pricing.currency`'s units) instead of token counts. Unpriced steps (no rate match, or no token data) contribute 0 to this accumulator, same as other-executor steps contribute 0 tokens — see §Cost accounting.
 
 ---
 
@@ -1719,9 +1744,9 @@ default, see §3c) contributes to none of them, including the metrics that query
 | `vectorstep_step_grounding_score` | histogram | `pipeline`, `step_name`, `agent`, `model`, `provider` | Shadow-mode grounding score (G) distribution per step (§Grounding (shadow mode)), production-scoped (buckets: 0.1, 0.2, ..., 1.0, +Inf). Only steps with a `grounding:` block that produced a score contribute — NULL/not-computed steps are excluded, not padded as zero. |
 | `vectorstep_step_deterministic_check_total` | counter | `pipeline`, `step_name`, `outcome` | Cumulative whole-step deterministic-check outcomes (§Deterministic checks & enforced grounding (Phase 1)), production-scoped. `outcome` is `passed`/`failed` — `passed` only when every declared check for that step run passed. Steps with no `deterministic_checks:` declared are excluded. |
 | `vectorstep_human_approvals_pending` | gauge | `team` | Currently pending `human` step approvals, awaiting a response on whichever channel (Telegram/Slack/Teams) that team is routed to (§ "human — Human-in-the-Loop"). Unlike every other metric here this isn't derived from the database — pending approvals are in-memory only — so it reflects only this process's current state, not a historical/cumulative total. NULL team is bucketed as `""`. Always emits at least a zero-valued series so the metric doesn't disappear from dashboards when nothing's pending. Excludes `stage=testing` pending approvals, same as every other series on this page — see §3c. |
-
-Dollar-cost conversion is intentionally not provided — there's no per-model
-pricing table yet, so this metric is raw token counts only.
+| `vectorstep_pipeline_cost_total` | counter | `pipeline`, `team`, `model`, `provider` | Cumulative step cost in `pricing.currency`'s units (§Cost accounting). Unpriced steps (no rate match, or no token data) are excluded rather than padded as zero, same treatment as the tokens metric. |
+| `vectorstep_pipeline_approx_cost_total` | counter | `pipeline`, `team`, `model`, `provider` | Best-effort OpenRouter reference cost for steps with no real (manual) price — a separate metric, never blended with `vectorstep_pipeline_cost_total`. Empty unless `pricing.live_pricing.enabled` is set; see §Cost accounting's live/approximate pricing subsection. |
+| `vectorstep_team_budget_ratio` | gauge | `team` | Month-to-date spend / `pricing.team_budgets[team]`, UTC calendar month. Only teams with a configured budget get a series. Advisory only — never gates a run; see §Cost accounting. |
 
 Standard `python_*` / `process_*` / `python_gc_*` process-health metrics are included
 automatically via `prometheus_client`'s default collectors.
@@ -1827,11 +1852,15 @@ GET /agents
 # other rollup in the app — see §3c).
 GET /pipelines/{name}/stats?time_range=7d&stage=production
 # → {"pipeline_name", "runs_total", "status_counts": {...}, "success_rate",
-#     "tokens": {"input", "output", "total"}, "duration_seconds": {"avg", "p95"},
+#     "tokens": {"input", "output", "total"},
+#     "cost": {"total", "unpriced_steps", "currency"}, "duration_seconds": {"avg", "p95"},
 #     "accuracy": {"correct", "partial", "incorrect", "total", "correct_pct"}, "teams": [...]}
 # success_rate = completed ÷ terminal runs (excludes still-running); accuracy is the
 # separate *judged* rollup from RunFeedback — null/zeroed when nothing's been graded,
-# which is not the same as "0% accurate". 404 if the pipeline name is unknown.
+# which is not the same as "0% accurate". "cost.total" is a SUM that skips NULL
+# (unpriced) steps; "cost.unpriced_steps" is a separate count of how many were
+# skipped, so this can never be mistaken for a complete total (§Cost accounting).
+# 404 if the pipeline name is unknown.
 
 # The same per-pipeline payload as above, for every pipeline with a run in range —
 # the JSON behind the /ui/insights/pipelines table. Rank client-side to answer

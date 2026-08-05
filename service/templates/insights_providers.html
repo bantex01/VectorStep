@@ -125,6 +125,7 @@
         <th class="text-left px-5 py-3 font-medium">Failures</th>
         <th class="text-left px-5 py-3 font-medium">Avg duration</th>
         <th class="text-left px-5 py-3 font-medium">Tokens</th>
+        <th class="text-left px-5 py-3 font-medium">Cost</th>
         <th class="text-left px-5 py-3 font-medium">Models</th>
       </tr>
     </thead>
@@ -244,6 +245,20 @@
     return h + 'h ' + rm + 'm';
   }
 
+  const CURRENCY = {{ currency | tojson | safe }};
+  function fmtCost(value) {
+    if (value == null) return null;
+    const formatted = value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return CURRENCY === 'USD' ? `$${formatted}` : `${formatted} ${CURRENCY}`;
+  }
+  // A $0.00 total that coincides with unpriced steps means nothing in this group
+  // was actually priced — show "not priced" rather than a misleading free $0.00.
+  function costDisplay(cost, unpriced) {
+    const title = unpriced ? `unpriced steps: ${unpriced}` : '';
+    if (cost === 0 && unpriced > 0) return { text: 'not priced', title };
+    return { text: fmtCost(cost) ?? '—', title };
+  }
+
   // ── Calls / tokens over time ─────────────────────────────────────────────────
 
   function mkLine(id, ts) {
@@ -311,12 +326,14 @@
       const durStr = r.avg_duration_secs != null ? fmtSecs(r.avg_duration_secs) : '—';
       const failCls = r.failed_count > 0 ? 'text-red-400' : 'text-zinc-500';
       const models = r.models.map(m => `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700 font-mono">${m}</span>`).join(' ');
+      const cost = costDisplay(r.cost, r.unpriced_steps);
       return `<tr class="hover:bg-zinc-800 transition-colors">
         <td class="px-5 py-3 text-sm font-medium text-zinc-100">${r.name}</td>
         <td class="px-5 py-3 text-sm text-zinc-200">${r.run_count.toLocaleString()}</td>
         <td class="px-5 py-3 text-sm ${failCls}">${r.failed_count.toLocaleString()}</td>
         <td class="px-5 py-3 text-sm text-zinc-200">${durStr}</td>
         <td class="px-5 py-3 text-sm text-zinc-200" title="${tokTitle}">${tokStr}</td>
+        <td class="px-5 py-3 text-sm text-zinc-200" title="${cost.title}">${cost.text}</td>
         <td class="px-5 py-3"><div class="flex gap-1 flex-wrap">${models}</div></td>
       </tr>`;
     }).join('');

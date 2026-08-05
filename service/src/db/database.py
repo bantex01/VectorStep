@@ -73,6 +73,13 @@ _COLUMN_MIGRATIONS = [
     ("pipeline_steps", "verifier_prompt", "TEXT"),
     ("pipeline_steps", "prompt_hash", "TEXT"),
     ("pipeline_steps", "agent_version", "TEXT"),
+    ("pipeline_steps", "verifier_input_tokens", "INTEGER"),
+    ("pipeline_steps", "verifier_output_tokens", "INTEGER"),
+    ("pipeline_steps", "cost", "FLOAT"),
+    ("pipeline_steps", "grounding_model", "TEXT"),
+    ("pipeline_steps", "grounding_provider", "TEXT"),
+    ("pipeline_steps", "grounding_input_tokens", "INTEGER"),
+    ("pipeline_steps", "grounding_output_tokens", "INTEGER"),
 ]
 
 _INDEX_MIGRATIONS = [

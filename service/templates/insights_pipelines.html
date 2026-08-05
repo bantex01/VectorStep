@@ -120,6 +120,7 @@
         <th class="text-left px-5 py-3 font-medium">Failures</th>
         <th class="text-left px-5 py-3 font-medium">Avg duration</th>
         <th class="text-left px-5 py-3 font-medium">Tokens</th>
+        <th class="text-left px-5 py-3 font-medium">Cost</th>
         <th class="text-left px-5 py-3 font-medium">Teams</th>
         <th class="text-left px-5 py-3 font-medium">Accuracy</th>
       </tr>
@@ -147,7 +148,7 @@
 
   <div class="p-5">
     <!-- Mini cards -->
-    <div class="grid grid-cols-5 gap-4 mb-5">
+    <div class="grid grid-cols-6 gap-4 mb-5">
       <div class="bg-zinc-800/60 rounded-lg p-4">
         <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Runs</p>
         <p id="dd-runs" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
@@ -163,6 +164,11 @@
       <div class="bg-zinc-800/60 rounded-lg p-4">
         <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Escalation rate</p>
         <p id="dd-escalation" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
+      </div>
+      <div class="bg-zinc-800/60 rounded-lg p-4">
+        <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Cost</p>
+        <p id="dd-cost" class="mt-1 text-2xl font-semibold text-zinc-50">—</p>
+        <p id="dd-cost-sub" class="text-xs text-zinc-500 mt-0.5"></p>
       </div>
       <div class="bg-zinc-800/60 rounded-lg p-4">
         <p class="text-xs text-zinc-500 uppercase tracking-wide font-medium">Accuracy</p>
@@ -253,6 +259,21 @@
     return h + 'h ' + rm + 'm';
   }
 
+  const CURRENCY = {{ currency | tojson | safe }};
+  function fmtCost(value) {
+    if (value == null) return null;
+    const formatted = value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return CURRENCY === 'USD' ? `$${formatted}` : `${formatted} ${CURRENCY}`;
+  }
+  // cost sums are always a number (SUM skips NULLs) — a $0.00 total that coincides
+  // with unpriced steps means nothing in this group was actually priced, which
+  // should read as "not priced" rather than a misleading free $0.00.
+  function costDisplay(cost, unpriced) {
+    const title = unpriced ? `unpriced steps: ${unpriced}` : '';
+    if (cost === 0 && unpriced > 0) return { text: 'not priced', title };
+    return { text: fmtCost(cost) ?? '—', title };
+  }
+
   // ── Duration bar chart ──────────────────────────────────────────────────────
 
   const durationData = {{ duration_chart | tojson | safe }};
@@ -319,12 +340,14 @@
       const teams = r.teams.map(t => `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">${t}</span>`).join(' ');
       const accStr = r.accuracy_pct != null ? r.accuracy_pct + '%' : '—';
       const accCls = r.accuracy_pct == null ? 'text-zinc-500' : r.accuracy_pct >= 80 ? 'text-green-400' : r.accuracy_pct >= 60 ? 'text-amber-400' : 'text-red-400';
+      const cost = costDisplay(r.cost, r.unpriced_steps);
       return `<tr class="hover:bg-zinc-800 transition-colors">
         <td class="px-5 py-3"><a href="/ui/pipelines/${r.name}" class="text-sm font-medium text-zinc-100 hover:text-indigo-400">${r.name}</a></td>
         <td class="px-5 py-3 text-sm text-zinc-200">${r.run_count.toLocaleString()}</td>
         <td class="px-5 py-3 text-sm ${failCls}">${r.failed_count.toLocaleString()}</td>
         <td class="px-5 py-3 text-sm text-zinc-200">${durStr}</td>
         <td class="px-5 py-3 text-sm text-zinc-200" title="${tokTitle}">${tokStr}</td>
+        <td class="px-5 py-3 text-sm text-zinc-200" title="${cost.title}">${cost.text}</td>
         <td class="px-5 py-3"><div class="flex gap-1 flex-wrap">${teams}</div></td>
         <td class="px-5 py-3 text-sm ${accCls}">${accStr}</td>
       </tr>`;
@@ -372,6 +395,15 @@
     const escEl = document.getElementById('dd-escalation');
     escEl.textContent = d.escalation_rate != null ? d.escalation_rate + '%' : '—';
     escEl.className = 'mt-1 text-2xl font-semibold ' + (d.escalation_rate > 0 ? 'text-amber-400' : 'text-zinc-50');
+
+    // Cost mini card
+    const costEl = document.getElementById('dd-cost');
+    const costSubEl = document.getElementById('dd-cost-sub');
+    if (costEl) {
+      const cost = costDisplay(d.cost, d.unpriced_steps);
+      costEl.textContent = cost.text;
+      if (costSubEl) costSubEl.textContent = cost.title;
+    }
 
     // Accuracy mini card
     const accEl = document.getElementById('dd-accuracy');

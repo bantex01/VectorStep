@@ -31,6 +31,7 @@ from .db.models import (
     StepFeedback,
     StepPromptVersion,
 )
+from . import live_pricing, pricing
 from .pipeline.calibration import calibration_recommendation, compute_calibration_buckets
 from .utils import utc_now
 
@@ -116,6 +117,11 @@ def _percentile(sorted_values: list[float], pct: float) -> float | None:
     return sorted_values[f] * (c - k) + sorted_values[c] * (k - f)
 
 
+def _pricing_currency() -> str:
+    table = pricing.get_table()
+    return table.currency if table else "USD"
+
+
 def _empty_accuracy() -> dict:
     return {"correct": 0, "partial": 0, "incorrect": 0, "total": 0, "correct_pct": None}
 
@@ -168,6 +174,21 @@ async def _pipeline_rollup(
             .group_by(PipelineRun.pipeline_name)
         ))).all()
 
+        # cost is NULL per-row when unpriced (no rate match) or no token data — SUM
+        # skips NULLs on its own, so unpriced_steps is a separate count alongside it
+        # (count(id) - count(cost) = the NULL rows, portable across dialects) never
+        # folded into the sum, so a rollup can never silently understate spend as if
+        # every step were priced (SPEC-cost-accounting.md §2).
+        cost_rows = (await session.execute(_scope(
+            select(
+                PipelineRun.pipeline_name,
+                func.coalesce(func.sum(PipelineStep.cost), 0.0),
+                func.count(PipelineStep.id) - func.count(PipelineStep.cost),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .group_by(PipelineRun.pipeline_name)
+        ))).all()
+
         teams_rows = (await session.execute(_scope(
             select(PipelineRun.pipeline_name, PipelineRun.team).distinct()
         ))).all()
@@ -191,6 +212,9 @@ async def _pipeline_rollup(
 
     token_totals = {name: (i, o) for name, i, o in token_rows}
     names.update(token_totals)
+
+    cost_totals = {name: (cost, unpriced) for name, cost, unpriced in cost_rows}
+    names.update(cost_totals)
 
     teams_by_pipeline: dict[str, set[str]] = defaultdict(set)
     for name, team in teams_rows:
@@ -217,6 +241,7 @@ async def _pipeline_rollup(
         success_rate = round(sc.get("completed", 0) / terminal, 4) if terminal else None
 
         inp, out = token_totals.get(name, (0, 0))
+        cost_sum, unpriced_steps = cost_totals.get(name, (0.0, 0))
 
         secs = sorted(durations_by_pipeline.get(name, []))
         avg_duration = (sum(secs) / len(secs)) if secs else None
@@ -232,6 +257,7 @@ async def _pipeline_rollup(
             "status_counts": dict(sc),
             "success_rate": success_rate,
             "tokens": {"input": inp, "output": out, "total": inp + out},
+            "cost": {"total": cost_sum, "unpriced_steps": unpriced_steps, "currency": _pricing_currency()},
             "duration_seconds": {"avg": avg_duration, "p95": p95_duration},
             "accuracy": _accuracy_from_counts(fb.get("correct", 0), fb.get("partial", 0), fb.get("incorrect", 0)),
             "teams": sorted(teams_by_pipeline.get(name, set())),
@@ -248,6 +274,7 @@ def _empty_pipeline_stats(pipeline_name: str, time_range: str, stage: str) -> di
         "status_counts": {s: 0 for s in ALL_RUN_STATUSES},
         "success_rate": None,
         "tokens": {"input": 0, "output": 0, "total": 0},
+        "cost": {"total": 0.0, "unpriced_steps": 0, "currency": _pricing_currency()},
         "duration_seconds": {"avg": None, "p95": None},
         "accuracy": _empty_accuracy(),
         "teams": [],
@@ -278,6 +305,82 @@ async def list_pipeline_stats(
     Sorted by runs_total descending, matching that page's table ordering."""
     rollup = await _pipeline_rollup(session_factory, time_range, stage)
     return sorted(rollup.values(), key=lambda r: r["runs_total"], reverse=True)
+
+
+# ── Team budgets (SPEC-cost-accounting.md §2 — advisory, never run-blocking) ────
+
+async def get_team_month_to_date_spend(session_factory: async_sessionmaker) -> dict[str, dict]:
+    """Spend per team since the first of the current UTC calendar month,
+    production-scoped like every other rollup. Every team with a configured
+    `pricing.team_budgets` entry gets a row even with $0 spent so far this
+    month (a team that hasn't run anything yet still has a budget to show);
+    a team with spend but no configured budget also gets a row (budget=None,
+    ratio=None) so /ui/insights/teams can still list its month-to-date total.
+
+    Advisory only — this never gates a run. Enforcement is per-run via
+    budget.max_usd on the pipeline itself."""
+    now = utc_now()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    table = pricing.get_table()
+    live_enabled = bool(table and table.live_pricing.enabled)
+
+    async with session_factory() as session:
+        rows = (await session.execute(_production_only(
+            select(
+                PipelineRun.team,
+                func.coalesce(func.sum(PipelineStep.cost), 0.0),
+                func.count(PipelineStep.id) - func.count(PipelineStep.cost),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineRun.triggered_at >= month_start)
+            .group_by(PipelineRun.team)
+        ))).all()
+
+        # Best-effort OpenRouter approximation for this month's unpriced steps,
+        # informational only (never folded into "spend" or "ratio") — only
+        # fetched when live_pricing is enabled, since fuzzy-matching every
+        # unpriced row is wasted work otherwise (SPEC-live-pricing.md).
+        approx_spend_by_team: dict[str, float] = defaultdict(float)
+        if live_enabled:
+            catalog = live_pricing.get_catalog()
+            unpriced_rows = (await session.execute(_production_only(
+                select(
+                    PipelineRun.team, PipelineStep.provider, PipelineStep.model,
+                    PipelineStep.input_tokens, PipelineStep.output_tokens,
+                )
+                .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+                .where(PipelineRun.triggered_at >= month_start, PipelineStep.cost.is_(None))
+            ))).all()
+            for team, provider, model, in_tok, out_tok in unpriced_rows:
+                name = team or "Unattributed"
+                rate = live_pricing.resolve_approx_rate(catalog, provider, model)
+                approx = live_pricing.approx_step_cost(rate, in_tok, out_tok)
+                if approx is not None:
+                    approx_spend_by_team[name] += approx
+
+    budgets = table.team_budgets if table else {}
+    currency = _pricing_currency()
+
+    spend: dict[str, dict] = {}
+    for team, cost_sum, unpriced_steps in rows:
+        name = team or "Unattributed"
+        spend[name] = {"spend": cost_sum, "unpriced_steps": unpriced_steps}
+
+    result: dict[str, dict] = {}
+    for name in set(spend) | set(budgets):
+        s = spend.get(name, {"spend": 0.0, "unpriced_steps": 0})
+        budget = budgets.get(name)
+        result[name] = {
+            "team": name,
+            "spend": s["spend"],
+            "unpriced_steps": s["unpriced_steps"],
+            "approx_spend": approx_spend_by_team.get(name, 0.0) if live_enabled else None,
+            "budget": budget,
+            "ratio": (s["spend"] / budget) if budget else None,
+            "currency": currency,
+        }
+    return result
 
 
 # ── Step rollups ──────────────────────────────────────────────────────────────
@@ -317,6 +420,16 @@ async def _step_rollup(
             .group_by(PipelineStep.step_name)
         ))).all()
 
+        cost_rows = (await session.execute(_scope(
+            select(
+                PipelineStep.step_name,
+                func.coalesce(func.sum(PipelineStep.cost), 0.0),
+                func.count(PipelineStep.id) - func.count(PipelineStep.cost),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .group_by(PipelineStep.step_name)
+        ))).all()
+
         duration_rows = (await session.execute(_scope(
             select(PipelineStep.step_name, PipelineStep.duration_ms)
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
@@ -339,6 +452,9 @@ async def _step_rollup(
     token_totals = {name: (i, o) for name, i, o in token_rows}
     names.update(token_totals)
 
+    cost_totals = {name: (cost, unpriced) for name, cost, unpriced in cost_rows}
+    names.update(cost_totals)
+
     durations_by_step: dict[str, list[float]] = defaultdict(list)
     for name, duration_ms in duration_rows:
         durations_by_step[name].append(duration_ms / 1000)
@@ -356,6 +472,7 @@ async def _step_rollup(
         success_rate = round(sc.get("completed", 0) / runs_total, 4) if runs_total else None
 
         inp, out = token_totals.get(name, (0, 0))
+        cost_sum, unpriced_steps = cost_totals.get(name, (0.0, 0))
 
         secs = sorted(durations_by_step.get(name, []))
         avg_duration = (sum(secs) / len(secs)) if secs else None
@@ -371,6 +488,7 @@ async def _step_rollup(
             "status_counts": dict(sc),
             "success_rate": success_rate,
             "tokens": {"input": inp, "output": out, "total": inp + out},
+            "cost": {"total": cost_sum, "unpriced_steps": unpriced_steps, "currency": _pricing_currency()},
             "avg_input_tokens": round(inp / runs_total) if runs_total else None,
             "avg_output_tokens": round(out / runs_total) if runs_total else None,
             "duration_seconds": {"avg": avg_duration, "p95": p95_duration},
@@ -388,6 +506,7 @@ def _empty_step_stats(step_name: str, time_range: str, stage: str) -> dict:
         "status_counts": {s: 0 for s in ALL_STEP_STATUSES},
         "success_rate": None,
         "tokens": {"input": 0, "output": 0, "total": 0},
+        "cost": {"total": 0.0, "unpriced_steps": 0, "currency": _pricing_currency()},
         "avg_input_tokens": None,
         "avg_output_tokens": None,
         "duration_seconds": {"avg": None, "p95": None},
@@ -462,6 +581,16 @@ async def get_step_model_breakdown(
             .group_by(PipelineStep.agent, PipelineStep.provider, PipelineStep.model)
         ))).all()
 
+        cost_rows = (await session.execute(_scope(
+            select(
+                PipelineStep.agent, PipelineStep.provider, PipelineStep.model,
+                func.coalesce(func.sum(PipelineStep.cost), 0.0),
+                func.count(PipelineStep.id) - func.count(PipelineStep.cost),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .group_by(PipelineStep.agent, PipelineStep.provider, PipelineStep.model)
+        ))).all()
+
         feedback_rows = (await session.execute(_scope(
             select(
                 PipelineStep.agent, PipelineStep.provider, PipelineStep.model,
@@ -485,6 +614,12 @@ async def get_step_model_breakdown(
     }
     keys.update(token_duration)
 
+    cost_totals = {
+        (agent, provider, model): (cost, unpriced)
+        for agent, provider, model, cost, unpriced in cost_rows
+    }
+    keys.update(cost_totals)
+
     feedback: dict[tuple, dict[str, int]] = defaultdict(lambda: {"correct": 0, "partial": 0, "incorrect": 0})
     for agent, provider, model, outcome, n in feedback_rows:
         feedback[(agent, provider, model)][outcome] = n
@@ -499,6 +634,7 @@ async def get_step_model_breakdown(
 
         inp, out, dur_sum, dur_n = token_duration.get(key, (0, 0, 0, 0))
         avg_duration = (dur_sum / dur_n / 1000) if dur_n else None
+        cost_sum, unpriced_steps = cost_totals.get(key, (0.0, 0))
 
         fb = feedback.get(key, {})
 
@@ -511,6 +647,7 @@ async def get_step_model_breakdown(
             "success_rate": success_rate,
             "avg_input_tokens": round(inp / runs_total) if runs_total else None,
             "avg_output_tokens": round(out / runs_total) if runs_total else None,
+            "cost": {"total": cost_sum, "unpriced_steps": unpriced_steps, "currency": _pricing_currency()},
             "avg_duration_seconds": avg_duration,
             "accuracy": _accuracy_from_counts(fb.get("correct", 0), fb.get("partial", 0), fb.get("incorrect", 0)),
         })

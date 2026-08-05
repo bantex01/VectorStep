@@ -20,6 +20,8 @@ from ..db.models import PipelineRun, PipelineStep
 from ..executors.base import BaseExecutor, LLMParseError
 from ..models.context import NormalisedContext
 from ..models.llm import LLMOutput
+from .. import live_pricing
+from .. import pricing
 from .. import run_events
 from ..tracing import record_event, start_root_span, tracer
 from ..utils import utc_now
@@ -198,7 +200,25 @@ class StepResult:
     # Token usage from the primary executor (+ verifier for sequential steps;
     # sum of all branches for parallel/fan-out groups). 0 when unavailable.
     total_tokens: int = 0
+    # Cost in pricing.currency's units (primary + verifier once priced), or None when
+    # unpriced/no token data. Set by _db_save_step/_db_save_branch (+group callers) at
+    # persistence time — see SPEC-cost-accounting.md. Feeds the budget.max_usd
+    # accumulator the same way total_tokens feeds max_tokens (None treated as 0 there).
+    cost: float | None = None
+    # Best-effort estimate from OpenRouter's live catalog (SPEC-live-pricing.md),
+    # computed only when `cost` is None. Never persisted — ephemeral, in-memory-only,
+    # so it's available to the budget.max_usd accumulator during THIS run if the
+    # pipeline/step opts in via include_approx_cost. Display elsewhere (UI) recomputes
+    # its own approximation fresh against the current catalog rather than reusing this.
+    approx_cost: float | None = None
     grounding_score: float | None = None       # G ∈ [0,1], or None when not computed
+    # Grounding judge's own model/provider/token usage (SPEC-cost-accounting.md) — all
+    # None when grounding didn't run (no grounding: block, no trace, or the call errored).
+    # Priced into `cost` (and `approx_cost`) alongside primary/verifier.
+    grounding_model: str | None = None
+    grounding_provider: str | None = None
+    grounding_input_tokens: int | None = None
+    grounding_output_tokens: int | None = None
     trust_report: dict | None = None           # full TrustReport (§5e), or None
     deterministic_passed: bool | None = None   # None = no checks declared; else all-checks-passed
 
@@ -293,6 +313,44 @@ class PipelineRunner:
         """Return (input_tokens, output_tokens) from a gateway raw_response, or (0, 0)."""
         usage = ((raw_response or {}).get("meta") or {}).get("agentMeta", {}).get("usage") or {}
         return (int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0))
+
+    @staticmethod
+    def _cost_for(
+        provider: str | None, model: str | None,
+        input_tokens: int | None, output_tokens: int | None,
+    ) -> float | None:
+        """Price a raw (provider, model, tokens) tuple against the loaded pricing
+        table. None when unpriced (no rate match) or no token data at all —
+        shared by the LLMOutput-based helpers below and by grounding, which has
+        no LLMOutput of its own by the time cost is computed."""
+        return pricing.step_cost(
+            pricing.resolve_rate(pricing.get_table(), provider, model),
+            input_tokens or None, output_tokens or None,
+        )
+
+    @classmethod
+    def _output_cost(cls, output: LLMOutput) -> float | None:
+        """Price a single LLMOutput against the loaded pricing table. None when
+        unpriced (no rate match) or when it reported no token usage at all."""
+        in_tok, out_tok = cls._extract_usage(output.raw_response)
+        return cls._cost_for(output.provider, output.model, in_tok, out_tok)
+
+    @staticmethod
+    def _approx_cost_for(
+        provider: str | None, model: str | None,
+        input_tokens: int | None, output_tokens: int | None,
+    ) -> float | None:
+        """Best-effort approximation from OpenRouter's live catalog (SPEC-live-
+        pricing.md) — only ever used when _cost_for already returned None."""
+        return live_pricing.approx_step_cost(
+            live_pricing.resolve_approx_rate(live_pricing.get_catalog(), provider, model),
+            input_tokens or None, output_tokens or None,
+        )
+
+    @classmethod
+    def _output_approx_cost(cls, output: LLMOutput) -> float | None:
+        in_tok, out_tok = cls._extract_usage(output.raw_response)
+        return cls._approx_cost_for(output.provider, output.model, in_tok, out_tok)
 
     @staticmethod
     def _format_trace_for_grounding(trace: list, max_chars: int = 1500) -> str:
@@ -402,6 +460,7 @@ class PipelineRunner:
         step_outputs: dict[str, LLMOutput] = dict(initial_step_outputs or {})
         skipping = from_step is not None
         accumulated_tokens = 0
+        accumulated_cost = 0.0
 
         for index, step in enumerate(pipeline.steps):
             if isinstance(step, ParallelGroupConfig):
@@ -419,6 +478,16 @@ class PipelineRunner:
                 step_when = step.when
                 step_on_abort = step.on_abort
                 step_threshold = step.confidence_threshold
+
+            # Whether THIS step's approximate (OpenRouter) cost should fill the gap in
+            # the budget.max_usd accumulator when its real cost is None — a step-level
+            # override (StepConfig only; groups have no such override) wins over the
+            # pipeline's own default. Off by default: an estimate shouldn't be able to
+            # abort a run unless explicitly opted into (SPEC-live-pricing.md).
+            step_include_approx_cost = (
+                step.include_approx_cost if isinstance(step, StepConfig) and step.include_approx_cost is not None
+                else bool(pipeline.budget and pipeline.budget.include_approx_cost)
+            )
 
             # Skip steps before from_step when replaying a re-run
             if skipping:
@@ -514,6 +583,10 @@ class PipelineRunner:
                                    f"{step_result.output.summary if step_result.output else ''}",
                                    step=step_name)
                         accumulated_tokens += step_result.total_tokens
+                        _cost_contribution = step_result.cost
+                        if _cost_contribution is None and step_include_approx_cost:
+                            _cost_contribution = step_result.approx_cost
+                        accumulated_cost += _cost_contribution or 0
                         continue
 
                 result.status = step_result.status
@@ -535,17 +608,35 @@ class PipelineRunner:
 
             result.final_output = step_result.output
 
-            # Budget guardrail — check after registering the completed step's output
+            # Budget guardrail — check after registering the completed step's output.
+            # NULL-cost steps (unpriced, or no token data) contribute 0 to the cost
+            # accumulator, mirroring how other-executor steps already contribute 0 to
+            # the token accumulator — unless this step opted into approximate cost
+            # (step_include_approx_cost), in which case the OpenRouter estimate fills
+            # the gap instead of 0.
             accumulated_tokens += step_result.total_tokens
-            if (
-                pipeline.budget
-                and pipeline.budget.max_tokens
-                and accumulated_tokens > pipeline.budget.max_tokens
-            ):
-                msg = (
-                    f"Token budget exceeded: {accumulated_tokens:,} tokens used "
-                    f"(limit: {pipeline.budget.max_tokens:,})"
-                )
+            _cost_contribution = step_result.cost
+            if _cost_contribution is None and step_include_approx_cost:
+                _cost_contribution = step_result.approx_cost
+            accumulated_cost += _cost_contribution or 0
+            budget = pipeline.budget
+            tokens_exceeded = bool(budget and budget.max_tokens and accumulated_tokens > budget.max_tokens)
+            # Checked in this fixed order (tokens, then cost) rather than by which ceiling
+            # was configured first — if both trip on the same step, the token message wins
+            # and is what's logged; not a meaningful ordering choice, just a deterministic one.
+            cost_exceeded = bool(budget and budget.max_usd and accumulated_cost > budget.max_usd)
+            if tokens_exceeded or cost_exceeded:
+                if tokens_exceeded:
+                    msg = (
+                        f"Token budget exceeded: {accumulated_tokens:,} tokens used "
+                        f"(limit: {budget.max_tokens:,})"
+                    )
+                else:
+                    currency = (pricing.get_table().currency if pricing.get_table() else None) or "USD"
+                    msg = (
+                        f"Cost budget exceeded: {accumulated_cost:,.2f} {currency} used "
+                        f"(limit: {budget.max_usd:,.2f} {currency})"
+                    )
                 logger.warning("Pipeline '%s' %s", pipeline.name, msg)
                 _log_event(run_log, "warn", "budget_exceeded", msg)
                 result.status = "aborted"
@@ -848,6 +939,11 @@ class PipelineRunner:
                 if step.calibration.on_uncalibrated == "escalate":
                     combined_trust = 0.0
 
+        grounding_model: str | None = None
+        grounding_provider: str | None = None
+        grounding_input_tokens: int | None = None
+        grounding_output_tokens: int | None = None
+        _grounding_ran = False  # a real judge call happened — vs. no_trace/error, which didn't
         if step.grounding is not None:
             grounding_score, grounding_report, grounding_tokens = await self._run_grounding(
                 step=step, ctx=ctx, primary_output=primary_output, run_log=run_log,
@@ -855,6 +951,12 @@ class PipelineRunner:
             if step.grounding.enforce and grounding_score is not None:
                 combined_trust = min(combined_trust, grounding_score)
                 gate_policy = "trust_vector"
+            if grounding_report.get("computed"):
+                _grounding_ran = True
+                grounding_model = grounding_report.get("model")
+                grounding_provider = grounding_report.get("provider")
+                grounding_input_tokens = grounding_report.get("input_tokens") or None
+                grounding_output_tokens = grounding_report.get("output_tokens") or None
 
         if step.deterministic_checks:
             deterministic_results = await self._run_deterministic_checks(
@@ -901,6 +1003,42 @@ class PipelineRunner:
             _out_tok += _vo
         _step_tokens = _in_tok + _out_tok + grounding_tokens
 
+        # Computed here (not only at _db_save_step time) so it's available to the
+        # budget.max_usd accumulator regardless of whether a session_factory is
+        # configured — same reasoning as _step_tokens above. Every component that
+        # actually ran (primary always; verifier/grounding only if they ran)
+        # contributes to the sum — see the honest-NULL-propagation comment below.
+        _real_components = [self._output_cost(primary_output)]
+        if verifier_output is not None:
+            _real_components.append(self._output_cost(verifier_output))
+        if _grounding_ran:
+            _real_components.append(
+                self._cost_for(grounding_provider, grounding_model, grounding_input_tokens, grounding_output_tokens)
+            )
+        # Honest NULL propagation: a component that ran but couldn't be priced makes
+        # the whole step's cost unknown rather than a silently undercounted partial
+        # sum (SPEC-cost-accounting.md §2).
+        _step_cost_val = None if any(c is None for c in _real_components) else sum(_real_components)
+
+        # Approximate (OpenRouter) cost only for steps the real pricing table
+        # couldn't price — never computed (or shown) alongside a real cost. Unlike
+        # the real-cost combination above, this doesn't track which component used
+        # which source: it's already labeled an approximation, so summing
+        # per-component approx-or-real is unnecessary precision for what's meant
+        # to be a rough estimate.
+        _step_approx_cost_val: float | None = None
+        if _step_cost_val is None:
+            _approx_components = [self._output_approx_cost(primary_output)]
+            if verifier_output is not None:
+                _approx_components.append(self._output_approx_cost(verifier_output))
+            if _grounding_ran:
+                _approx_components.append(self._approx_cost_for(
+                    grounding_provider, grounding_model, grounding_input_tokens, grounding_output_tokens,
+                ))
+            _step_approx_cost_val = (
+                None if any(c is None for c in _approx_components) else sum(_approx_components)
+            )
+
         if combined_trust < step.confidence_threshold:
             action = step.on_low_confidence
             logger.info(
@@ -922,7 +1060,13 @@ class PipelineRunner:
                     effective_confidence=effective_confidence,
                     duration_ms=int(time.time() * 1000) - start_ms,
                     total_tokens=_step_tokens,
+                    cost=_step_cost_val,
+                    approx_cost=_step_approx_cost_val,
                     grounding_score=grounding_score,
+                    grounding_model=grounding_model,
+                    grounding_provider=grounding_provider,
+                    grounding_input_tokens=grounding_input_tokens,
+                    grounding_output_tokens=grounding_output_tokens,
                     trust_report=trust_report,
                     deterministic_passed=deterministic_passed,
                 )
@@ -938,7 +1082,13 @@ class PipelineRunner:
                     effective_confidence=effective_confidence,
                     duration_ms=int(time.time() * 1000) - start_ms,
                     total_tokens=_step_tokens,
+                    cost=_step_cost_val,
+                    approx_cost=_step_approx_cost_val,
                     grounding_score=grounding_score,
+                    grounding_model=grounding_model,
+                    grounding_provider=grounding_provider,
+                    grounding_input_tokens=grounding_input_tokens,
+                    grounding_output_tokens=grounding_output_tokens,
                     trust_report=trust_report,
                     deterministic_passed=deterministic_passed,
                 )
@@ -961,7 +1111,13 @@ class PipelineRunner:
                 effective_confidence=effective_confidence,
                 duration_ms=int(time.time() * 1000) - start_ms,
                 total_tokens=_step_tokens,
+                cost=_step_cost_val,
+                approx_cost=_step_approx_cost_val,
                 grounding_score=grounding_score,
+                grounding_model=grounding_model,
+                grounding_provider=grounding_provider,
+                grounding_input_tokens=grounding_input_tokens,
+                grounding_output_tokens=grounding_output_tokens,
                 trust_report=trust_report,
                 deterministic_passed=deterministic_passed,
             )
@@ -980,7 +1136,13 @@ class PipelineRunner:
             effective_confidence=effective_confidence,
             duration_ms=duration_ms,
             total_tokens=_step_tokens,
+            cost=_step_cost_val,
+            approx_cost=_step_approx_cost_val,
             grounding_score=grounding_score,
+            grounding_model=grounding_model,
+            grounding_provider=grounding_provider,
+            grounding_input_tokens=grounding_input_tokens,
+            grounding_output_tokens=grounding_output_tokens,
             trust_report=trust_report,
             deterministic_passed=deterministic_passed,
         )
@@ -1112,6 +1274,18 @@ class PipelineRunner:
         )
 
         _group_tokens = sum(sum(self._extract_usage(o.raw_response)) for o in branch_outputs.values())
+        # Budget-accumulator use only (each branch's own cost is already persisted by
+        # _db_save_branch above) — an unpriced branch contributes 0 here, same as an
+        # unpriced branch contributes 0 tokens to _group_tokens. _group_approx_cost is
+        # the same sum with an OpenRouter approximation filling in per-branch where the
+        # real cost is None — only used if the pipeline opts in via
+        # budget.include_approx_cost (groups have no per-step override).
+        _group_cost = 0.0
+        _group_approx_cost = 0.0
+        for o in branch_outputs.values():
+            _branch_real = self._output_cost(o)
+            _group_cost += _branch_real or 0
+            _group_approx_cost += (_branch_real if _branch_real is not None else self._output_approx_cost(o)) or 0
 
         if effective_confidence < group.confidence_threshold:
             action = group.on_low_confidence
@@ -1130,6 +1304,8 @@ class PipelineRunner:
                     duration_ms=int(time.time() * 1000) - start_ms,
                     branch_outputs=branch_outputs,
                     total_tokens=_group_tokens,
+                    cost=_group_cost,
+                    approx_cost=_group_approx_cost,
                 )
 
         return StepResult(
@@ -1142,6 +1318,8 @@ class PipelineRunner:
             duration_ms=int(time.time() * 1000) - start_ms,
             branch_outputs=branch_outputs,
             total_tokens=_group_tokens,
+            cost=_group_cost,
+            approx_cost=_group_approx_cost,
         )
 
     # ------------------------------------------------------------------
@@ -1361,6 +1539,12 @@ class PipelineRunner:
         )
 
         _fan_out_tokens = sum(sum(self._extract_usage(o.raw_response)) for o in branch_outputs.values())
+        _fan_out_cost = 0.0
+        _fan_out_approx_cost = 0.0
+        for o in branch_outputs.values():
+            _branch_real = self._output_cost(o)
+            _fan_out_cost += _branch_real or 0
+            _fan_out_approx_cost += (_branch_real if _branch_real is not None else self._output_approx_cost(o)) or 0
 
         if effective_confidence < fan_out.confidence_threshold:
             action = fan_out.on_low_confidence
@@ -1379,6 +1563,8 @@ class PipelineRunner:
                     duration_ms=int(time.time() * 1000) - start_ms,
                     branch_outputs=branch_outputs,
                     total_tokens=_fan_out_tokens,
+                    cost=_fan_out_cost,
+                    approx_cost=_fan_out_approx_cost,
                 )
 
         return StepResult(
@@ -1391,6 +1577,8 @@ class PipelineRunner:
             duration_ms=int(time.time() * 1000) - start_ms,
             branch_outputs=branch_outputs,
             total_tokens=_fan_out_tokens,
+            cost=_fan_out_cost,
+            approx_cost=_fan_out_approx_cost,
         )
 
     async def _run_parallel_branch(
@@ -1731,6 +1919,8 @@ class PipelineRunner:
                 "agent": grounding.agent,
                 "model": out.model,
                 "provider": out.provider,
+                "input_tokens": _gi,
+                "output_tokens": _go,
                 "enforce": grounding.enforce,
                 "score": g,
                 "summary": out.summary,
@@ -2000,6 +2190,16 @@ class PipelineRunner:
                 if _t is not None:
                     _trace = json.dumps(_t)
             _in_tok, _out_tok = self._extract_usage(result.output.raw_response if result.output else {})
+            if result.verifier_output is None:
+                _verifier_in_tok, _verifier_out_tok = None, None
+            else:
+                _vi, _vo = self._extract_usage(result.verifier_output.raw_response)
+                _verifier_in_tok, _verifier_out_tok = _vi or None, _vo or None
+
+            # result.cost was already computed in _run_step_impl (so it's available to
+            # the budget.max_usd accumulator regardless of whether this method's
+            # session_factory guard above returns early) — persisted here, not
+            # recomputed, so the two can never disagree.
             # The gateway executor stashes the rendered prompt text in raw_response —
             # use that when present (the actual instructions the agent was given,
             # needed to judge whether a claim like "the agent didn't check X" is a real
@@ -2048,6 +2248,13 @@ class PipelineRunner:
                 agent_trace=_trace,
                 input_tokens=_in_tok or None,
                 output_tokens=_out_tok or None,
+                verifier_input_tokens=_verifier_in_tok,
+                verifier_output_tokens=_verifier_out_tok,
+                grounding_model=result.grounding_model,
+                grounding_provider=result.grounding_provider,
+                grounding_input_tokens=result.grounding_input_tokens,
+                grounding_output_tokens=result.grounding_output_tokens,
+                cost=result.cost,
             ))
             if _prompt_hash is not None:
                 await record_prompt_version(
@@ -2084,6 +2291,7 @@ class PipelineRunner:
         if _t is not None:
             _trace = json.dumps(_t)
         _in_tok, _out_tok = self._extract_usage(output.raw_response)
+        _branch_cost = self._output_cost(output)
         _branch_step_name = f"{group_name}/{branch.name}"
         _prompt_hash = prompt_hash(branch.prompt_template)
         _agent_key = f"{branch.executor}:{_agent}" if _agent else None
@@ -2114,6 +2322,7 @@ class PipelineRunner:
                 agent_trace=_trace,
                 input_tokens=_in_tok or None,
                 output_tokens=_out_tok or None,
+                cost=_branch_cost,
             ))
             if _prompt_hash is not None:
                 # Registry step_name uses the collapsed group name (not the full

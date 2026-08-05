@@ -127,3 +127,32 @@ auth:
                                   # http_config.authorization.credentials in the webhook
                                   # receiver config — route different teams' alerts through
                                   # different receivers with different tokens to use `teams` above.
+
+# Cost accounting (README §Cost accounting) — omit this whole block to run fully
+# unpriced (every step's cost stays NULL, every money surface shows "unpriced").
+# No prices are bundled — real `cost` is always computed from the `models:` table
+# below, which the operator owns and is responsible for keeping current.
+# pricing:
+#   currency: USD                  # display label only — no FX conversion anywhere
+#   models:
+#     # example — verify against your provider's current pricing before relying on this
+#     - match: {provider: anthropic, model: "claude-sonnet-4-6"}
+#       input_per_mtok: 3.00        # currency units per 1,000,000 input tokens
+#       output_per_mtok: 15.00
+#     - match: {provider: anthropic, model: "claude-haiku"}   # prefix match on the model string
+#       input_per_mtok: 1.00
+#       output_per_mtok: 5.00
+#     - match: {provider: openrouter}                          # provider-only fallback (no model key)
+#       input_per_mtok: 2.00
+#       output_per_mtok: 8.00
+#   team_budgets:                  # optional — advisory only, never blocks a run
+#     payments: 500                # currency units per calendar month, UTC
+#     platform: 1000
+#   live_pricing:                  # optional — best-effort APPROXIMATE cost for
+#                                   # unpriced steps, fetched from OpenRouter's public
+#                                   # catalog. Never the real `cost` column, never
+#                                   # persisted, always shown labeled/colored as an
+#                                   # estimate — see README's live/approximate pricing
+#                                   # subsection. Off by default.
+#     enabled: true
+#     refresh_interval_seconds: 3600

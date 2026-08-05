@@ -781,7 +781,8 @@ def _find_family(families, sample_name):
 def test_collect_emits_vectorstep_step_deterministic_check_total():
     data = MetricsData(
         run_counts=[], runs_in_progress=0, step_counts=[], step_durations=[],
-        verifier_counts=[], token_usage=[], human_decisions=[], feedback_counts=[],
+        verifier_counts=[], token_usage=[], cost_usage=[], approx_cost_usage=[], team_budget_ratios=[],
+        human_decisions=[], feedback_counts=[],
         step_feedback_counts=[], grounding_scores=[],
         deterministic_check_counts=[
             ("p", "investigate", "passed", 3),

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
@@ -48,6 +49,7 @@ from .normaliser.alertmanager import AlertmanagerStrategy
 from .notifications.log import LogNotifier
 from .notifications.telegram import TelegramNotifier
 from .pipeline import PipelineRunner, load_pipelines, load_step_library, resolve_pipeline
+from . import live_pricing, pricing
 from .readiness import evaluate_readiness, gather_readiness_evidence, step_specs
 from .tracing import setup_tracing, shutdown_tracing
 from .ui import _fetch_openclaw_agents, _fetch_vectorstep_gateway_agents, _read_pipeline_yaml, _read_step_yaml
@@ -195,11 +197,43 @@ def _register_schedules(pipelines: list) -> None:
             logger.error("Failed to schedule pipeline '%s': %s", pipeline.name, exc)
 
 
+def _register_live_pricing_job() -> None:
+    """(Re-)register the OpenRouter catalog refresh job from the current pricing
+    table. Only manages the job itself (sync, fast) — the actual network
+    refresh happens on the job's own schedule, not here, so this stays safe to
+    call from the synchronous /reload path."""
+    if _scheduler is None:
+        return
+    existing = _scheduler.get_job("live_pricing:refresh")
+    if existing is not None:
+        existing.remove()
+
+    table = pricing.get_table()
+    live_cfg = table.live_pricing if table else None
+    if live_cfg is None or not live_cfg.enabled:
+        return
+    _scheduler.add_job(
+        live_pricing.refresh_catalog,
+        IntervalTrigger(seconds=live_cfg.refresh_interval_seconds),
+        id="live_pricing:refresh",
+        replace_existing=True,
+    )
+    logger.info(
+        "Live pricing (OpenRouter) refresh scheduled every %ds",
+        live_cfg.refresh_interval_seconds,
+    )
+
+
 def _do_reload() -> int:
     global _pipelines, _step_library
     _step_library = load_step_library(_step_library_dir)
     _pipelines = load_pipelines(_pipeline_dir, step_library=_step_library)
     _register_schedules(_pipelines)
+    # Pricing is config, not a pipeline/step file, but reload re-reads config.yaml
+    # anyway (SIGHUP/`POST /reload` is the operator's one hot-reload knob) — already
+    # persisted step costs never change, only steps priced after this point.
+    pricing.configure(_load_config().get("pricing"))
+    _register_live_pricing_job()
     if _runner is not None:
         _runner.set_pipeline_registry({p.name: p for p in _pipelines})
     if _app_ref:
@@ -260,6 +294,8 @@ async def lifespan(app: FastAPI):
     config = _load_config()
     _setup_logging(config)
     setup_tracing(config)
+
+    pricing.configure(config.get("pricing"))
 
     dedup_cfg = config.get("dedup", {})
     _dedup_enabled = dedup_cfg.get("enabled", True)
@@ -495,9 +531,16 @@ async def lifespan(app: FastAPI):
             "Artifact cleanup scheduled (daily at 02:00, retention: %d days)",
             _artifact_retention_days,
         )
+    _register_live_pricing_job()
     _scheduler.start()
     app.state.scheduler = _scheduler
     logger.info("Scheduler started")
+
+    live_cfg = pricing.get_table().live_pricing if pricing.get_table() else None
+    if live_cfg and live_cfg.enabled:
+        # One eager fetch at startup so approximate pricing is available
+        # immediately rather than waiting for the first scheduled interval.
+        await live_pricing.refresh_catalog()
 
     # SIGHUP triggers a pipeline config reload without restarting the process
     loop = asyncio.get_running_loop()

@@ -197,7 +197,8 @@ async def test_steps_insights_rollup_includes_accuracy(db, client):
 def test_collect_emits_vectorstep_step_feedback_total():
     data = MetricsData(
         run_counts=[], runs_in_progress=0, step_counts=[], step_durations=[],
-        verifier_counts=[], token_usage=[], human_decisions=[], feedback_counts=[],
+        verifier_counts=[], token_usage=[], cost_usage=[], approx_cost_usage=[], team_budget_ratios=[],
+        human_decisions=[], feedback_counts=[],
         step_feedback_counts=[
             ("p", "triage", "agent-x", "claude-sonnet-5", "anthropic", "correct", 3),
             ("p", "triage", None, None, None, "incorrect", 1),

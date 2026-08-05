@@ -146,6 +146,29 @@ async def test_run_grounding_extracts_score_and_claims():
     assert report["provider"] == "azure"
 
 
+async def test_run_grounding_report_includes_split_token_usage():
+    # SPEC-cost-accounting.md — the judge's own tokens must be capturable (split
+    # input/output, not just the combined int the budget accumulator uses) so the
+    # step's cost can include the grounding call.
+    judge_output = LLMOutput(
+        confidence=0.9, summary="ok", next_step_context="",
+        raw_response={"meta": {"agentMeta": {"usage": {"input_tokens": 300, "output_tokens": 120}}}},
+        model="gpt-5", provider="azure",
+    )
+    runner = _runner(executors={"grounding_stub": lambda: _StubExecutor(judge_output)})
+    step = StepConfig(
+        name="investigate", executor="gateway", prompt_template="",
+        grounding=GroundingConfig(executor="grounding_stub"),
+    )
+    primary = _make_output(confidence=0.9, raw_response={"trace": _TOOL_TRACE})
+
+    g, report, tokens = await runner._run_grounding(step=step, ctx={}, primary_output=primary, run_log=[])
+
+    assert report["input_tokens"] == 300
+    assert report["output_tokens"] == 120
+    assert tokens == 420
+
+
 async def test_run_grounding_shares_original_task_prompt_with_judge():
     """Without the original task, the judge can't tell 'restates a fact it was given
     as input' (e.g. alert severity) apart from 'claims something it needed to discover'
@@ -515,7 +538,8 @@ def _find_family(families, name):
 def test_collect_emits_vectorstep_step_grounding_score():
     data = MetricsData(
         run_counts=[], runs_in_progress=0, step_counts=[], step_durations=[],
-        verifier_counts=[], token_usage=[], human_decisions=[], feedback_counts=[],
+        verifier_counts=[], token_usage=[], cost_usage=[], approx_cost_usage=[], team_budget_ratios=[],
+        human_decisions=[], feedback_counts=[],
         step_feedback_counts=[],
         grounding_scores=[
             ("p", "investigate", "agent-x", "claude-sonnet-5", "anthropic", 0.9),

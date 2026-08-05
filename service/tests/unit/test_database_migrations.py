@@ -94,6 +94,50 @@ async def test_prompt_hash_and_agent_version_queryable_after_migration(db):
         assert row.agent_version == "91f02ab3c7de"
 
 
+async def test_cost_accounting_column_migration_idempotent(db):
+    # SPEC-cost-accounting.md §3 — cost + verifier token columns on pipeline_steps.
+    await create_tables()
+    await create_tables()
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        conn = await session.connection()
+        columns = await conn.run_sync(
+            lambda c: {col["name"] for col in inspect(c).get_columns("pipeline_steps")}
+        )
+
+    assert "cost" in columns
+    assert "verifier_input_tokens" in columns
+    assert "verifier_output_tokens" in columns
+
+
+async def test_cost_accounting_columns_queryable_after_migration(db):
+    await create_tables()
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        session.add(PipelineRun(
+            id="run-cost", pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}",
+        ))
+        session.add(PipelineStep(
+            run_id="run-cost", step_name="investigate", step_index=0, executor="gateway",
+            prompt="rendered prompt", status="completed",
+            input_tokens=100, output_tokens=50,
+            verifier_input_tokens=20, verifier_output_tokens=10,
+            cost=0.0125,
+        ))
+        await session.commit()
+
+        result = await session.execute(
+            PipelineStep.__table__.select().where(PipelineStep.run_id == "run-cost")
+        )
+        row = result.one()
+        assert row.cost == 0.0125
+        assert row.verifier_input_tokens == 20
+        assert row.verifier_output_tokens == 10
+
+
 async def test_new_prompt_version_tables_created(db):
     from src.db.models import AgentVersionSnapshot, StepPromptVersion
 

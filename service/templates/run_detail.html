@@ -84,7 +84,7 @@
     <a href="/ui/pipelines/{{ run.pipeline_name }}" class="text-xs text-indigo-400 hover:text-indigo-300">View pipeline →</a>
   </div>
 
-  <div class="grid grid-cols-4 gap-6 mt-5 pt-5 border-t border-zinc-800">
+  <div class="grid grid-cols-5 gap-6 mt-5 pt-5 border-t border-zinc-800">
     <div>
       <p class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Source</p>
       <p class="text-sm font-medium text-zinc-200">{{ source_label(run.source) }}</p>
@@ -109,6 +109,17 @@
         </p>
       {% else %}
         <p class="text-sm font-medium text-zinc-500">—</p>
+      {% endif %}
+    </div>
+    <div>
+      <p class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Cost</p>
+      {% if total_cost is not none %}
+        <p class="text-sm font-medium text-zinc-200">{{ total_cost | format_cost }}</p>
+      {% else %}
+        <p class="text-sm font-medium text-zinc-500">not priced</p>
+      {% endif %}
+      {% if unpriced_steps %}
+        <p class="text-xs text-zinc-500 mt-0.5">unpriced steps: {{ unpriced_steps }}</p>
       {% endif %}
     </div>
   </div>
@@ -354,6 +365,28 @@
         <span class="text-xs text-zinc-600 shrink-0 font-mono"
               title="{{ (item.step.input_tokens or 0) | format_number }} in / {{ (item.step.output_tokens or 0) | format_number }} out">
           {{ ((item.step.input_tokens or 0) + (item.step.output_tokens or 0)) | format_number }}tok
+        </span>
+      {% endif %}
+
+      {% if item.step.cost is not none %}
+        {# A genuinely sub-cent cost rounds to "$0.00" at 2dp, which reads as free —
+           show 4dp instead so a real (if tiny) charge stays visible. #}
+        <span class="text-xs text-green-400 shrink-0 font-mono"
+              title="Priced from your pricing.models configuration.">
+          {% if item.step.cost > 0 and item.step.cost < 0.01 %}
+            {{ item.step.cost | format_cost(4) }}
+          {% else %}
+            {{ item.step.cost | format_cost }}
+          {% endif %}
+        </span>
+      {% elif item.approx_cost is not none %}
+        <span class="text-xs shrink-0 font-mono {{ 'text-green-400' if item.approx_is_native else 'text-amber-400' }}"
+              title="{% if item.approx_is_native %}Live OpenRouter price — this step's call actually went through OpenRouter, so this is the real published rate, just not entered into your pricing.models table.{% else %}Approximate — no manual rate configured for this provider/model. This is OpenRouter's current list price for a similar model, which may not reflect what you actually pay {{ item.step.provider or 'this provider' }} directly.{% endif %}">
+          {% if item.approx_cost > 0 and item.approx_cost < 0.01 %}
+            ~{{ item.approx_cost | format_cost(4) }}
+          {% else %}
+            ~{{ item.approx_cost | format_cost }}
+          {% endif %}
         </span>
       {% endif %}
 

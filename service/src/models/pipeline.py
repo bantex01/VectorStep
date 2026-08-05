@@ -1,5 +1,5 @@
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class NotificationConfig(BaseModel):
@@ -285,6 +285,10 @@ class StepConfig(BaseModel):
     deterministic_checks: list[DeterministicCheckConfig] = Field(default_factory=list)
     calibration: CalibrationConfig | None = None
     readiness: ReadinessConfig | None = None
+    # Per-step override of budget.include_approx_cost (SPEC-live-pricing.md) — None
+    # means "inherit the pipeline's budget.include_approx_cost", same fallback
+    # pattern as DedupConfig's per-pipeline override of the service-level default.
+    include_approx_cost: bool | None = None
 
     @field_validator("on_failure", mode="before")
     @classmethod
@@ -355,6 +359,22 @@ class TriggerConfig(BaseModel):
 
 class BudgetConfig(BaseModel):
     max_tokens: int | None = None  # abort run if accumulated tokens across all steps exceeds this
+    max_usd: float | None = None   # abort run if accumulated cost across all steps exceeds this
+    # (in pricing.currency's units — a display label, not a conversion; see SPEC-cost-accounting.md)
+    max_cost: float | None = Field(default=None, exclude=True, repr=False)  # alias accepted for max_usd
+    # Pipeline-level default for whether an unpriced step's live/approximate OpenRouter
+    # cost (SPEC-live-pricing.md) counts toward max_usd. False by default — an estimate
+    # shouldn't be able to abort a run unless the pipeline author explicitly opts in.
+    # A step can override this individually via StepConfig.include_approx_cost.
+    include_approx_cost: bool = False
+
+    @model_validator(mode="after")
+    def _require_a_limit_and_apply_max_cost_alias(self) -> "BudgetConfig":
+        if self.max_cost is not None and self.max_usd is None:
+            self.max_usd = self.max_cost
+        if self.max_tokens is None and self.max_usd is None:
+            raise ValueError("budget: requires at least one of max_tokens / max_usd (or max_cost alias)")
+        return self
 
 
 class ContextTemplateConfig(BaseModel):
@@ -394,6 +414,7 @@ class LibraryStepConfig(BaseModel):
     deterministic_checks: list[DeterministicCheckConfig] = Field(default_factory=list)
     calibration: CalibrationConfig | None = None
     readiness: ReadinessConfig | None = None
+    include_approx_cost: bool | None = None
 
     @field_validator("on_failure", mode="before")
     @classmethod

@@ -16,6 +16,8 @@ from prometheus_client.utils import floatToGoString
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from . import live_pricing, pricing
+from .analytics import get_team_month_to_date_spend
 from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 from .executors.human import list_pending as _list_pending_approvals
 
@@ -37,6 +39,16 @@ class MetricsData:
     verifier_counts: list[tuple[str | None, int, int]]
     token_usage: list[tuple[str | None, str, str, str, str | None, str | None, str | None, int, int]]
     # (team, pipeline, step_name, executor, agent, model, provider, input_tokens_sum, output_tokens_sum)
+    cost_usage: list[tuple[str | None, str, str, str, str | None, str | None, str | None, float]]
+    # (team, pipeline, step_name, executor, agent, model, provider, cost_sum) — unpriced (NULL-cost)
+    # steps excluded, same as token_usage excludes steps with no token data.
+    approx_cost_usage: list[tuple[str | None, str, str, str, str | None, str | None, str | None, float]]
+    # Same shape as cost_usage, but for steps with NO real cost, fuzzy-matched against
+    # OpenRouter's live catalog (SPEC-live-pricing.md) — empty unless pricing.live_pricing
+    # is enabled. Always a SEPARATE metric from cost_usage, never blended into it.
+    team_budget_ratios: list[tuple[str, float]]
+    # (team, month_to_date_spend / pricing.team_budgets[team]) — only teams with a
+    # configured budget get a row; advisory only, see get_team_month_to_date_spend.
     human_decisions: list[tuple[str | None, str, str, int]]
     # (team, pipeline, decision["approved"|"rejected"], count) — human steps only,
     # derived from primary_confidence (1.0 = approved, 0.0 = rejected — see
@@ -138,6 +150,62 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         )
         token_usage = list(rows.all())
 
+        # Only steps with a resolved cost contribute — unpriced (NULL) steps are
+        # excluded rather than padding the metric with a spurious 0, same
+        # reasoning as token_usage excluding no-usage steps.
+        rows = await session.execute(
+            select(
+                PipelineRun.team,
+                PipelineRun.pipeline_name,
+                PipelineStep.step_name,
+                PipelineStep.executor,
+                PipelineStep.agent,
+                PipelineStep.model,
+                PipelineStep.provider,
+                func.coalesce(func.sum(PipelineStep.cost), 0.0),
+            )
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineStep.cost.is_not(None), PipelineRun.stage == "production")
+            .group_by(
+                PipelineRun.team, PipelineRun.pipeline_name, PipelineStep.step_name,
+                PipelineStep.executor, PipelineStep.agent, PipelineStep.model, PipelineStep.provider,
+            )
+        )
+        cost_usage = list(rows.all())
+
+        # Best-effort OpenRouter approximation for currently-unpriced steps
+        # (SPEC-live-pricing.md) — a separate metric, never blended with cost_usage.
+        # Fuzzy-matching can't be expressed in SQL, so this fetches raw rows and
+        # aggregates in Python; only fetched when live_pricing is enabled, since
+        # otherwise there's nothing to match against.
+        approx_cost_usage: list[tuple] = []
+        _pricing_table = pricing.get_table()
+        if _pricing_table and _pricing_table.live_pricing.enabled:
+            rows = await session.execute(
+                select(
+                    PipelineRun.team,
+                    PipelineRun.pipeline_name,
+                    PipelineStep.step_name,
+                    PipelineStep.executor,
+                    PipelineStep.agent,
+                    PipelineStep.model,
+                    PipelineStep.provider,
+                    PipelineStep.input_tokens,
+                    PipelineStep.output_tokens,
+                )
+                .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+                .where(PipelineStep.cost.is_(None), PipelineRun.stage == "production")
+            )
+            catalog = live_pricing.get_catalog()
+            approx_sums: dict[tuple, float] = defaultdict(float)
+            for team, pipeline, step_name, executor, agent, model, provider, in_tok, out_tok in rows.all():
+                rate = live_pricing.resolve_approx_rate(catalog, provider, model)
+                approx = live_pricing.approx_step_cost(rate, in_tok, out_tok)
+                if approx is not None:
+                    key = (team, pipeline, step_name, executor, agent, model, provider)
+                    approx_sums[key] += approx
+            approx_cost_usage = [(*key, total) for key, total in approx_sums.items()]
+
         decision_case = case(
             (PipelineStep.primary_confidence >= 0.5, "approved"),
             else_="rejected",
@@ -210,6 +278,11 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         )
         deterministic_check_counts = list(rows.all())
 
+    team_spend = await get_team_month_to_date_spend(session_factory)
+    team_budget_ratios = [
+        (team, row["ratio"]) for team, row in team_spend.items() if row["ratio"] is not None
+    ]
+
     return MetricsData(
         run_counts=list(run_counts),
         runs_in_progress=runs_in_progress or 0,
@@ -217,6 +290,9 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         step_durations=step_durations,
         verifier_counts=list(verifier_counts),
         token_usage=token_usage,
+        cost_usage=cost_usage,
+        approx_cost_usage=approx_cost_usage,
+        team_budget_ratios=team_budget_ratios,
         human_decisions=human_decisions,
         feedback_counts=list(feedback_counts),
         step_feedback_counts=step_feedback_counts,
@@ -290,6 +366,47 @@ class VectorStepCollector(Collector):
             token_totals.add_metric([*base, "input"], input_sum)
             token_totals.add_metric([*base, "output"], output_sum)
         yield token_totals
+
+        cost_total = CounterMetricFamily(
+            "vectorstep_pipeline_cost_total",
+            f"Cumulative step cost in {pricing.get_table().currency if pricing.get_table() else 'USD'} "
+            "(unpriced steps excluded), by pipeline, team, model, provider",
+            labels=["pipeline", "team", "model", "provider"],
+        )
+        # cost_usage is grouped by step_name/executor/agent too (finer than this
+        # metric's labels) — collapse those dimensions here rather than emitting
+        # duplicate label-sets, which Prometheus exposition rejects outright.
+        cost_by_label: dict[tuple[str, str, str, str], float] = defaultdict(float)
+        for team, pipeline, step_name, executor, agent, model, provider, cost_sum in data.cost_usage:
+            cost_by_label[(pipeline, team or "", model or "", provider or "")] += cost_sum
+        for (pipeline, team, model, provider), cost_sum in cost_by_label.items():
+            cost_total.add_metric([pipeline, team, model, provider], cost_sum)
+        yield cost_total
+
+        approx_cost_total = CounterMetricFamily(
+            "vectorstep_pipeline_approx_cost_total",
+            f"Best-effort OpenRouter reference cost in {pricing.get_table().currency if pricing.get_table() else 'USD'} "
+            "for steps with no real (manual) price — APPROXIMATE, never blended with "
+            "vectorstep_pipeline_cost_total; empty unless pricing.live_pricing is enabled. "
+            "By pipeline, team, model, provider.",
+            labels=["pipeline", "team", "model", "provider"],
+        )
+        approx_cost_by_label: dict[tuple[str, str, str, str], float] = defaultdict(float)
+        for team, pipeline, step_name, executor, agent, model, provider, cost_sum in data.approx_cost_usage:
+            approx_cost_by_label[(pipeline, team or "", model or "", provider or "")] += cost_sum
+        for (pipeline, team, model, provider), cost_sum in approx_cost_by_label.items():
+            approx_cost_total.add_metric([pipeline, team, model, provider], cost_sum)
+        yield approx_cost_total
+
+        budget_ratio = GaugeMetricFamily(
+            "vectorstep_team_budget_ratio",
+            "Month-to-date spend / pricing.team_budgets for the team, UTC calendar month — "
+            "advisory only, not enforced. Only teams with a configured budget appear.",
+            labels=["team"],
+        )
+        for team, ratio in data.team_budget_ratios:
+            budget_ratio.add_metric([team], ratio)
+        yield budget_ratio
 
         decisions_total = CounterMetricFamily(
             "vectorstep_human_approval_decisions_total",
