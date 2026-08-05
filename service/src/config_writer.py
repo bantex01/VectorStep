@@ -1,5 +1,5 @@
 """Atomic validated-write path for pipeline/step-library YAML configs
-(SPEC-pork-service-mcp.md §2.9/§5c). This is the ONE place that writes to
+(SPEC-vectorstep-service-mcp.md §2.9/§5c). This is the ONE place that writes to
 service/pipelines or service/steps for the create/update/delete JSON
 endpoints — a single tested write path shared by any future caller (the MCP,
 or a future UI editor).

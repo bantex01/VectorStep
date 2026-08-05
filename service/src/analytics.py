@@ -3,10 +3,10 @@ judged (human feedback) accuracy.
 
 This is the single source of truth for every number surfaced by both the
 `/ui/insights/*` HTML pages (ui.py) and the JSON `/stats` endpoints (main.py) —
-see SPEC-pork-service-mcp.md §6. Extracting the queries here means the two
+see SPEC-vectorstep-service-mcp.md §6. Extracting the queries here means the two
 surfaces can't drift: they call the same functions.
 
-Two distinct notions of "accuracy" (see SPEC-pork-service-mcp.md §3):
+Two distinct notions of "accuracy" (see SPEC-vectorstep-service-mcp.md §3):
   - operational outcome: derived from `PipelineRun.status` / `PipelineStep.status`
     and token/duration columns — "how many failed, how long did it take".
   - judged accuracy: derived from `RunFeedback.outcome` / `StepFeedback.outcome`,
@@ -578,7 +578,7 @@ async def get_step_calibration(
 # ── Prompt / agent versions (SPEC-prompt-versioning.md §5) ──────────────────────
 
 async def get_step_versions(session_factory: async_sessionmaker, step_name: str) -> list[dict]:
-    """Every prompt_hash P-Ork has recorded for `step_name`, newest first — "did
+    """Every prompt_hash VectorStep has recorded for `step_name`, newest first — "did
     that prompt edit actually help?" made answerable with data (SPEC-prompt-
     versioning.md §5a). Each version carries its unified diff against the
     next-older version and its own calibration data, scoped to that one hash.
@@ -701,13 +701,13 @@ async def get_step_versions(session_factory: async_sessionmaker, step_name: str)
 
 
 async def get_agent_versions(session_factory: async_sessionmaker, agent_name: str) -> list[dict]:
-    """Every agent_version P-Ork has a snapshot for, for the Gateway agent
+    """Every agent_version VectorStep has a snapshot for, for the Gateway agent
     `agent_name` (bare name, no 'gateway:' prefix — matched against `agent =
     'gateway:<agent_name>'`), newest first (SPEC-prompt-versioning.md §5d).
 
     This is the only place recoverable text for an agent_version survives once the
     Gateway agent moves on — soul_md/agent_yaml are null (with `note` explaining why)
-    for a version P-Ork couldn't confirm at snapshot time (see versioning.py's
+    for a version VectorStep couldn't confirm at snapshot time (see versioning.py's
     record_agent_version). `used_by_steps` is the reverse-direction lookup from
     get_step_versions: which steps this agent_version actually affected. Returns []
     for an agent with no snapshot rows at all (never 404s — that's the route's job).

@@ -17,7 +17,7 @@ version: 1
 trigger:
   match:
     severity: critical
-    service: pork   # unused — fixture sets pipeline: feature-test label which routes directly
+    service: vectorstep   # unused — fixture sets pipeline: feature-test label which routes directly
 
 vars:
   confluence_space: SP

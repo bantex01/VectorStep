@@ -15,13 +15,13 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: pork
-          POSTGRES_PASSWORD: pork
-          POSTGRES_DB: pork_test
+          POSTGRES_USER: vectorstep
+          POSTGRES_PASSWORD: vectorstep
+          POSTGRES_DB: vectorstep_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U pork"
+          --health-cmd="pg_isready -U vectorstep"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=10
@@ -44,5 +44,5 @@ jobs:
         if: matrix.backend == 'postgres'
         working-directory: service
         env:
-          PORK_TEST_DATABASE_URL: postgresql+asyncpg://pork:pork@localhost:5432/pork_test
+          VECTORSTEP_TEST_DATABASE_URL: postgresql+asyncpg://vectorstep:vectorstep@localhost:5432/vectorstep_test
         run: pytest

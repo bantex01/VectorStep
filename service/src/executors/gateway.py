@@ -46,7 +46,7 @@ def _extract_json_object(text: str) -> dict | None:
 
 
 class GatewayExecutor(BaseExecutor):
-    """Executor that invokes an agent via the P-Ork Gateway WebSocket API.
+    """Executor that invokes an agent via the VectorStep Gateway WebSocket API.
 
     executor_config keys (all optional except agent):
         agent          — gateway agent name (required)
@@ -99,7 +99,7 @@ class GatewayExecutor(BaseExecutor):
             "gen_ai.gateway",
             attributes={
                 "gen_ai.system": "gateway",
-                "pork.agent": agent,
+                "vectorstep.agent": agent,
                 "gen_ai.request.model": model_override or "",
             },
         ) as span:

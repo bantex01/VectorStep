@@ -96,7 +96,7 @@ steps:
         event_action: trigger
         payload:
           summary: "{{steps.apply_fix.summary}}"
-          source: pork
+          source: vectorstep
     readiness: null                     # explicit opt-out — a notify step never produces a judged
     # outcome, so no readiness bar makes sense for it. Omitting readiness: here would instead
     # INHERIT the pipeline-level house default, which is very likely not what you want.

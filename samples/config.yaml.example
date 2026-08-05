@@ -8,7 +8,7 @@ step_library_dir: ./steps
 database:
   url: sqlite+aiosqlite:///./runs.db
   # Postgres (recommended for production — see README §Database):
-  # url: postgresql+asyncpg://user:password@localhost:5432/pork
+  # url: postgresql+asyncpg://user:password@localhost:5432/vectorstep
 
 executors:
   openclaw:
@@ -26,14 +26,14 @@ executors:
     #   3. On the OpenClaw machine, run: openclaw devices list
     #      to confirm the device is approved on the remote gateway
     #
-    # If identity files are missing at startup, P-Ork will log a warning and the
+    # If identity files are missing at startup, VectorStep will log a warning and the
     # openclaw executor will be registered — but any step using it will fail until
     # the files are in place.
 
   gateway:
-    url: ws://localhost:18780/ws     # P-Ork Gateway WebSocket URL
-    token: ${PORK_GATEWAY_TOKEN}     # Bearer token; empty string disables auth for local dev
-    rest_url: http://localhost:18780 # P-Ork Gateway REST base URL (used by Agents UI)
+    url: ws://localhost:18780/ws     # VectorStep Gateway WebSocket URL
+    token: ${VECTORSTEP_GATEWAY_TOKEN}     # Bearer token; empty string disables auth for local dev
+    rest_url: http://localhost:18780 # VectorStep Gateway REST base URL (used by Agents UI)
 
 notifications:
   telegram:
@@ -57,7 +57,7 @@ notifications:
 # human_approval:
 #   # Reachable by whoever will click a Teams approval link (see the msteams channel
 #   # below) — NOT localhost unless every approver is on this same machine.
-#   ui_base_url: https://pork.internal.example.com
+#   ui_base_url: https://vectorstep.internal.example.com
 #
 #   default:                     # used when a run's team has no entry under `teams` below
 #     channel: telegram          # telegram | slack | msteams — telegram can omit the nested
@@ -109,16 +109,16 @@ concurrency:
 auth:
   # Per-team tokens — see README §3b. Each team's token both authenticates
   # POST /webhook and resolves the `team` attribution recorded on every run
-  # it triggers, for the pork_pipeline_tokens_total metric and GET /runs?team=.
+  # it triggers, for the vectorstep_pipeline_tokens_total metric and GET /runs?team=.
   # Generate each token with `openssl rand -hex 24` — a plain shared secret,
   # no issuance endpoint. Resolve via ${ENV_VAR} or write directly into
   # config.yaml (it's gitignored either way).
   # teams:
   #   - name: payments
-  #     token: ${PORK_WEBHOOK_TOKEN_PAYMENTS}
+  #     token: ${VECTORSTEP_WEBHOOK_TOKEN_PAYMENTS}
   #   - name: platform
-  #     token: ${PORK_WEBHOOK_TOKEN_PLATFORM}
-  token: ${PORK_WEBHOOK_TOKEN}   # Legacy single-token form — used if `teams` above is unset.
+  #     token: ${VECTORSTEP_WEBHOOK_TOKEN_PLATFORM}
+  token: ${VECTORSTEP_WEBHOOK_TOKEN}   # Legacy single-token form — used if `teams` above is unset.
                                   # Every run's team is then unattributed (None). If both
                                   # `teams` and `token` are set, `teams` wins.
                                   # Omit this whole block (or leave blank) to run unauthenticated —

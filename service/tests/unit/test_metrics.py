@@ -1,11 +1,11 @@
-"""Tests for pork_pipeline_tokens_total, pork_human_approval_decisions_total,
-pork_pipeline_feedback_total, and pork_human_approvals_pending."""
+"""Tests for vectorstep_pipeline_tokens_total, vectorstep_human_approval_decisions_total,
+vectorstep_pipeline_feedback_total, and vectorstep_human_approvals_pending."""
 from datetime import datetime
 
 from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep, RunFeedback
 from src.executors import human
-from src.metrics import MetricsData, PorkCollector, fetch_metrics_data
+from src.metrics import MetricsData, VectorStepCollector, fetch_metrics_data
 
 
 def _empty_metrics_data(
@@ -35,12 +35,12 @@ def _find_family(families, sample_name):
     return next(f for f in families if any(s.name == sample_name for s in f.samples))
 
 
-def test_collect_emits_pork_pipeline_tokens_total_with_expected_labels():
+def test_collect_emits_vectorstep_pipeline_tokens_total_with_expected_labels():
     data = _empty_metrics_data([
         ("payments", "alert-triage", "triage", "gateway", "sre-triage", "claude-sonnet-4-6", "anthropic", 100, 50),
     ])
-    families = list(PorkCollector(data).collect())
-    family = _find_family(families, "pork_pipeline_tokens_total")
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_pipeline_tokens_total")
 
     assert family.samples[0].labels == {
         "team": "payments", "pipeline": "alert-triage", "step_name": "triage", "executor": "gateway",
@@ -55,8 +55,8 @@ def test_collect_buckets_null_team_and_model_as_empty_string():
     data = _empty_metrics_data([
         (None, "scheduled-pipeline", "triage", "gateway", "agent-x", None, None, 10, 5),
     ])
-    families = list(PorkCollector(data).collect())
-    family = _find_family(families, "pork_pipeline_tokens_total")
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_pipeline_tokens_total")
 
     assert family.samples[0].labels["team"] == ""
     assert family.samples[0].labels["model"] == ""
@@ -115,7 +115,7 @@ async def test_fetch_metrics_data_sums_across_steps(db):
 
 
 # ---------------------------------------------------------------------------
-# pork_human_approval_decisions_total
+# vectorstep_human_approval_decisions_total
 # ---------------------------------------------------------------------------
 
 def test_collect_emits_human_approval_decisions():
@@ -123,8 +123,8 @@ def test_collect_emits_human_approval_decisions():
         ("barkham", "approval-test", "approved", 3),
         ("barkham", "approval-test", "rejected", 1),
     ])
-    families = list(PorkCollector(data).collect())
-    family = _find_family(families, "pork_human_approval_decisions_total")
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_human_approval_decisions_total")
 
     by_decision = {s.labels["decision"]: s.value for s in family.samples}
     assert by_decision == {"approved": 3, "rejected": 1}
@@ -134,8 +134,8 @@ def test_collect_emits_human_approval_decisions():
 
 def test_collect_buckets_null_team_in_human_decisions():
     data = _empty_metrics_data(human_decisions=[(None, "p", "approved", 1)])
-    families = list(PorkCollector(data).collect())
-    family = _find_family(families, "pork_human_approval_decisions_total")
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_human_approval_decisions_total")
     assert family.samples[0].labels["team"] == ""
 
 
@@ -174,7 +174,7 @@ async def test_fetch_metrics_data_derives_decision_from_primary_confidence(db):
 
 
 # ---------------------------------------------------------------------------
-# pork_pipeline_feedback_total
+# vectorstep_pipeline_feedback_total
 # ---------------------------------------------------------------------------
 
 def test_collect_emits_pipeline_feedback_total():
@@ -182,8 +182,8 @@ def test_collect_emits_pipeline_feedback_total():
         ("alert-triage", "correct", 5),
         ("alert-triage", "incorrect", 2),
     ])
-    families = list(PorkCollector(data).collect())
-    family = _find_family(families, "pork_pipeline_feedback_total")
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_pipeline_feedback_total")
 
     by_outcome = {s.labels["outcome"]: s.value for s in family.samples}
     assert by_outcome == {"correct": 5, "incorrect": 2}
@@ -209,7 +209,7 @@ async def test_fetch_metrics_data_counts_feedback_by_pipeline_and_outcome(db):
 
 
 # ---------------------------------------------------------------------------
-# pork_human_approvals_pending — live gauge, not derived from MetricsData
+# vectorstep_human_approvals_pending — live gauge, not derived from MetricsData
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -272,8 +272,8 @@ def test_pending_approvals_gauge_excludes_testing():
     }
     try:
         data = _empty_metrics_data()
-        families = list(PorkCollector(data).collect())
-        family = _find_family(families, "pork_human_approvals_pending")
+        families = list(VectorStepCollector(data).collect())
+        family = _find_family(families, "vectorstep_human_approvals_pending")
 
         by_team = {s.labels["team"]: s.value for s in family.samples}
         assert by_team == {"barkham": 1}
@@ -284,8 +284,8 @@ def test_pending_approvals_gauge_excludes_testing():
 def test_pending_approvals_gauge_zero_when_nothing_pending():
     human._pending_meta.clear()
     data = _empty_metrics_data()
-    families = list(PorkCollector(data).collect())
-    family = _find_family(families, "pork_human_approvals_pending")
+    families = list(VectorStepCollector(data).collect())
+    family = _find_family(families, "vectorstep_human_approvals_pending")
 
     assert family.samples[0].value == 0
     assert family.samples[0].labels["team"] == ""
@@ -301,8 +301,8 @@ def test_pending_approvals_gauge_grouped_by_team():
                                      "run_id": "r", "message": "m", "created_at": human.utc_now()}
     try:
         data = _empty_metrics_data()
-        families = list(PorkCollector(data).collect())
-        family = _find_family(families, "pork_human_approvals_pending")
+        families = list(VectorStepCollector(data).collect())
+        family = _find_family(families, "vectorstep_human_approvals_pending")
 
         by_team = {s.labels["team"]: s.value for s in family.samples}
         assert by_team == {"barkham": 2, "": 1}

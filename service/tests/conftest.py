@@ -1,4 +1,4 @@
-"""Shared test configuration for the P-Ork service test suite.
+"""Shared test configuration for the VectorStep service test suite.
 
 Stubs out optional/heavy native dependencies that aren't installed in the
 standard dev environment so executor modules can be imported freely in tests.
@@ -24,7 +24,7 @@ import pytest
 
 from src.db.database import create_tables, get_engine, init_db
 
-PORK_TEST_DATABASE_URL = os.environ.get("PORK_TEST_DATABASE_URL")
+VECTORSTEP_TEST_DATABASE_URL = os.environ.get("VECTORSTEP_TEST_DATABASE_URL")
 
 
 @pytest.fixture
@@ -34,16 +34,16 @@ async def db(tmp_path):
     Defaults to a SQLite file scoped to pytest's tmp_path — same behaviour as
     before this fixture existed: fast, zero-infra, free per-test isolation.
 
-    Set PORK_TEST_DATABASE_URL (e.g.
-    postgresql+asyncpg://user:pass@localhost:5432/pork_test) to run the exact
+    Set VECTORSTEP_TEST_DATABASE_URL (e.g.
+    postgresql+asyncpg://user:pass@localhost:5432/vectorstep_test) to run the exact
     same test bodies against Postgres instead. Postgres has no per-test temp
     file, so isolation is created explicitly by dropping and recreating the
     public schema around each test — this also means create_tables() runs
     against Postgres on every test, exercising its ADD COLUMN IF NOT EXISTS
     migration branch, which is otherwise never touched by SQLite-only tests.
     """
-    if PORK_TEST_DATABASE_URL:
-        init_db(PORK_TEST_DATABASE_URL)
+    if VECTORSTEP_TEST_DATABASE_URL:
+        init_db(VECTORSTEP_TEST_DATABASE_URL)
         engine = get_engine()
         async with engine.begin() as conn:
             await conn.exec_driver_sql("DROP SCHEMA public CASCADE")

@@ -40,7 +40,7 @@ import functools
 from .executors import EXECUTORS
 from .executors.gateway import GatewayExecutor
 from .executors.openclaw_ws import OpenClawWSExecutor, UnconfiguredOpenClawExecutor, validate_identity
-from .metrics import PorkCollector, fetch_metrics_data
+from .metrics import VectorStepCollector, fetch_metrics_data
 from .models.context import NormalisedContext
 from .models.pipeline import PipelineConfig, ReadinessConfig
 from .normaliser import PARSERS
@@ -50,7 +50,7 @@ from .notifications.telegram import TelegramNotifier
 from .pipeline import PipelineRunner, load_pipelines, load_step_library, resolve_pipeline
 from .readiness import evaluate_readiness, gather_readiness_evidence, step_specs
 from .tracing import setup_tracing, shutdown_tracing
-from .ui import _fetch_openclaw_agents, _fetch_pork_gateway_agents, _read_pipeline_yaml, _read_step_yaml
+from .ui import _fetch_openclaw_agents, _fetch_vectorstep_gateway_agents, _read_pipeline_yaml, _read_step_yaml
 from .ui import configure as configure_ui
 from .ui import router as ui_router
 from .utils import utc_now
@@ -412,9 +412,9 @@ async def lifespan(app: FastAPI):
             url=gateway_cfg["url"],
             token=gateway_cfg.get("token", ""),
         )
-        logger.info("P-Ork Gateway executor configured: %s", gateway_cfg["url"])
+        logger.info("VectorStep Gateway executor configured: %s", gateway_cfg["url"])
     else:
-        logger.warning("P-Ork Gateway executor not configured — executors.gateway.url missing")
+        logger.warning("VectorStep Gateway executor not configured — executors.gateway.url missing")
 
     openclaw_url = openclaw_cfg.get("url", "")
     openclaw_identity_dir = openclaw_cfg.get("identity_dir", "")
@@ -437,16 +437,16 @@ async def lifespan(app: FastAPI):
         logger.info("OpenClaw executor not configured — executors.openclaw.url missing")
 
     # Configure agent source URLs for the UI layer
-    pork_gateway_rest = gateway_cfg.get("rest_url") or os.environ.get("PORK_GATEWAY_URL", "http://localhost:18780")
+    vectorstep_gateway_rest = gateway_cfg.get("rest_url") or os.environ.get("VECTORSTEP_GATEWAY_URL", "http://localhost:18780")
     configure_ui(
         openclaw_ws_url=openclaw_url,
-        pork_gateway_base=pork_gateway_rest,
+        vectorstep_gateway_base=vectorstep_gateway_rest,
         team_count=len(teams_cfg),
     )
     logger.info(
-        "UI agent sources — openclaw: %s, pork-gateway: %s",
+        "UI agent sources — openclaw: %s, vectorstep-gateway: %s",
         openclaw_url or "(default ws://127.0.0.1:18789/rpc)",
-        pork_gateway_rest,
+        vectorstep_gateway_rest,
     )
 
     # Artifact store
@@ -473,7 +473,7 @@ async def lifespan(app: FastAPI):
         calibration_n_min=calibration_cfg.get("n_min", 20),
         calibration_bin_width=calibration_cfg.get("bin_width", 0.1),
         calibration_cache_ttl_seconds=calibration_cfg.get("cache_ttl_seconds", 300),
-        gateway_rest_url=pork_gateway_rest,
+        gateway_rest_url=vectorstep_gateway_rest,
     )
 
     # Scheduler
@@ -785,7 +785,7 @@ async def health():
 async def metrics():
     """Prometheus exposition of run/step counts, durations, and verifier stats."""
     data = await fetch_metrics_data(get_session_factory())
-    collector = PorkCollector(data)
+    collector = VectorStepCollector(data)
     REGISTRY.register(collector)
     try:
         output = generate_latest(REGISTRY)
@@ -853,12 +853,12 @@ async def get_step(name: str):
 
 @app.get("/agents")
 async def list_agents():
-    """Agent names/executor/model merged across the OpenClaw and P-Ork Gateway
+    """Agent names/executor/model merged across the OpenClaw and VectorStep Gateway
     backends — read-only, for pipeline authoring. Each backend fails soft: a
     down gateway contributes an empty slice plus an entry in 'errors' rather
     than failing the whole call (mirrors the /ui/agents page)."""
     (oc_agents, oc_error), (gw_agents, gw_error) = await asyncio.gather(
-        _fetch_openclaw_agents(), _fetch_pork_gateway_agents(),
+        _fetch_openclaw_agents(), _fetch_vectorstep_gateway_agents(),
     )
     agents = [
         {"name": a.get("id") or a.get("name"), "executor": "openclaw", "model": a.get("model")}
@@ -1236,7 +1236,7 @@ async def get_step_calibration_endpoint(
 
 @app.get("/steps/{name}/versions")
 async def get_step_versions_endpoint(name: str):
-    """Every prompt template version P-Ork has recorded for this step, newest
+    """Every prompt template version VectorStep has recorded for this step, newest
     first, with a unified diff against the version before it and that version's
     own calibration data (SPEC-prompt-versioning.md §5a) — "did that prompt edit
     actually help?" made answerable with data. 404 if the step name is unknown,
@@ -1249,10 +1249,10 @@ async def get_step_versions_endpoint(name: str):
 
 @app.get("/agents/{name}/versions")
 async def get_agent_versions_endpoint(name: str):
-    """Every Gateway agent_version P-Ork has a snapshot for, newest first — the
+    """Every Gateway agent_version VectorStep has a snapshot for, newest first — the
     only place recoverable text for an agent_version survives once the Gateway
     agent moves on (SPEC-prompt-versioning.md §5d). `name` is the bare agent name
-    (no 'gateway:' prefix). 404 if P-Ork has no snapshot rows for this agent at
+    (no 'gateway:' prefix). 404 if VectorStep has no snapshot rows for this agent at
     all, matching the sibling endpoint's convention."""
     versions = await _get_agent_versions(get_session_factory(), name)
     if not versions:

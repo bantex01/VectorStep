@@ -14,7 +14,7 @@ class PipelineExecutor(BaseExecutor):
     """Executor that calls another named pipeline as a sub-pipeline.
 
     Requires pipeline_registry to be set on the PipelineRunner — the runner
-    injects _pork_runner, _pork_normalised, and _pork_registry into the Jinja2
+    injects _vectorstep_runner, _vectorstep_normalised, and _vectorstep_registry into the Jinja2
     context before calling execute().
 
     executor_config keys:
@@ -25,9 +25,9 @@ class PipelineExecutor(BaseExecutor):
     """
 
     async def execute(self, step: StepConfig, context: dict) -> LLMOutput:
-        runner = context.get("_pork_runner")
-        normalised = context.get("_pork_normalised")
-        registry = context.get("_pork_registry")
+        runner = context.get("_vectorstep_runner")
+        normalised = context.get("_vectorstep_normalised")
+        registry = context.get("_vectorstep_registry")
         parent_run_id = context.get("pipeline_run_id")
 
         if runner is None or normalised is None or registry is None:

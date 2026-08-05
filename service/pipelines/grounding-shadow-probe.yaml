@@ -1,13 +1,13 @@
 # Grounding shadow-mode data-gathering probe (SPEC-grounding-shadow.md / Phase 0).
 #
-# Purpose: give a real, safely-repeatable pipeline a `grounding:` block so P-Ork
+# Purpose: give a real, safely-repeatable pipeline a `grounding:` block so VectorStep
 # starts accumulating real S-vs-G divergence data — see the brief doc one level up
 # (GROUNDING-SHADOW-TESTING.md) for what we're expecting to see and how it feeds
 # into the Phase 1 grounding-cap decision.
 #
 # Copied from jira-problem-review.yaml (the "problem-manager" step) because its
 # agent is one of the few actually configured on the current gateway (see
-# P-Ork-Gateway/agents/) — several other pipelines in this directory reference
+# VectorStep-Gateway/agents/) — several other pipelines in this directory reference
 # agents (first-line-support, sre-investigation, principal-sre) that aren't
 # currently wired up and would fail at run time.
 #
@@ -28,7 +28,7 @@
 #      side-effecting step later, point jira_project at a sandbox project first.
 #
 # `stage: production` is intentional (not testing!) even though this is a "test"
-# pipeline in spirit — pork_step_grounding_score and every other aggregate view
+# pipeline in spirit — vectorstep_step_grounding_score and every other aggregate view
 # are production-scoped (see README §3c), so a stage:testing probe would silently
 # produce zero visible data. Nothing here has an externally-visible side effect
 # (no notifications will fire — trigger can't match; problem-manager is
@@ -36,7 +36,7 @@
 #
 # To activate grounding itself: the `grounding-judge` agent referenced below is
 # staged at ../grounding-judge/ (one level up from this repo) and needs to be
-# copied into P-Ork-Gateway/agents/grounding-judge/ and the gateway reloaded
+# copied into VectorStep-Gateway/agents/grounding-judge/ and the gateway reloaded
 # (SIGHUP or restart) before this step's grounding pass can actually run. Until
 # then the step still runs fine — grounding just soft-fails and records G=null
 # (see _run_grounding's error handling), same as any other unreachable agent.

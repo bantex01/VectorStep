@@ -3,7 +3,7 @@ description: Demonstrates stage=testing muting — a notify step, an on_failure 
 version: 1
 
 # testing (the default — this line could be omitted entirely) makes the pipeline
-# fully runnable and fully visible in P-Ork's own UI, but inert to the outside
+# fully runnable and fully visible in VectorStep's own UI, but inert to the outside
 # world and excluded from every aggregate metric. See README §3c.
 #
 # To promote this pipeline once you're happy with it, change this one line and
@@ -62,7 +62,7 @@ steps:
         event_action: trigger
         payload:
           summary: "{{summary}}"
-          source: pork
+          source: vectorstep
           custom_details:
             triage_summary: "{{steps.triage.summary}}"
 
@@ -73,11 +73,11 @@ steps:
     on_low_confidence: abort
     on_abort: rejected
     # In testing, nothing is sent to Telegram/Slack/Teams — the approval is
-    # registered in P-Ork's own UI (/ui/approvals and the run-detail banner) so
+    # registered in VectorStep's own UI (/ui/approvals and the run-detail banner) so
     # a real decision can still be made. A timeout auto-approves instead of
     # failing the step, so a forgotten testing approval never wedges the run.
     prompt_template: |
-      <b>P-Ork approval request (stage=testing)</b>
+      <b>VectorStep approval request (stage=testing)</b>
 
       Pipeline: <code>{{pipeline_name}}</code>
       Run: <code>{{pipeline_run_id}}</code>

@@ -19,10 +19,10 @@ trigger:
 
 schedule:
   cron: "*/45 * * * *"          # every 45 minutes — convenient for local testing
-  summary: "Scheduled health check — error rate for pork exceeded 5% for 5 minutes"
+  summary: "Scheduled health check — error rate for vectorstep exceeded 5% for 5 minutes"
   severity: warning
   labels:
-    service: pork
+    service: vectorstep
     environment: prod
 
 vars:

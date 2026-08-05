@@ -1,11 +1,11 @@
-name: pork-triage-test
+name: vectorstep-triage-test
 description: Single-step test pipeline for first-line-support agent
 version: 1
 
 trigger:
   match:
     severity: critical
-    service: pork
+    service: vectorstep
 
 vars:
   confluence_space: SP

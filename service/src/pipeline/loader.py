@@ -112,7 +112,7 @@ def load_step_library_from_raw(
     that wants to validate a *candidate* directory state — the real files
     plus one new/changed entry, without writing it to disk first — can build
     that dict and pass it straight through (see main.py's atomic-validated-
-    write path, SPEC-pork-service-mcp.md §2.9/§5c). Raises on the first
+    write path, SPEC-vectorstep-service-mcp.md §2.9/§5c). Raises on the first
     invalid file, same as load_step_library.
     """
     library: dict[str, dict] = {}

@@ -13,7 +13,7 @@
 # sandbox project for the first few runs before trusting it against the
 # real board.
 #
-# Requires: `atlassian` MCP server configured in P-Ork-Gateway's config.yaml
+# Requires: `atlassian` MCP server configured in VectorStep-Gateway's config.yaml
 # (not present yet as of writing) and `executors.gateway` configured in this
 # service's config.yaml (also not present yet — see README §"gateway").
 

@@ -1,5 +1,5 @@
-"""Tests for the write/validate/delete JSON endpoints added for the P-Ork
-Service MCP (SPEC-pork-service-mcp.md §5c): create/update/delete for
+"""Tests for the write/validate/delete JSON endpoints added for the VectorStep
+Service MCP (SPEC-vectorstep-service-mcp.md §5c): create/update/delete for
 pipelines and step-library entries, the /validate dry-run endpoints, and the
 atomic validated-rollback write path (§2.9) — including the cross-file
 rollback scenario where deleting a still-referenced step must leave the live

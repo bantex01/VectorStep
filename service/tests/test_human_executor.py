@@ -120,7 +120,7 @@ async def test_slack_channel_converts_telegram_html_to_mrkdwn():
         return _mock_response(json_body={"ok": True})
 
     html = (
-        "<b>P-Ork approval request</b>\n\n"
+        "<b>VectorStep approval request</b>\n\n"
         "Pipeline: <code>approval-test</code>\n"
         'See <a href="https://example.com">the run</a>.'
     )
@@ -129,7 +129,7 @@ async def test_slack_channel_converts_telegram_html_to_mrkdwn():
 
     text = sent["json"]["text"]
     assert text == (
-        "*P-Ork approval request*\n\n"
+        "*VectorStep approval request*\n\n"
         "Pipeline: `approval-test`\n"
         "See <https://example.com|the run>."
     )
@@ -154,7 +154,7 @@ async def test_slack_channel_raises_on_not_ok():
 
 
 async def test_teams_channel_posts_link_to_ui_approval_page():
-    channel = human.TeamsApprovalChannel(webhook_url="https://flow.example.com/hook", ui_base_url="https://pork.example.com")
+    channel = human.TeamsApprovalChannel(webhook_url="https://flow.example.com/hook", ui_base_url="https://vectorstep.example.com")
     sent = {}
 
     async def fake_post(self, url, json=None):
@@ -166,7 +166,7 @@ async def test_teams_channel_posts_link_to_ui_approval_page():
         await channel.send("Approve deploy?", "tok-456")
 
     assert sent["url"] == "https://flow.example.com/hook"
-    assert "https://pork.example.com/ui/approvals/tok-456" in sent["json"]["text"]
+    assert "https://vectorstep.example.com/ui/approvals/tok-456" in sent["json"]["text"]
     assert "Approve deploy?" in sent["json"]["text"]
 
 
