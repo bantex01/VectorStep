@@ -9,6 +9,11 @@ database:
   url: sqlite+aiosqlite:///./runs.db
   # Postgres (recommended for production — see README §Database):
   # url: postgresql+asyncpg://user:password@localhost:5432/vectorstep
+  # auto_migrate: true   # run `alembic upgrade head` automatically on boot.
+  #                      # Set false to control migrations yourself (DBA-run
+  #                      # deployments): startup then fails fast if the schema
+  #                      # is behind head instead of migrating it for you. See
+  #                      # README §Database.
 
 executors:
   openclaw:

@@ -11,7 +11,6 @@ from src import live_pricing, pricing
 from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep, RunFeedback
 from src.ui import router as ui_router
-from src.utils import utc_now
 
 app = FastAPI()
 app.include_router(ui_router)
@@ -103,6 +102,10 @@ async def test_dashboard_unattributed_team_bucketed(db, client):
 
 # ---------------------------------------------------------------------------
 # Dashboard — live reference pricing panel (under Backends/MCP servers/Models)
+#
+# Matched against each agent's *configured* live primary model (Gateway/OpenClaw
+# agents.list), not run history — so these tests fake out the agent-fetch
+# functions rather than seeding PipelineStep rows.
 # ---------------------------------------------------------------------------
 
 _OPENROUTER_CATALOG = [
@@ -110,21 +113,15 @@ _OPENROUTER_CATALOG = [
 ]
 
 
-async def _seed_step(sf, run_id: str, model: str, provider: str) -> None:
-    async with sf() as session:
-        session.add(PipelineRun(
-            id=run_id, pipeline_name="p", source="generic", status="completed",
-            normalised_context="{}", raw_payload="{}", team="payments", stage="production",
-            triggered_at=utc_now(), completed_at=utc_now(),
-        ))
-        await session.flush()
-        session.add(PipelineStep(
-            id=f"{run_id}-step-0", run_id=run_id, step_name="s1", step_index=0,
-            executor="gateway", model=model, provider=provider,
-            prompt="", status="completed", executed_at=utc_now(),
-            input_tokens=1000, output_tokens=500,
-        ))
-        await session.commit()
+def _fake_agents(monkeypatch, gw_agents=None, oc_agents=None):
+    async def _gw():
+        return gw_agents or [], None
+
+    async def _oc():
+        return oc_agents or [], None
+
+    monkeypatch.setattr(ui, "_fetch_vectorstep_gateway_agents", _gw)
+    monkeypatch.setattr(ui, "_fetch_openclaw_agents", _oc)
 
 
 async def test_dashboard_pricing_panel_shows_disabled_message_by_default(db, client):
@@ -137,11 +134,10 @@ async def test_dashboard_pricing_panel_shows_disabled_message_by_default(db, cli
     assert "Live pricing is disabled" in resp.text
 
 
-async def test_dashboard_pricing_panel_shows_table_when_enabled_and_matched(db, client):
+async def test_dashboard_pricing_panel_shows_table_when_enabled_and_matched(db, client, monkeypatch):
     pricing.configure({"currency": "USD", "live_pricing": {"enabled": True}})
     live_pricing._catalog = _OPENROUTER_CATALOG
-    sf = get_session_factory()
-    await _seed_step(sf, "run-priced", "claude-sonnet-4-6", "anthropic")
+    _fake_agents(monkeypatch, gw_agents=[{"name": "a1", "model": "anthropic/claude-sonnet-4-6"}])
 
     resp = await client.get("/ui/")
 
@@ -149,18 +145,18 @@ async def test_dashboard_pricing_panel_shows_table_when_enabled_and_matched(db, 
     assert "Live reference pricing" in resp.text
     assert "Live pricing is disabled" not in resp.text
     assert "anthropic/claude-3.5-sonnet" in resp.text
-    assert "Reference only" in resp.text
-    # Flat reference list — no real/approx color coding (that belongs on run
-    # detail's per-step badges, next to an actual cost figure, not here).
+    assert "Reference prices supplied by OpenRouter" in resp.text
+    # Flat reference list — no provider column, no real/approx color coding (that
+    # belongs on run detail's per-step badges, next to an actual cost figure).
+    assert "(unknown)" not in resp.text
     assert "Native OpenRouter call" not in resp.text
     assert "fuzzy-matched to a different provider" not in resp.text
 
 
-async def test_dashboard_pricing_panel_shows_no_match_message_when_catalog_not_fetched(db, client):
+async def test_dashboard_pricing_panel_shows_no_match_message_when_catalog_not_fetched(db, client, monkeypatch):
     pricing.configure({"currency": "USD", "live_pricing": {"enabled": True}})
     live_pricing._catalog = None  # enabled, but no fetch has happened yet
-    sf = get_session_factory()
-    await _seed_step(sf, "run-nomatch", "claude-sonnet-4-6", "anthropic")
+    _fake_agents(monkeypatch, gw_agents=[{"name": "a1", "model": "anthropic/claude-sonnet-4-6"}])
 
     resp = await client.get("/ui/")
 

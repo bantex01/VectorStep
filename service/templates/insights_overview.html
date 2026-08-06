@@ -186,18 +186,16 @@
     {% endif %}
   </div>
   <p class="text-xs text-zinc-500 mb-4">
-    Reference only — this is OpenRouter's own current list price for the closest matching
-    model in their catalog, best-effort fuzzy-matched by name. It is <strong>not necessarily what
-    you actually paid</strong>: not all of your models route through OpenRouter, and even a
-    matched model may be a different version than the one you called. See per-step cost badges
-    for the real, colour-coded (native OpenRouter vs. approximate) figure on individual runs.
+    Reference prices supplied by OpenRouter for the models you're currently using, best-effort
+    matched by name — one row per matched OpenRouter model, regardless of how many of your own
+    providers route to it. <strong>Not necessarily what you actually paid</strong>: not all of your
+    models route through OpenRouter, and a matched model may be a different version than the one
+    you called. See per-step cost badges for the real, colour-coded figure on individual runs.
   </p>
   <div class="overflow-x-auto">
     <table class="w-full text-sm">
       <thead>
         <tr class="text-xs text-zinc-500 border-b border-zinc-800">
-          <th class="text-left font-medium pb-1.5 pr-4">Provider</th>
-          <th class="text-left font-medium pb-1.5 pr-4">Model</th>
           <th class="text-left font-medium pb-1.5 pr-4">Matched OpenRouter model</th>
           <th class="text-right font-medium pb-1.5 pr-4">Input / Mtok</th>
           <th class="text-right font-medium pb-1.5">Output / Mtok</th>
@@ -206,8 +204,6 @@
       <tbody class="divide-y divide-zinc-800">
         {% for row in live_pricing_rows %}
         <tr>
-          <td class="py-1.5 pr-4 text-zinc-300">{{ row.provider }}</td>
-          <td class="py-1.5 pr-4 text-zinc-300 font-mono">{{ row.model }}</td>
           <td class="py-1.5 pr-4 text-zinc-300 font-mono">{{ row.openrouter_id }}</td>
           <td class="py-1.5 pr-4 text-right text-zinc-300">{{ row.input_per_mtok | format_cost }}</td>
           <td class="py-1.5 text-right text-zinc-300">{{ row.output_per_mtok | format_cost }}</td>

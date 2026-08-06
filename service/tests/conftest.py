@@ -36,19 +36,15 @@ VECTORSTEP_TEST_DATABASE_URL = os.environ.get("VECTORSTEP_TEST_DATABASE_URL")
 
 
 @pytest.fixture
-async def db(tmp_path):
-    """Initialise an isolated, ready-to-use database for a test.
+async def raw_db(tmp_path):
+    """Initialise an isolated, empty database for a test — schema not applied.
 
-    Defaults to a SQLite file scoped to pytest's tmp_path — same behaviour as
-    before this fixture existed: fast, zero-infra, free per-test isolation.
-
-    Set VECTORSTEP_TEST_DATABASE_URL (e.g.
-    postgresql+asyncpg://user:pass@localhost:5432/vectorstep_test) to run the exact
-    same test bodies against Postgres instead. Postgres has no per-test temp
-    file, so isolation is created explicitly by dropping and recreating the
-    public schema around each test — this also means create_tables() runs
-    against Postgres on every test, exercising its ADD COLUMN IF NOT EXISTS
-    migration branch, which is otherwise never touched by SQLite-only tests.
+    Same backend-selection contract as `db` below (defaults to a per-test
+    SQLite tmp file; set VECTORSTEP_TEST_DATABASE_URL to run against Postgres
+    instead, isolated via a schema drop/recreate since there's no per-test
+    temp file on a shared server). Split out from `db` so migration tests can
+    drive create_tables() themselves — e.g. to build a pre-Alembic DB shape
+    first — instead of it running as part of fixture setup.
     """
     if VECTORSTEP_TEST_DATABASE_URL:
         init_db(VECTORSTEP_TEST_DATABASE_URL)
@@ -56,10 +52,21 @@ async def db(tmp_path):
         async with engine.begin() as conn:
             await conn.exec_driver_sql("DROP SCHEMA public CASCADE")
             await conn.exec_driver_sql("CREATE SCHEMA public")
-        await create_tables()
         yield
         await engine.dispose()
     else:
         init_db(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
-        await create_tables()
         yield
+
+
+@pytest.fixture
+async def db(raw_db):
+    """Initialise an isolated, ready-to-use (schema-at-head) database for a test.
+
+    Runs create_tables() against whatever `raw_db` set up — a fresh SQLite tmp
+    file by default, or Postgres when VECTORSTEP_TEST_DATABASE_URL is set,
+    exercising the Postgres-specific paths (e.g. the legacy shim's
+    ADD COLUMN IF NOT EXISTS branch) that SQLite-only test runs never touch.
+    """
+    await create_tables()
+    yield

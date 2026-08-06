@@ -330,9 +330,11 @@ async def lifespan(app: FastAPI):
         logger.warning("Webhook auth disabled — POST /webhook is unauthenticated")
 
     # Database
-    db_url = config.get("database", {}).get("url", "sqlite+aiosqlite:///./runs.db")
+    database_cfg = config.get("database", {}) or {}
+    db_url = database_cfg.get("url", "sqlite+aiosqlite:///./runs.db")
+    auto_migrate = database_cfg.get("auto_migrate", True)
     init_db(db_url)
-    await create_tables()
+    await create_tables(auto_migrate=auto_migrate)
     logger.info("Database initialised: %s", db_url)
 
     interrupted = await mark_interrupted_runs()

@@ -2712,36 +2712,15 @@ calibration:                           # omit this block entirely for the defaul
 
 ## Database
 
-The ORM layer (SQLAlchemy async) is dialect-agnostic — switching backends is a
-`database.url` change only, no code changes. Two supported backends:
+SQLite (`sqlite+aiosqlite:///./runs.db`, zero infrastructure) for local dev; PostgreSQL
+(`asyncpg`) for production — a `database.url` config change only, no code changes. Schema
+migrations run automatically on startup via [Alembic](https://alembic.sqlalchemy.org/)
+(`service/migrations/`); set `database.auto_migrate: false` to hand control to a DBA
+instead. See "Adding a schema change" below for extending the schema.
 
-| Backend | URL | When to use |
-|---|---|---|
-| SQLite (`aiosqlite`) | `sqlite+aiosqlite:///./runs.db` | Local dev, zero infrastructure, single process |
-| PostgreSQL (`asyncpg`) | `postgresql+asyncpg://user:pass@host:5432/dbname` | Production — concurrent writers, real backup/replication story |
-
-**Setup (Postgres):**
-```bash
-createdb vectorstep
-# config.yaml:
-database:
-  url: postgresql+asyncpg://user:password@localhost:5432/vectorstep
-```
-
-Tables and migrations run automatically on startup (`create_tables()` in
-`service/src/db/database.py`) — same as SQLite, no Alembic or manual migration step.
-
-**Migration mechanism:** new columns are added via a small `_COLUMN_MIGRATIONS` list run
-on every boot. Postgres uses native `ADD COLUMN IF NOT EXISTS`; SQLite has no such syntax
-(confirmed unsupported as of SQLite 3.51), so it attempts the plain `ADD COLUMN` and
-ignores `OperationalError` (logged at `DEBUG`) when the column is already there. Index
-creation (`_INDEX_MIGRATIONS`, including `CREATE UNIQUE INDEX IF NOT EXISTS`) is portable
-across both dialects as-is.
-
-**Dedup race hardening:** a partial unique index —
-`UNIQUE (pipeline_name, fingerprint) WHERE status = 'running'` — closes the TOCTOU race
-described in §3a at the database layer, not just the application-level pre-check. See
-§3a "Race safety" for the full mechanism.
+Full detail (the pre-Alembic adoption logic, the `alembic upgrade head` CLI escape
+hatch, dedup race hardening) is in the VectorStep-Website docs —
+`operations/deployment.md#database` — rather than here.
 
 ---
 
@@ -2827,6 +2806,23 @@ reset around each test (see `tests/conftest.py`'s `db` fixture) rather than a fr
 file, since there's no per-test temp file on a shared server. CI
 (`.github/workflows/tests.yml`) runs both backends on every push.
 
+### Adding a schema change
+
+Edit the model in `service/src/db/models.py`, then generate a revision from the diff
+and review it before committing — autogenerate is a starting point, not the final
+migration:
+
+```bash
+cd service
+alembic revision --autogenerate -m "add foo column to pipeline_runs"
+```
+
+Check the generated file in `migrations/versions/` for: correct `batch_alter_table`
+usage on anything SQLite can't `ALTER` directly, a sane `downgrade()`, and that a
+backfill (if the change needs one) is written explicitly — autogenerate only emits
+schema-shape DDL, never data migrations. `test_database_migrations.py`'s drift-guard
+test fails CI if a model change ships without a matching revision.
+
 ---
 
 ## Adding a New Source Parser
@@ -2864,7 +2860,8 @@ The `steps/` directory is gitignored — steps are personal to your deployment. 
 | Structured JSON output from LLM | Makes flow control deterministic — runner reads `confidence`/`proceed`, not prose |
 | Extra fields allowed on LLMOutput | Domain fields (`jira_ticket`, `action`, etc.) pass between steps without schema changes |
 | Isolated session key per step | Prevents context bleed between concurrent runs and between steps |
-| SQLAlchemy async ORM, dialect swap via config only | SQLite for zero-infra local dev, Postgres for production — same code path, no Alembic |
+| SQLAlchemy async ORM, dialect swap via config only | SQLite for zero-infra local dev, Postgres for production — same code path |
+| Alembic with auto-upgrade-on-boot | The hand-rolled add-column/add-index mechanism only ever adds nullable columns — it outgrew that at ~20 columns and couldn't rename, drop, backfill, or alter types. Auto-migrate-on-boot keeps the zero-ops experience; `database.auto_migrate: false` hands control to a DBA |
 | DB-level partial unique index for in-flight dedup | The application-level pre-check (§3a) narrows but cannot close a TOCTOU race on its own — the DB constraint is the actual correctness guarantee, the pre-check just avoids the round-trip in the common case |
 | Adapter pattern for executors | Swap or mix backends with config changes only; steps in the same pipeline can use different executors |
 | Runner owns flow decisions | LLM recommends, service decides — never blindly chain prompts |

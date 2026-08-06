@@ -11,7 +11,7 @@ import httpx
 import pytest
 from sqlalchemy import inspect, select
 
-from src.db.database import create_tables, get_session_factory
+from src.db.database import _run_legacy_shim, create_tables, get_engine, get_session_factory
 from src.db.models import PipelineStep
 from src.executors import human
 from src.metrics import MetricsData, VectorStepCollector, fetch_metrics_data
@@ -748,23 +748,30 @@ async def test_deterministic_passed_column_exists_after_create_tables(db):
     assert "verifier_prompt" in columns
 
 
-async def test_verifier_attribution_columns_migrate_onto_a_preexisting_db(db):
+async def test_verifier_attribution_columns_migrate_onto_a_preexisting_db(raw_db):
     """Reproduces a real failure: a DB created before verifier_agent/model/provider
     existed raised 'no such column' on every run-detail page load after upgrading,
     because Base.metadata.create_all() only creates missing TABLES — it never adds a
-    new column to a table that already exists. _COLUMN_MIGRATIONS is what's actually
-    responsible for that, and it's easy to add a column to the ORM model (db/models.py)
-    while forgetting to also register it here — this test catches exactly that."""
-    sf = get_session_factory()
-    async with sf() as session:
-        conn = await session.connection()
+    new column to a table that already exists. The legacy shim's _COLUMN_MIGRATIONS
+    walk is what's actually responsible for that, and it's easy to add a column to
+    the ORM model (db/models.py) while forgetting to also register it there — this
+    test catches exactly that.
+
+    Built via raw_db + the legacy shim directly (rather than dropping columns from
+    an already-`db`-fixture-provisioned, already-stamped DB) because that's what a
+    real pre-Alembic deployment actually looks like: no alembic_version row, so
+    create_tables() takes the legacy-adoption path, not a same-revision no-op.
+    """
+    engine = get_engine()
+    async with engine.begin() as conn:
+        await _run_legacy_shim(conn)
         for col in ("verifier_agent", "verifier_model", "verifier_provider", "verifier_prompt"):
             await conn.exec_driver_sql(f"ALTER TABLE pipeline_steps DROP COLUMN {col}")
-        await session.commit()
 
     # The exact re-entry point a service restart/upgrade hits against an existing DB.
     await create_tables()
 
+    sf = get_session_factory()
     async with sf() as session:
         result = await session.execute(select(PipelineStep))
         assert result.scalars().all() == []

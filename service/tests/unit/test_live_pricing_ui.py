@@ -5,6 +5,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+import src.ui as ui
 from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep
 from src import live_pricing, pricing
@@ -118,48 +119,77 @@ async def test_run_detail_no_approx_badge_when_no_match_found(db, client):
 
 # ---------------------------------------------------------------------------
 # Overview page — live reference pricing panel
+#
+# Matched against each agent's *configured* live primary model (Gateway/OpenClaw
+# agents.list), not run history — so these tests fake out the agent-fetch
+# functions rather than seeding PipelineStep rows.
 # ---------------------------------------------------------------------------
 
-async def test_overview_shows_live_pricing_panel_when_enabled_and_matched(db, client):
+def _fake_agents(monkeypatch, gw_agents=None, oc_agents=None):
+    async def _gw():
+        return gw_agents or [], None
+
+    async def _oc():
+        return oc_agents or [], None
+
+    monkeypatch.setattr(ui, "_fetch_vectorstep_gateway_agents", _gw)
+    monkeypatch.setattr(ui, "_fetch_openclaw_agents", _oc)
+
+
+async def test_overview_shows_live_pricing_panel_when_enabled_and_matched(db, client, monkeypatch):
     pricing.configure({"currency": "USD", "live_pricing": {"enabled": True}})
     live_pricing._catalog = _OPENROUTER_CATALOG
-    sf = get_session_factory()
-    await _seed_run(sf, "run-1", [
-        {"name": "s1", "model": "claude-sonnet-4-6", "provider": "anthropic", "input_tokens": 1000, "output_tokens": 500, "cost": None},
-    ])
+    _fake_agents(monkeypatch, gw_agents=[{"name": "a1", "model": "anthropic/claude-sonnet-4-6"}])
 
     resp = await client.get("/ui/insights")
     assert resp.status_code == 200
     assert "Live reference pricing" in resp.text
     assert "anthropic/claude-3.5-sonnet" in resp.text
-    assert "Reference only" in resp.text
-    # Flat reference list, not tied to any real paid cost — no real/approx color
-    # coding here (that only makes sense next to an actual cost, i.e. run detail's
-    # per-step badges, tested separately above).
+    assert "Reference prices supplied by OpenRouter" in resp.text
+    # Flat reference list, not tied to any real paid cost — no provider column, no
+    # real/approx color coding here (that only makes sense next to an actual cost,
+    # i.e. run detail's per-step badges, tested separately above).
+    assert "(unknown)" not in resp.text
     assert "text-green-400" not in resp.text
     assert "text-amber-400" not in resp.text
 
 
-async def test_overview_no_panel_when_live_pricing_disabled(db, client):
+async def test_overview_live_pricing_dedupes_multiple_agents_to_one_row(db, client, monkeypatch):
+    """Several agents/providers landing on the same OpenRouter catalog entry
+    should collapse to a single reference-price row, not one per agent — this
+    panel lists distinct OpenRouter prices, not distinct configured agents. Model
+    strings here are deliberately never the exact catalog id itself, so the count
+    below only reflects the pricing panel row, not a chart-data coincidence."""
+    pricing.configure({"currency": "USD", "live_pricing": {"enabled": True}})
+    live_pricing._catalog = _OPENROUTER_CATALOG
+    _fake_agents(
+        monkeypatch,
+        gw_agents=[
+            {"name": "a1", "model": "anthropic/claude-sonnet-4-6"},
+            {"name": "a2", "model": "claude-sonnet-4-6"},  # no vendor prefix
+        ],
+        oc_agents=[{"name": "a3", "model": "anthropic/claude-3-5-sonnet-20241022"}],
+    )
+
+    resp = await client.get("/ui/insights")
+    assert resp.status_code == 200
+    assert resp.text.count("anthropic/claude-3.5-sonnet") == 1
+
+
+async def test_overview_no_panel_when_live_pricing_disabled(db, client, monkeypatch):
     pricing.configure({"currency": "USD"})  # live_pricing.enabled defaults False
     live_pricing._catalog = _OPENROUTER_CATALOG
-    sf = get_session_factory()
-    await _seed_run(sf, "run-1", [
-        {"name": "s1", "model": "claude-sonnet-4-6", "provider": "anthropic", "input_tokens": 1000, "output_tokens": 500, "cost": None},
-    ])
+    _fake_agents(monkeypatch, gw_agents=[{"name": "a1", "model": "anthropic/claude-sonnet-4-6"}])
 
     resp = await client.get("/ui/insights")
     assert resp.status_code == 200
     assert "Live reference pricing" not in resp.text
 
 
-async def test_overview_no_panel_when_catalog_not_yet_fetched(db, client):
+async def test_overview_no_panel_when_catalog_not_yet_fetched(db, client, monkeypatch):
     pricing.configure({"currency": "USD", "live_pricing": {"enabled": True}})
     live_pricing._catalog = None  # enabled, but no fetch has happened yet
-    sf = get_session_factory()
-    await _seed_run(sf, "run-1", [
-        {"name": "s1", "model": "claude-sonnet-4-6", "provider": "anthropic", "input_tokens": 1000, "output_tokens": 500, "cost": None},
-    ])
+    _fake_agents(monkeypatch, gw_agents=[{"name": "a1", "model": "anthropic/claude-sonnet-4-6"}])
 
     resp = await client.get("/ui/insights")
     assert resp.status_code == 200

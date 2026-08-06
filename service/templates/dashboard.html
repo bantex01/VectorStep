@@ -146,13 +146,11 @@
   {% if not live_pricing_enabled %}
     <p class="text-sm text-zinc-500">Live pricing is disabled — set <code class="text-zinc-400">pricing.live_pricing.enabled: true</code> in config to show reference rates here.</p>
   {% elif live_pricing_rows %}
-    <p class="text-xs text-zinc-500 mb-2">Reference only — OpenRouter's current list price for the closest name match, not necessarily what you paid.</p>
+    <p class="text-xs text-zinc-500 mb-2">Reference prices supplied by OpenRouter for the closest name match — not necessarily what you paid.</p>
     <div class="h-40 overflow-y-auto">
       <table class="w-full text-sm">
         <thead class="sticky top-0 bg-zinc-900">
           <tr class="text-xs text-zinc-500 border-b border-zinc-800">
-            <th class="text-left font-medium pb-1.5 pr-4">Provider</th>
-            <th class="text-left font-medium pb-1.5 pr-4">Model</th>
             <th class="text-left font-medium pb-1.5 pr-4">Matched OpenRouter model</th>
             <th class="text-right font-medium pb-1.5 pr-4">Input / Mtok</th>
             <th class="text-right font-medium pb-1.5">Output / Mtok</th>
@@ -161,8 +159,6 @@
         <tbody class="divide-y divide-zinc-800">
           {% for row in live_pricing_rows %}
           <tr>
-            <td class="py-1.5 pr-4 text-zinc-300">{{ row.provider }}</td>
-            <td class="py-1.5 pr-4 text-zinc-300 font-mono">{{ row.model }}</td>
             <td class="py-1.5 pr-4 text-zinc-300 font-mono">{{ row.openrouter_id }}</td>
             <td class="py-1.5 pr-4 text-right text-zinc-300">{{ row.input_per_mtok | format_cost }}</td>
             <td class="py-1.5 text-right text-zinc-300">{{ row.output_per_mtok | format_cost }}</td>

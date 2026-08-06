@@ -1694,7 +1694,11 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
     feedback_total = sum(feedback_by_outcome.values())
     feedback_correct = feedback_by_outcome.get("correct", 0)
 
-    live_pricing_ctx = await _compute_live_pricing_rows()
+    (gw_agents, _gw_error), (oc_agents, _oc_error) = await asyncio.gather(
+        _fetch_vectorstep_gateway_agents(),
+        _fetch_openclaw_agents(),
+    )
+    live_pricing_ctx = await _compute_live_pricing_rows(gw_agents + oc_agents)
 
     return templates.TemplateResponse(request, "insights_overview.html", {
         "time_range": time_range,
@@ -4051,40 +4055,59 @@ async def _fetch_vectorstep_gateway_mcp() -> tuple[dict, dict, str | None]:
         return {}, {}, f"Could not reach VectorStep Gateway at {_vectorstep_gateway_base} — is it running?"
 
 
-async def _compute_live_pricing_rows() -> dict:
+def _agent_provider_model_pairs(agents: list[dict]) -> list[tuple[str | None, str]]:
+    """Parse each agent's live primary model string into (provider, bare_model) —
+    the same "vendor/model" prefix split _dashboard_status_panels uses for the
+    Models Configured panel, except an unprefixed model yields provider=None here
+    (so resolve_approx_rate fuzzy-matches the whole catalog) rather than that
+    panel's "unspecified" grouping label, which is a display convenience and not
+    a real provider value that should ever hard-filter a match away."""
+    pairs = []
+    for a in agents:
+        model = a.get("model")
+        if not model:
+            continue
+        provider, sep, bare = model.partition("/")
+        pairs.append((provider if sep else None, bare if sep else model))
+    return pairs
+
+
+async def _compute_live_pricing_rows(agents: list[dict]) -> dict:
     """Live-pricing reference rows (SPEC-live-pricing.md) — shared by the dashboard's
     compact panel and the full Insights Overview panel. Only rendered when
     pricing.live_pricing.enabled and the catalog has actually been fetched at least
     once. Purely informational — a flat "what OpenRouter currently lists for the
     models you use" reference, not tied to any actual paid cost, so unlike the
     per-step badges on run detail (_approx_cost_for_step) these rows carry no
-    real/approx color coding — that distinction only makes sense next to a real
-    cost figure, which this aggregate list never has.
+    real/approx color coding, and no provider column — that's per-step detail this
+    aggregate list isn't trying to give.
+
+    Matched against each agent's *configured* live primary model (same source as
+    the Models Configured panel), not run history — this is "models we're set up
+    to use," available immediately on a fresh deployment, not gated on any run
+    having actually executed yet. Deduped to one row per matched OpenRouter
+    catalog entry: many agents/providers landing on the same OpenRouter model are
+    the same reference price, so they collapse to one row.
     """
     live_pricing_rows: list[dict] = []
     _table = pricing.get_table()
     live_pricing_enabled = bool(_table and _table.live_pricing.enabled)
     if live_pricing_enabled:
-        sf = get_session_factory()
-        async with sf() as session:
-            rows = await session.execute(
-                select(PipelineStep.provider, PipelineStep.model).distinct()
-                .where(PipelineStep.model.is_not(None))
-            )
-            distinct_provider_models = rows.all()
         catalog = live_pricing.get_catalog()
-        for provider, model in distinct_provider_models:
+        rates_by_openrouter_id: dict[str, live_pricing.ApproxRate] = {}
+        for provider, model in _agent_provider_model_pairs(agents):
             rate = live_pricing.resolve_approx_rate(catalog, provider, model)
             if rate is None:
                 continue
-            live_pricing_rows.append({
-                "provider": provider or "(unknown)",
-                "model": model,
+            rates_by_openrouter_id[rate.openrouter_id] = rate
+        live_pricing_rows = [
+            {
                 "openrouter_id": rate.openrouter_id,
                 "input_per_mtok": rate.input_per_mtok,
                 "output_per_mtok": rate.output_per_mtok,
-            })
-        live_pricing_rows.sort(key=lambda r: (r["provider"], r["model"]))
+            }
+            for rate in sorted(rates_by_openrouter_id.values(), key=lambda r: r.openrouter_id)
+        ]
 
     return {
         "live_pricing_rows": live_pricing_rows,
@@ -4157,7 +4180,7 @@ async def _dashboard_status_panels() -> dict:
         "mcp_error": mcp_error,
         "models_configured": models_configured,
         "total_model_count": total_model_count,
-        **await _compute_live_pricing_rows(),
+        **await _compute_live_pricing_rows(gw_agents + oc_agents),
     }
 
 

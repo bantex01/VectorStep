@@ -1,158 +1,120 @@
-"""Tests for the team column migration (db/database.py _COLUMN_MIGRATIONS)."""
+"""Tests for the Alembic adoption logic in db/database.py (SPEC-alembic-migrations.md §5).
+
+Uses the `raw_db` fixture (schema not yet applied) where a test needs to control
+the DB's starting shape itself, and `db` (already at head) otherwise. Both run
+under SQLite by default and Postgres when VECTORSTEP_TEST_DATABASE_URL is set —
+see tests/conftest.py.
+"""
+import pytest
 from sqlalchemy import inspect
+from sqlalchemy.exc import IntegrityError
 
-from src.db.database import create_tables, get_session_factory
-from src.db.models import PipelineRun, PipelineStep
+from alembic.autogenerate import compare_metadata
+from alembic.runtime.migration import MigrationContext
+
+from src.db.database import create_tables, get_engine, get_session_factory, _run_legacy_shim
+from src.db.models import Base, PipelineRun
 
 
-async def test_team_column_migration_idempotent(db):
-    # Running create_tables() twice must not raise — the second run hits the
-    # "column already exists" path that's swallowed via OperationalError.
-    await create_tables()
-
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        conn = await session.connection()
-        # sqlalchemy.inspect (not PRAGMA) so this introspects portably on both
-        # SQLite and Postgres.
-        columns = await conn.run_sync(
-            lambda c: {col["name"] for col in inspect(c).get_columns("pipeline_runs")}
-        )
+async def test_fresh_empty_db_boots_to_head(db):
+    engine = get_engine()
+    async with engine.connect() as conn:
+        tables = await conn.run_sync(lambda c: set(inspect(c).get_table_names()))
         indexes = await conn.run_sync(
             lambda c: {idx["name"] for idx in inspect(c).get_indexes("pipeline_runs")}
         )
 
-    assert "team" in columns
-    assert "ix_pipeline_runs_team" in indexes
-    assert "stage" in columns
-    assert "ix_pipeline_runs_stage" in indexes
+    assert {
+        "alembic_version", "pipeline_runs", "pipeline_steps", "run_feedback",
+        "step_prompt_versions", "agent_version_snapshots", "step_feedback",
+    } <= tables
+    assert "ix_pipeline_runs_running_fingerprint" in indexes
 
 
-async def test_team_column_queryable_after_migration(db):
-    await create_tables()
+async def test_running_fingerprint_partial_index_enforces(db):
+    # DB-level half of the dedup TOCTOU fix (README §3a) — the application-level
+    # pre-check narrows the race, this constraint is what actually closes it.
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        session.add(PipelineRun(
+            id="run-a", pipeline_name="p", source="generic", status="running",
+            normalised_context="{}", raw_payload="{}", fingerprint="fp-1",
+        ))
+        await session.commit()
+
+    async with session_factory() as session:
+        session.add(PipelineRun(
+            id="run-b", pipeline_name="p", source="generic", status="running",
+            normalised_context="{}", raw_payload="{}", fingerprint="fp-1",
+        ))
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
+
+
+async def test_legacy_adoption_stamps_baseline_without_losing_data(raw_db):
+    engine = get_engine()
+
+    # Build a DB "the old way" — the pre-Alembic mechanism, still importable
+    # as a private function purely to adopt deployments that predate this spec.
+    async with engine.begin() as conn:
+        await _run_legacy_shim(conn)
 
     session_factory = get_session_factory()
     async with session_factory() as session:
         session.add(PipelineRun(
-            id="run-1",
-            pipeline_name="p",
-            source="generic",
-            status="completed",
-            normalised_context="{}",
-            raw_payload="{}",
-            team="payments",
+            id="pre-migration-run", pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}", team="payments",
         ))
         await session.commit()
 
-        run = await session.get(PipelineRun, "run-1")
-        assert run.team == "payments"
+    async with engine.connect() as conn:
+        has_alembic_version = await conn.run_sync(lambda c: inspect(c).has_table("alembic_version"))
+    assert not has_alembic_version
 
-
-async def test_prompt_hash_and_agent_version_column_migration_idempotent(db):
-    # SPEC-prompt-versioning.md §4b — same idempotency contract as the team-column
-    # migration above, for the two columns/indexes this spec adds to pipeline_steps.
-    await create_tables()
     await create_tables()
 
-    session_factory = get_session_factory()
+    async with engine.connect() as conn:
+        result = await conn.exec_driver_sql("SELECT version_num FROM alembic_version")
+        stamped_at = result.first()[0]
+    assert stamped_at == "0001_baseline"
+
     async with session_factory() as session:
-        conn = await session.connection()
-        columns = await conn.run_sync(
-            lambda c: {col["name"] for col in inspect(c).get_columns("pipeline_steps")}
-        )
-        indexes = await conn.run_sync(
-            lambda c: {idx["name"] for idx in inspect(c).get_indexes("pipeline_steps")}
-        )
+        run = await session.get(PipelineRun, "pre-migration-run")
+    assert run is not None
+    assert run.team == "payments"
 
-    assert "prompt_hash" in columns
-    assert "agent_version" in columns
-    assert "ix_pipeline_steps_prompt_hash" in indexes
-    assert "ix_pipeline_steps_agent_version" in indexes
-
-
-async def test_prompt_hash_and_agent_version_queryable_after_migration(db):
+    # Subsequent boot is a no-op — nothing re-applied, nothing raised.
     await create_tables()
 
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        session.add(PipelineRun(
-            id="run-2", pipeline_name="p", source="generic", status="completed",
-            normalised_context="{}", raw_payload="{}",
-        ))
-        session.add(PipelineStep(
-            run_id="run-2", step_name="investigate", step_index=0, executor="gateway",
-            prompt="rendered prompt", status="completed",
-            prompt_hash="a3f2c9d81e04", agent_version="91f02ab3c7de",
-        ))
-        await session.commit()
 
-        result = await session.execute(
-            PipelineStep.__table__.select().where(PipelineStep.run_id == "run-2")
-        )
-        row = result.one()
-        assert row.prompt_hash == "a3f2c9d81e04"
-        assert row.agent_version == "91f02ab3c7de"
+async def test_auto_migrate_false_raises_naming_pending_revision(raw_db):
+    with pytest.raises(RuntimeError, match="0001_baseline"):
+        await create_tables(auto_migrate=False)
 
 
-async def test_cost_accounting_column_migration_idempotent(db):
-    # SPEC-cost-accounting.md §3 — cost + verifier token columns on pipeline_steps.
-    await create_tables()
-    await create_tables()
-
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        conn = await session.connection()
-        columns = await conn.run_sync(
-            lambda c: {col["name"] for col in inspect(c).get_columns("pipeline_steps")}
-        )
-
-    assert "cost" in columns
-    assert "verifier_input_tokens" in columns
-    assert "verifier_output_tokens" in columns
+async def test_auto_migrate_false_at_head_boots_fine(db):
+    # `db` fixture already brought this DB to head via the default auto_migrate=True path.
+    await create_tables(auto_migrate=False)
 
 
-async def test_cost_accounting_columns_queryable_after_migration(db):
-    await create_tables()
+async def test_autogenerate_produces_no_diff_at_head(db):
+    """Drift guard: Base.metadata and the DB must never disagree at head.
 
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        session.add(PipelineRun(
-            id="run-cost", pipeline_name="p", source="generic", status="completed",
-            normalised_context="{}", raw_payload="{}",
-        ))
-        session.add(PipelineStep(
-            run_id="run-cost", step_name="investigate", step_index=0, executor="gateway",
-            prompt="rendered prompt", status="completed",
-            input_tokens=100, output_tokens=50,
-            verifier_input_tokens=20, verifier_output_tokens=10,
-            cost=0.0125,
-        ))
-        await session.commit()
+    Fails CI the moment a model field is added/changed without a matching
+    Alembic revision — the whole point of adopting Alembic in the first place.
+    """
+    engine = get_engine()
 
-        result = await session.execute(
-            PipelineStep.__table__.select().where(PipelineStep.run_id == "run-cost")
-        )
-        row = result.one()
-        assert row.cost == 0.0125
-        assert row.verifier_input_tokens == 20
-        assert row.verifier_output_tokens == 10
+    def _diff(sync_conn):
+        context = MigrationContext.configure(sync_conn, opts={"compare_type": True})
+        return compare_metadata(context, Base.metadata)
 
+    async with engine.connect() as conn:
+        diffs = await conn.run_sync(_diff)
 
-async def test_new_prompt_version_tables_created(db):
-    from src.db.models import AgentVersionSnapshot, StepPromptVersion
-
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        session.add(StepPromptVersion(
-            prompt_hash="a3f2c9d81e04", step_name="investigate", template="You are triaging...",
-        ))
-        session.add(AgentVersionSnapshot(
-            agent_version="91f02ab3c7de", agent="gateway:sre-investigation",
-            soul_md="You are an SRE.", agent_yaml="name: sre-investigation\n",
-        ))
-        await session.commit()
-
-        spv = await session.get(StepPromptVersion, "a3f2c9d81e04")
-        avs = await session.get(AgentVersionSnapshot, "91f02ab3c7de")
-        assert spv.step_name == "investigate"
-        assert avs.agent == "gateway:sre-investigation"
+    assert diffs == [], (
+        "autogenerate detected drift between Base.metadata and the DB at head — "
+        f"a model change shipped without a matching Alembic revision: {diffs}"
+    )

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from ..utils import utc_now
@@ -13,6 +13,19 @@ class Base(DeclarativeBase):
 
 class PipelineRun(Base):
     __tablename__ = "pipeline_runs"
+    __table_args__ = (
+        # Closes the dedup TOCTOU race (README §3a "Known limitation"): the DB itself
+        # refuses a second 'running' row for the same pipeline+fingerprint. NULLs are
+        # never equal in a unique index, so fingerprint=None rows (sub-pipelines,
+        # dedup opt-outs) are unaffected. Both dialect kwargs are required —
+        # postgresql_where alone is silently ignored on SQLite.
+        Index(
+            "ix_pipeline_runs_running_fingerprint", "pipeline_name", "fingerprint",
+            unique=True,
+            postgresql_where=text("status = 'running'"),
+            sqlite_where=text("status = 'running'"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_name: Mapped[str] = mapped_column(String, nullable=False)

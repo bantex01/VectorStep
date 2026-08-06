@@ -1,10 +1,15 @@
+import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
-from sqlalchemy import select
+from alembic import command
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from sqlalchemy import inspect, select
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker, create_async_engine
 
 from ..utils import utc_now
 from .models import Base, PipelineRun
@@ -14,6 +19,8 @@ logger = logging.getLogger(__name__)
 _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
+_ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
+
 
 def init_db(database_url: str) -> None:
     global _engine, _session_factory
@@ -21,35 +28,109 @@ def init_db(database_url: str) -> None:
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 
 
-async def create_tables() -> None:
+def _alembic_config() -> Config:
+    cfg = Config(str(_ALEMBIC_INI))
+    # Tells migrations/env.py the exact URL our own engine was built from —
+    # the only thing that ever needs a second, short-lived engine of its own
+    # (see env.py's run_async_migrations docstring for why it can't just
+    # reuse this engine object across threads).
+    cfg.attributes["configured_url"] = _engine.url.render_as_string(hide_password=False)
+    return cfg
+
+
+async def _current_revision(conn: AsyncConnection) -> str | None:
+    has_version_table = await conn.run_sync(lambda c: inspect(c).has_table("alembic_version"))
+    if not has_version_table:
+        return None
+    result = await conn.exec_driver_sql("SELECT version_num FROM alembic_version")
+    row = result.first()
+    return row[0] if row else None
+
+
+def _pending_revisions(cfg: Config, current: str | None, head: str) -> list[str]:
+    script = ScriptDirectory.from_config(cfg)
+    return [rev.revision for rev in script.iterate_revisions(head, current)]
+
+
+async def create_tables(auto_migrate: bool = True) -> None:
+    """Bring the schema to head, adopting whatever state the DB is already in.
+
+    - Already at head → no-op, regardless of auto_migrate.
+    - Behind head and auto_migrate is False → fail fast, naming the pending
+      revisions, rather than risk the app running against a stale schema.
+    - Behind head and auto_migrate is True: an empty DB (no `pipeline_runs`)
+      upgrades from scratch; a DB with tables but no `alembic_version` (every
+      pre-Alembic deployment) runs the legacy shim first to bring it to
+      exactly the 0001_baseline shape, stamps it there, then upgrades — after
+      which every DB, however it started, is a normal `alembic upgrade head`.
+    """
     assert _engine is not None, "Database not initialised — call init_db() first"
-    async with _engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
-        # Add columns introduced after initial schema — safe to run on every boot.
-        # Postgres supports IF NOT EXISTS directly. SQLite's ALTER TABLE ADD COLUMN
-        # has no IF NOT EXISTS form (confirmed unsupported as of SQLite 3.51), so it
-        # falls back to attempt-and-ignore-if-already-there, narrowed to
-        # OperationalError (the exception SQLite/aiosqlite actually raises for a
-        # duplicate column) rather than a bare except, so unrelated DB errors aren't
-        # silently swallowed.
-        is_postgres = conn.dialect.name == "postgresql"
-        for table, column, column_type in _COLUMN_MIGRATIONS:
-            if is_postgres:
+    cfg = _alembic_config()
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+
+    async with _engine.connect() as conn:
+        current = await _current_revision(conn)
+        has_pipeline_runs = await conn.run_sync(lambda c: inspect(c).has_table("pipeline_runs"))
+
+    if current == head:
+        return
+
+    if not auto_migrate:
+        pending = _pending_revisions(cfg, current, head)
+        raise RuntimeError(
+            "Database schema is behind head and database.auto_migrate is false "
+            f"(pending revision(s): {', '.join(pending)}). Run "
+            "`cd service && alembic upgrade head` to apply them, or set "
+            "database.auto_migrate: true to let the app migrate on boot."
+        )
+
+    if current is None and has_pipeline_runs:
+        async with _engine.begin() as conn:
+            await _run_legacy_shim(conn)
+        await asyncio.to_thread(command.stamp, cfg, "0001_baseline")
+
+    await asyncio.to_thread(command.upgrade, cfg, "head")
+
+
+async def _run_legacy_shim(conn: AsyncConnection) -> None:
+    """Pre-Alembic migration mechanism — adopts any pre-existing deployment.
+
+    Kept verbatim from the original create_tables() so every historical DB
+    shape (any prior version's partial application of these same statements)
+    converges on exactly the 0001_baseline schema before being stamped there.
+    Idempotent by construction, which is what makes that convergence safe.
+
+    Retained for one release cycle's worth of specs after
+    SPEC-alembic-migrations.md lands, then deletable — by then every
+    deployment that boots at least once will have been stamped and adopted.
+    """
+    await conn.run_sync(Base.metadata.create_all)
+
+    # Add columns introduced after initial schema — safe to run on every boot.
+    # Postgres supports IF NOT EXISTS directly. SQLite's ALTER TABLE ADD COLUMN
+    # has no IF NOT EXISTS form (confirmed unsupported as of SQLite 3.51), so it
+    # falls back to attempt-and-ignore-if-already-there, narrowed to
+    # OperationalError (the exception SQLite/aiosqlite actually raises for a
+    # duplicate column) rather than a bare except, so unrelated DB errors aren't
+    # silently swallowed.
+    is_postgres = conn.dialect.name == "postgresql"
+    for table, column, column_type in _COLUMN_MIGRATIONS:
+        if is_postgres:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}"
+            )
+        else:
+            try:
                 await conn.exec_driver_sql(
-                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}"
+                    f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
                 )
-            else:
-                try:
-                    await conn.exec_driver_sql(
-                        f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
-                    )
-                except OperationalError:
-                    logger.debug("Column %s.%s already exists, skipping", table, column)
+            except OperationalError:
+                logger.debug("Column %s.%s already exists, skipping", table, column)
 
-        # CREATE [UNIQUE] INDEX IF NOT EXISTS is portable across both dialects.
-        for statement in _INDEX_MIGRATIONS:
-            await conn.exec_driver_sql(statement)
+    # CREATE [UNIQUE] INDEX IF NOT EXISTS is portable across both dialects.
+    for statement in _INDEX_MIGRATIONS:
+        await conn.exec_driver_sql(statement)
 
 
 _COLUMN_MIGRATIONS = [
