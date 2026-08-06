@@ -185,12 +185,12 @@
       <span class="text-xs text-zinc-500">last refreshed {{ format_ago(live_pricing_last_refreshed) }}</span>
     {% endif %}
   </div>
-  <p class="text-xs text-amber-400/90 mb-4">
-    ⚠ Reference only — this is OpenRouter's own current list price for the closest matching
+  <p class="text-xs text-zinc-500 mb-4">
+    Reference only — this is OpenRouter's own current list price for the closest matching
     model in their catalog, best-effort fuzzy-matched by name. It is <strong>not necessarily what
     you actually paid</strong>: not all of your models route through OpenRouter, and even a
     matched model may be a different version than the one you called. See per-step cost badges
-    for the real, manually-priced figure where one is configured.
+    for the real, colour-coded (native OpenRouter vs. approximate) figure on individual runs.
   </p>
   <div class="overflow-x-auto">
     <table class="w-full text-sm">
@@ -208,10 +208,7 @@
         <tr>
           <td class="py-1.5 pr-4 text-zinc-300">{{ row.provider }}</td>
           <td class="py-1.5 pr-4 text-zinc-300 font-mono">{{ row.model }}</td>
-          <td class="py-1.5 pr-4 font-mono {{ 'text-green-400' if row.is_native else 'text-amber-400' }}"
-              title="{% if row.is_native %}Native OpenRouter call — this is the real rate for the exact API used.{% else %}Approximate — fuzzy-matched to a different provider's model.{% endif %}">
-            {{ row.openrouter_id }}
-          </td>
+          <td class="py-1.5 pr-4 text-zinc-300 font-mono">{{ row.openrouter_id }}</td>
           <td class="py-1.5 pr-4 text-right text-zinc-300">{{ row.input_per_mtok | format_cost }}</td>
           <td class="py-1.5 text-right text-zinc-300">{{ row.output_per_mtok | format_cost }}</td>
         </tr>

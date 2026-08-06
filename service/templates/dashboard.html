@@ -146,6 +146,7 @@
   {% if not live_pricing_enabled %}
     <p class="text-sm text-zinc-500">Live pricing is disabled — set <code class="text-zinc-400">pricing.live_pricing.enabled: true</code> in config to show reference rates here.</p>
   {% elif live_pricing_rows %}
+    <p class="text-xs text-zinc-500 mb-2">Reference only — OpenRouter's current list price for the closest name match, not necessarily what you paid.</p>
     <div class="h-40 overflow-y-auto">
       <table class="w-full text-sm">
         <thead class="sticky top-0 bg-zinc-900">
@@ -162,10 +163,7 @@
           <tr>
             <td class="py-1.5 pr-4 text-zinc-300">{{ row.provider }}</td>
             <td class="py-1.5 pr-4 text-zinc-300 font-mono">{{ row.model }}</td>
-            <td class="py-1.5 pr-4 font-mono {{ 'text-green-400' if row.is_native else 'text-amber-400' }}"
-                title="{% if row.is_native %}Native OpenRouter call — this is the real rate for the exact API used.{% else %}Approximate — fuzzy-matched to a different provider's model.{% endif %}">
-              {{ row.openrouter_id }}
-            </td>
+            <td class="py-1.5 pr-4 text-zinc-300 font-mono">{{ row.openrouter_id }}</td>
             <td class="py-1.5 pr-4 text-right text-zinc-300">{{ row.input_per_mtok | format_cost }}</td>
             <td class="py-1.5 text-right text-zinc-300">{{ row.output_per_mtok | format_cost }}</td>
           </tr>

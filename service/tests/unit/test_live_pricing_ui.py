@@ -133,6 +133,11 @@ async def test_overview_shows_live_pricing_panel_when_enabled_and_matched(db, cl
     assert "Live reference pricing" in resp.text
     assert "anthropic/claude-3.5-sonnet" in resp.text
     assert "Reference only" in resp.text
+    # Flat reference list, not tied to any real paid cost — no real/approx color
+    # coding here (that only makes sense next to an actual cost, i.e. run detail's
+    # per-step badges, tested separately above).
+    assert "text-green-400" not in resp.text
+    assert "text-amber-400" not in resp.text
 
 
 async def test_overview_no_panel_when_live_pricing_disabled(db, client):

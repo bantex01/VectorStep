@@ -149,6 +149,11 @@ async def test_dashboard_pricing_panel_shows_table_when_enabled_and_matched(db, 
     assert "Live reference pricing" in resp.text
     assert "Live pricing is disabled" not in resp.text
     assert "anthropic/claude-3.5-sonnet" in resp.text
+    assert "Reference only" in resp.text
+    # Flat reference list — no real/approx color coding (that belongs on run
+    # detail's per-step badges, next to an actual cost figure, not here).
+    assert "Native OpenRouter call" not in resp.text
+    assert "fuzzy-matched to a different provider" not in resp.text
 
 
 async def test_dashboard_pricing_panel_shows_no_match_message_when_catalog_not_fetched(db, client):

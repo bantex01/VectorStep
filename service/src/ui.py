@@ -4055,7 +4055,11 @@ async def _compute_live_pricing_rows() -> dict:
     """Live-pricing reference rows (SPEC-live-pricing.md) — shared by the dashboard's
     compact panel and the full Insights Overview panel. Only rendered when
     pricing.live_pricing.enabled and the catalog has actually been fetched at least
-    once. Never touches real cost; purely informational.
+    once. Purely informational — a flat "what OpenRouter currently lists for the
+    models you use" reference, not tied to any actual paid cost, so unlike the
+    per-step badges on run detail (_approx_cost_for_step) these rows carry no
+    real/approx color coding — that distinction only makes sense next to a real
+    cost figure, which this aggregate list never has.
     """
     live_pricing_rows: list[dict] = []
     _table = pricing.get_table()
@@ -4079,7 +4083,6 @@ async def _compute_live_pricing_rows() -> dict:
                 "openrouter_id": rate.openrouter_id,
                 "input_per_mtok": rate.input_per_mtok,
                 "output_per_mtok": rate.output_per_mtok,
-                "is_native": provider == "openrouter",
             })
         live_pricing_rows.sort(key=lambda r: (r["provider"], r["model"]))
 
