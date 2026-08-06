@@ -1,7 +1,7 @@
 """Tests for _confidence_narrative — the per-run, plain-language walkthrough of how a
 step's trust score was derived, shown behind the "How was this calculated?" button on
 the run-detail page."""
-from src.ui import _confidence_narrative
+from src.ui.runs import _confidence_narrative
 
 
 def _trust(**overrides) -> dict:

@@ -1,6 +1,6 @@
 """Tests for _step_config_summary — the plain-language "what is this step set up to
 do" panel, complementing _confidence_narrative's "what happened this run"."""
-from src.ui import _step_config_summary
+from src.ui.runs import _step_config_summary
 
 
 def _trust(**overrides) -> dict:

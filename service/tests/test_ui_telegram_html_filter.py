@@ -2,7 +2,7 @@
 parse-mode subset used in `human` step prompt_templates as real HTML on the
 /ui/approvals pages, without trusting arbitrary embedded content (e.g. {{summary}}
 or LLM/agent output) enough to mark the whole message `| safe`."""
-from src.ui import _telegram_html_to_safe_html
+from src.ui.helpers import _telegram_html_to_safe_html
 
 
 def _render(text: str) -> str:

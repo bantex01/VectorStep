@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI
 
 import src.main as main
-import src.ui as ui_module
+import src.ui.pipelines as ui_pipelines_module
 from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep, StepFeedback
 from src.main import app as main_app
@@ -256,7 +256,7 @@ async def test_ui_pipeline_detail_skips_readiness_for_production(tmp_path, db, m
         calls.append(1)
         raise AssertionError("should not be called for a production pipeline")
 
-    monkeypatch.setattr(ui_module, "_gather_readiness_evidence", _stub_gather)
+    monkeypatch.setattr(ui_pipelines_module, "_gather_readiness_evidence", _stub_gather)
 
     pipeline = _pipeline("p", stage="production")
     ui_app.state.pipelines = [pipeline]

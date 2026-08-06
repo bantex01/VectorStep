@@ -5,7 +5,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-import src.ui as ui
+import src.ui.helpers as ui_helpers
 from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep
 from src import live_pricing, pricing
@@ -132,8 +132,8 @@ def _fake_agents(monkeypatch, gw_agents=None, oc_agents=None):
     async def _oc():
         return oc_agents or [], None
 
-    monkeypatch.setattr(ui, "_fetch_vectorstep_gateway_agents", _gw)
-    monkeypatch.setattr(ui, "_fetch_openclaw_agents", _oc)
+    monkeypatch.setattr(ui_helpers, "_fetch_vectorstep_gateway_agents", _gw)
+    monkeypatch.setattr(ui_helpers, "_fetch_openclaw_agents", _oc)
 
 
 async def test_overview_shows_live_pricing_panel_when_enabled_and_matched(db, client, monkeypatch):

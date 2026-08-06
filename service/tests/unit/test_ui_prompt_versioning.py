@@ -17,7 +17,7 @@ from src.db.models import (
 )
 from src.main import app
 from src.pipeline.calibration import CalibrationBin, CalibrationBucket
-from src.ui import _largest_bucket_matching, _most_recent_bucket_matching
+from src.ui.insights_trust import _largest_bucket_matching, _most_recent_bucket_matching
 
 
 @pytest.fixture

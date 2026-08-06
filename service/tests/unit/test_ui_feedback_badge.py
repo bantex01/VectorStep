@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from src.db.database import get_session_factory
 from src.db.models import PipelineRun, RunFeedback
 from src.models.pipeline import PipelineConfig, StepConfig, TriggerConfig
-from src.ui import _feedback_by_run_id
+from src.ui.helpers import _feedback_by_run_id
 from src.ui import router as ui_router
 
 app = FastAPI()
