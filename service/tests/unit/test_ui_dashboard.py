@@ -1,5 +1,5 @@
-"""Tests for the dashboard route: team count card, and the pipeline activity table's
-per-team breakdown / accuracy / token columns."""
+"""Tests for the dashboard route: team count card, the pipeline activity table's
+per-team breakdown / accuracy / token columns, and the live-reference-pricing panel."""
 from datetime import datetime
 
 import httpx
@@ -7,9 +7,11 @@ import pytest
 from fastapi import FastAPI
 
 import src.ui as ui
+from src import live_pricing, pricing
 from src.db.database import get_session_factory
 from src.db.models import PipelineRun, PipelineStep, RunFeedback
 from src.ui import router as ui_router
+from src.utils import utc_now
 
 app = FastAPI()
 app.include_router(ui_router)
@@ -26,6 +28,15 @@ async def client():
 def _reset_team_count():
     yield
     ui.configure(team_count=0)
+
+
+@pytest.fixture(autouse=True)
+def _reset_pricing_and_catalog():
+    original_table = pricing.get_table()
+    original_catalog = live_pricing.get_catalog()
+    yield
+    pricing._table = original_table
+    live_pricing._catalog = original_catalog
 
 
 async def test_dashboard_empty_state_renders(db, client):
@@ -88,3 +99,65 @@ async def test_dashboard_unattributed_team_bucketed(db, client):
 
     assert resp.status_code == 200
     assert "unattributed: 1" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Dashboard — live reference pricing panel (under Backends/MCP servers/Models)
+# ---------------------------------------------------------------------------
+
+_OPENROUTER_CATALOG = [
+    {"id": "anthropic/claude-3.5-sonnet", "pricing": {"prompt": "0.000003", "completion": "0.000015"}},
+]
+
+
+async def _seed_step(sf, run_id: str, model: str, provider: str) -> None:
+    async with sf() as session:
+        session.add(PipelineRun(
+            id=run_id, pipeline_name="p", source="generic", status="completed",
+            normalised_context="{}", raw_payload="{}", team="payments", stage="production",
+            triggered_at=utc_now(), completed_at=utc_now(),
+        ))
+        await session.flush()
+        session.add(PipelineStep(
+            id=f"{run_id}-step-0", run_id=run_id, step_name="s1", step_index=0,
+            executor="gateway", model=model, provider=provider,
+            prompt="", status="completed", executed_at=utc_now(),
+            input_tokens=1000, output_tokens=500,
+        ))
+        await session.commit()
+
+
+async def test_dashboard_pricing_panel_shows_disabled_message_by_default(db, client):
+    pricing.configure({"currency": "USD"})  # live_pricing.enabled defaults False
+
+    resp = await client.get("/ui/")
+
+    assert resp.status_code == 200
+    assert "Live reference pricing" in resp.text
+    assert "Live pricing is disabled" in resp.text
+
+
+async def test_dashboard_pricing_panel_shows_table_when_enabled_and_matched(db, client):
+    pricing.configure({"currency": "USD", "live_pricing": {"enabled": True}})
+    live_pricing._catalog = _OPENROUTER_CATALOG
+    sf = get_session_factory()
+    await _seed_step(sf, "run-priced", "claude-sonnet-4-6", "anthropic")
+
+    resp = await client.get("/ui/")
+
+    assert resp.status_code == 200
+    assert "Live reference pricing" in resp.text
+    assert "Live pricing is disabled" not in resp.text
+    assert "anthropic/claude-3.5-sonnet" in resp.text
+
+
+async def test_dashboard_pricing_panel_shows_no_match_message_when_catalog_not_fetched(db, client):
+    pricing.configure({"currency": "USD", "live_pricing": {"enabled": True}})
+    live_pricing._catalog = None  # enabled, but no fetch has happened yet
+    sf = get_session_factory()
+    await _seed_step(sf, "run-nomatch", "claude-sonnet-4-6", "anthropic")
+
+    resp = await client.get("/ui/")
+
+    assert resp.status_code == 200
+    assert "No configured models matched the OpenRouter catalog yet" in resp.text

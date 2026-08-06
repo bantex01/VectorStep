@@ -815,6 +815,25 @@ async def _run_pipeline(pipeline, normalised, run_id: str | None = None,
 # Status endpoints
 # ---------------------------------------------------------------------------
 
+# VectorStep mark — same asset as VectorStep-Website's public/favicon.svg and
+# base.html's sidebar logo, kept in sync by hand across the three copies.
+_FAVICON_SVG = """<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" fill="none">
+  <g stroke-linecap="round" stroke-width="6">
+    <path d="M15.5 15 L16.8 18.1" stroke="#a5b4fc"/>
+    <path d="M20.1 25.5 L21.4 28.6" stroke="#818cf8"/>
+    <path d="M24.7 36 L26 39.1" stroke="#6366f1"/>
+    <path d="M29.3 46.5 L32 52.7" stroke="#4f46e5"/>
+    <path d="M32 52.7 L48.2 22.1" stroke="#22d3ee"/>
+  </g>
+  <path d="M52.8 13.5 L52.8 23.6 L44.4 19.2 Z" fill="#22d3ee" stroke="#22d3ee" stroke-width="2" stroke-linejoin="round"/>
+</svg>"""
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon():
+    return Response(content=_FAVICON_SVG, media_type="image/svg+xml")
+
+
 @app.get("/health")
 async def health():
     return {

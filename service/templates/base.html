@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}VectorStep{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <style>
@@ -18,23 +19,21 @@
   <!-- Sidebar -->
   <aside class="w-52 shrink-0 bg-zinc-900 border-r border-zinc-800 flex flex-col">
 
-    <!-- Pig + title — pt-8 matches main content py-8 so they sit on the same line -->
+    <!-- Logo + title — pt-8 matches main content py-8 so they sit on the same line -->
     <div class="px-5 pt-8 pb-6">
       <div class="flex items-center gap-2.5">
-        <svg width="38" height="38" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" class="shrink-0">
-          <ellipse cx="15" cy="17" rx="9" ry="11" fill="#e5e7eb"/>
-          <ellipse cx="15" cy="17" rx="5.5" ry="7" fill="#f9fafb"/>
-          <ellipse cx="49" cy="17" rx="9" ry="11" fill="#e5e7eb"/>
-          <ellipse cx="49" cy="17" rx="5.5" ry="7" fill="#f9fafb"/>
-          <circle cx="32" cy="37" r="22" fill="#f3f4f6" stroke="#d1d5db" stroke-width="1"/>
-          <circle cx="24" cy="32" r="3.2" fill="#111827"/>
-          <circle cx="40" cy="32" r="3.2" fill="#111827"/>
-          <circle cx="25.2" cy="30.8" r="1.1" fill="white"/>
-          <circle cx="41.2" cy="30.8" r="1.1" fill="white"/>
-          <ellipse cx="32" cy="45" rx="11" ry="7.5" fill="#e5e7eb" stroke="#d1d5db" stroke-width="0.8"/>
-          <circle cx="28" cy="45" r="2.4" fill="#6b7280"/>
-          <circle cx="36" cy="45" r="2.4" fill="#6b7280"/>
-          <path d="M26 52.5 Q32 57 38 52.5" stroke="#374151" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+        <svg width="38" height="38" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" fill="none" class="shrink-0">
+          <!-- VectorStep mark: four signal beads (S/V/G/D) — the steps — descend the
+               left stroke; the rising cyan vector completes the V and reads as a tick.
+               The mark is only complete when all four signals are present. -->
+          <g stroke-linecap="round" stroke-width="6">
+            <path d="M15.5 15 L16.8 18.1" stroke="#a5b4fc"/>
+            <path d="M20.1 25.5 L21.4 28.6" stroke="#818cf8"/>
+            <path d="M24.7 36 L26 39.1" stroke="#6366f1"/>
+            <path d="M29.3 46.5 L32 52.7" stroke="#4f46e5"/>
+            <path d="M32 52.7 L48.2 22.1" stroke="#22d3ee"/>
+          </g>
+          <path d="M52.8 13.5 L52.8 23.6 L44.4 19.2 Z" fill="#22d3ee" stroke="#22d3ee" stroke-width="2" stroke-linejoin="round"/>
         </svg>
         <div class="flex flex-col leading-tight">
           <span class="font-bold text-zinc-50 tracking-tight text-xl">VectorStep</span>

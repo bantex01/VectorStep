@@ -132,6 +132,52 @@
 
 </div>
 
+<!-- Live reference pricing (OpenRouter) — compact, scrollable; full detail on /ui/insights/overview -->
+<div class="bg-zinc-900 rounded-lg border border-zinc-800 p-5 mb-6">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-sm font-semibold text-zinc-200">Live reference pricing <span class="text-zinc-500 font-normal">(OpenRouter)</span></h2>
+    <div class="flex items-center gap-3">
+      {% if live_pricing_last_refreshed %}
+        <span class="text-xs text-zinc-500">refreshed {{ format_ago(live_pricing_last_refreshed) }}</span>
+      {% endif %}
+      <a href="/ui/insights/overview" class="text-xs text-indigo-400 hover:text-indigo-300">View all →</a>
+    </div>
+  </div>
+  {% if not live_pricing_enabled %}
+    <p class="text-sm text-zinc-500">Live pricing is disabled — set <code class="text-zinc-400">pricing.live_pricing.enabled: true</code> in config to show reference rates here.</p>
+  {% elif live_pricing_rows %}
+    <div class="h-40 overflow-y-auto">
+      <table class="w-full text-sm">
+        <thead class="sticky top-0 bg-zinc-900">
+          <tr class="text-xs text-zinc-500 border-b border-zinc-800">
+            <th class="text-left font-medium pb-1.5 pr-4">Provider</th>
+            <th class="text-left font-medium pb-1.5 pr-4">Model</th>
+            <th class="text-left font-medium pb-1.5 pr-4">Matched OpenRouter model</th>
+            <th class="text-right font-medium pb-1.5 pr-4">Input / Mtok</th>
+            <th class="text-right font-medium pb-1.5">Output / Mtok</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-zinc-800">
+          {% for row in live_pricing_rows %}
+          <tr>
+            <td class="py-1.5 pr-4 text-zinc-300">{{ row.provider }}</td>
+            <td class="py-1.5 pr-4 text-zinc-300 font-mono">{{ row.model }}</td>
+            <td class="py-1.5 pr-4 font-mono {{ 'text-green-400' if row.is_native else 'text-amber-400' }}"
+                title="{% if row.is_native %}Native OpenRouter call — this is the real rate for the exact API used.{% else %}Approximate — fuzzy-matched to a different provider's model.{% endif %}">
+              {{ row.openrouter_id }}
+            </td>
+            <td class="py-1.5 pr-4 text-right text-zinc-300">{{ row.input_per_mtok | format_cost }}</td>
+            <td class="py-1.5 text-right text-zinc-300">{{ row.output_per_mtok | format_cost }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="text-sm text-zinc-500">No configured models matched the OpenRouter catalog yet.</p>
+  {% endif %}
+</div>
+
 <!-- Status breakdown + Runs timeseries -->
 <div class="grid grid-cols-3 gap-6 mb-6">
 

@@ -1547,15 +1547,6 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         rows = await session.execute(q)
         tokens_by_model = rows.all()
 
-        # Distinct (provider, model) pairs actually used — feeds the live-pricing
-        # reference panel below. Not time_range-scoped: "models you use" is a
-        # standing fact about the deployment, not a windowed metric.
-        rows = await session.execute(
-            select(PipelineStep.provider, PipelineStep.model).distinct()
-            .where(PipelineStep.model.is_not(None))
-        )
-        distinct_provider_models = rows.all()
-
         q = (
             select(RunFeedback.outcome, func.count().label("n"))
             .join(PipelineRun, RunFeedback.run_id == PipelineRun.id)
@@ -1703,27 +1694,7 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
     feedback_total = sum(feedback_by_outcome.values())
     feedback_correct = feedback_by_outcome.get("correct", 0)
 
-    # Live-pricing reference panel (SPEC-live-pricing.md) — only rendered when
-    # pricing.live_pricing.enabled and the catalog has actually been fetched at
-    # least once. Never touches real cost; purely informational.
-    live_pricing_rows = []
-    _table = pricing.get_table()
-    if _table and _table.live_pricing.enabled:
-        catalog = live_pricing.get_catalog()
-        for provider, model in distinct_provider_models:
-            rate = live_pricing.resolve_approx_rate(catalog, provider, model)
-            if rate is None:
-                continue
-            live_pricing_rows.append({
-                "provider": provider or "(unknown)",
-                "model": model,
-                "openrouter_id": rate.openrouter_id,
-                "input_per_mtok": rate.input_per_mtok,
-                "output_per_mtok": rate.output_per_mtok,
-                "is_native": provider == "openrouter",
-            })
-        live_pricing_rows.sort(key=lambda r: (r["provider"], r["model"]))
-    live_pricing_last_refreshed = live_pricing.last_refreshed()
+    live_pricing_ctx = await _compute_live_pricing_rows()
 
     return templates.TemplateResponse(request, "insights_overview.html", {
         "time_range": time_range,
@@ -1744,8 +1715,7 @@ async def ui_insights_overview(request: Request, time_range: str = "7d"):
         "llm_calls_chart": llm_calls_chart, "llm_ts": llm_ts,
         "model_token_chart": model_token_chart, "tokens_ts": tokens_ts,
         "tool_chart": tool_chart,
-        "live_pricing_rows": live_pricing_rows,
-        "live_pricing_last_refreshed": live_pricing_last_refreshed,
+        **live_pricing_ctx,
         "active_page": "insights_overview",
     })
 
@@ -4081,6 +4051,45 @@ async def _fetch_vectorstep_gateway_mcp() -> tuple[dict, dict, str | None]:
         return {}, {}, f"Could not reach VectorStep Gateway at {_vectorstep_gateway_base} — is it running?"
 
 
+async def _compute_live_pricing_rows() -> dict:
+    """Live-pricing reference rows (SPEC-live-pricing.md) — shared by the dashboard's
+    compact panel and the full Insights Overview panel. Only rendered when
+    pricing.live_pricing.enabled and the catalog has actually been fetched at least
+    once. Never touches real cost; purely informational.
+    """
+    live_pricing_rows: list[dict] = []
+    _table = pricing.get_table()
+    live_pricing_enabled = bool(_table and _table.live_pricing.enabled)
+    if live_pricing_enabled:
+        sf = get_session_factory()
+        async with sf() as session:
+            rows = await session.execute(
+                select(PipelineStep.provider, PipelineStep.model).distinct()
+                .where(PipelineStep.model.is_not(None))
+            )
+            distinct_provider_models = rows.all()
+        catalog = live_pricing.get_catalog()
+        for provider, model in distinct_provider_models:
+            rate = live_pricing.resolve_approx_rate(catalog, provider, model)
+            if rate is None:
+                continue
+            live_pricing_rows.append({
+                "provider": provider or "(unknown)",
+                "model": model,
+                "openrouter_id": rate.openrouter_id,
+                "input_per_mtok": rate.input_per_mtok,
+                "output_per_mtok": rate.output_per_mtok,
+                "is_native": provider == "openrouter",
+            })
+        live_pricing_rows.sort(key=lambda r: (r["provider"], r["model"]))
+
+    return {
+        "live_pricing_rows": live_pricing_rows,
+        "live_pricing_enabled": live_pricing_enabled,
+        "live_pricing_last_refreshed": live_pricing.last_refreshed(),
+    }
+
+
 async def _dashboard_status_panels() -> dict:
     """Backend/MCP/model status for the dashboard's status panels.
 
@@ -4145,6 +4154,7 @@ async def _dashboard_status_panels() -> dict:
         "mcp_error": mcp_error,
         "models_configured": models_configured,
         "total_model_count": total_model_count,
+        **await _compute_live_pricing_rows(),
     }
 
 
