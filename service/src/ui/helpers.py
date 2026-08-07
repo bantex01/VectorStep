@@ -16,10 +16,13 @@ from sqlalchemy import select
 import asyncio
 import httpx
 import json
+import logging
 import os
 import re
 import yaml
 
+
+logger = logging.getLogger(__name__)
 
 templates = Jinja2Templates(
     directory=os.path.join(os.path.dirname(__file__), "..", "..", "templates")
