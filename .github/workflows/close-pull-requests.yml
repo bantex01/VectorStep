@@ -1,0 +1,53 @@
+# VectorStep is open source but not open contribution (see CONTRIBUTING.md).
+# This workflow thanks anyone who opens a pull request and closes it.
+#
+# It uses `pull_request_target` rather than `pull_request` because PRs from
+# forks — which is every PR this repo will receive — run under `pull_request`
+# with a read-only token and could not close anything.
+#
+# `pull_request_target` grants a write-scoped token to a workflow triggered by
+# a stranger, so it is only safe while this job never checks out or executes
+# the pull request's code. There is deliberately no `actions/checkout` step
+# here. Do not add one.
+
+name: Close pull requests
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    # Only close pull requests opened from someone else's fork. Pull requests
+    # you open yourself — from a branch in this repo, or from your own fork —
+    # are left alone so you can review and merge them normally.
+    if: >-
+      github.event.pull_request.head.repo.full_name != github.repository &&
+      github.event.pull_request.user.login != github.repository_owner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Thank the author and close the pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          CONTRIBUTING_URL: ${{ github.server_url }}/${{ github.repository }}/blob/main/CONTRIBUTING.md
+          ISSUES_URL: ${{ github.server_url }}/${{ github.repository }}/issues
+        run: |
+          gh pr comment "$PR_URL" --body "Thanks for taking the time to open this — genuinely, it's appreciated.
+
+          VectorStep is **open source but not open contribution**, so I'm closing this pull request unmerged. That's not a judgement on the change itself, and I'd have done the same with any PR. It's about keeping the copyright history of the project unambiguous, which matters more to where VectorStep is going than any single patch. [CONTRIBUTING.md]($CONTRIBUTING_URL) explains the reasoning properly.
+
+          What genuinely helps:
+
+          - **Found a bug?** [Open an issue]($ISSUES_URL). Bug reports are read carefully and they're the most useful thing you can send.
+          - **Docs wrong or confusing?** Also an issue — that's treated as a bug.
+          - **Need behaviour VectorStep doesn't have?** Forking is completely fine and the Apache-2.0 licence permits it. You'll get no argument here.
+
+          And if you'd rather just talk to a person about any of it, I'm at **alex@vectorstep.io**.
+
+          Thanks again for the interest in the project."
+
+          gh pr close "$PR_URL"
