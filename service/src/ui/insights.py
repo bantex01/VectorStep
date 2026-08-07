@@ -22,6 +22,7 @@ import json
 import re
 
 from . import helpers
+from .helpers import _CHART_PALETTE
 from .helpers import templates
 
 
