@@ -58,8 +58,10 @@ def _unified_diff_capped(old_text: str, new_text: str, from_label: str, to_label
 # "deduplicated" never actually lands in the `pipeline_runs.status` column.
 # "running" / "completed" / "failed" / "aborted" / "escalated" / "stopped" are
 # set throughout pipeline/runner.py; "interrupted" is set by
-# db/database.py:mark_interrupted_runs when a run is found still "running" after
-# a crash/restart.
+# db/database.py:sweep_and_partition_running_runs when a run is found still
+# "running" after a crash/restart and isn't resumed (SPEC-durable-runs.md) —
+# a resumed run keeps whatever terminal status its resumed execution reaches
+# and never passes through "interrupted".
 ALL_RUN_STATUSES = ("completed", "failed", "aborted", "escalated", "stopped", "running", "interrupted")
 
 # Every value ever assigned to PipelineStep.status — see pipeline/runner.py's

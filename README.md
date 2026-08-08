@@ -1384,7 +1384,7 @@ For agent success rate calculations, `failed` is the only status that counts aga
 | `aborted` | A step aborted due to low confidence |
 | `failed` | A step raised an unhandled error |
 | `running` | Currently in progress |
-| `interrupted` | Service restarted/crashed mid-run — set by the startup sweep, not the runner |
+| `interrupted` | Service restarted/crashed mid-run — set by the startup sweep, not the runner. A pipeline with `durable:` set (§10d) resumes instead, unless the config-fingerprint or age guard rules it out |
 
 ---
 
@@ -1531,6 +1531,31 @@ The step returns `confidence: 1.0` on success so it never triggers low-confidenc
 **When to use `executor: notify` vs `executor: webhook`:**
 - Use `notify` when the target expects a structured JSON payload that you want to compose in YAML (Slack, PagerDuty, Teams, Jira, etc.)
 - Use `webhook` when you need full control over the raw body and prefer rendering it as a `prompt_template` string
+
+---
+
+### 10d. Durability & Resume (`durable:`)
+
+Opt-in, per pipeline: if the process restarts mid-run, a durable pipeline
+resumes from the first incomplete step instead of the run being marked
+`interrupted`. Full explanation (guards, HITL re-arm, partial parallel/fan-out
+resume, the double-fire warning) is on the docs site — see
+[Durability & resume](https://vectorstep.io/docs/operations/durability/).
+
+```yaml
+durable: true   # shorthand for {on_interrupted: rerun}
+# or:
+durable:
+  on_interrupted: rerun | escalate   # default: rerun
+  max_resume_age_seconds: 3600        # default: durability.max_resume_age_seconds (config.yaml), itself 3600
+```
+
+Service-wide default, in `config.yaml`:
+
+```yaml
+durability:
+  max_resume_age_seconds: 3600   # only applies to a pipeline that doesn't set its own
+```
 
 ---
 

@@ -8,7 +8,7 @@ recomputed on every scrape.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, HistogramMetricFamily
 from prometheus_client.registry import Collector
@@ -62,6 +62,10 @@ class MetricsData:
     deterministic_check_counts: list[tuple[str, str, str, int]]
     # (pipeline, step_name, outcome["passed"|"failed"], count) — from pipeline_steps,
     # deterministic_passed IS NOT NULL
+    runs_resumed: list[tuple[str, int]] = field(default_factory=list)
+    # (pipeline, count) — from pipeline_runs, resumed_at IS NOT NULL (SPEC-durable-runs.md).
+    # Defaulted (unlike every field above) so existing MetricsData(...) call sites in
+    # tests that predate this field don't all need updating.
 
 
 async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData:
@@ -81,6 +85,13 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
                 PipelineRun.status == "running", PipelineRun.stage == "production"
             )
         )
+
+        rows = await session.execute(
+            select(PipelineRun.pipeline_name, func.count())
+            .where(PipelineRun.resumed_at.is_not(None), PipelineRun.stage == "production")
+            .group_by(PipelineRun.pipeline_name)
+        )
+        runs_resumed = rows.all()
 
         rows = await session.execute(
             select(
@@ -286,6 +297,7 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
     return MetricsData(
         run_counts=list(run_counts),
         runs_in_progress=runs_in_progress or 0,
+        runs_resumed=list(runs_resumed),
         step_counts=list(step_counts),
         step_durations=step_durations,
         verifier_counts=list(verifier_counts),
@@ -324,6 +336,15 @@ class VectorStepCollector(Collector):
             "Pipeline runs currently in status=running",
             value=data.runs_in_progress,
         )
+
+        runs_resumed = CounterMetricFamily(
+            "vectorstep_runs_resumed_total",
+            "Total runs resumed after a restart (SPEC-durable-runs.md), by pipeline",
+            labels=["pipeline"],
+        )
+        for pipeline, count in data.runs_resumed:
+            runs_resumed.add_metric([pipeline], count)
+        yield runs_resumed
 
         steps_total = CounterMetricFamily(
             "vectorstep_pipeline_steps_total",

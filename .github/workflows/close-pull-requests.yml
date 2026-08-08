@@ -9,6 +9,12 @@
 # a stranger, so it is only safe while this job never checks out or executes
 # the pull request's code. There is deliberately no `actions/checkout` step
 # here. Do not add one.
+#
+# The job below only fires for pull requests that are both from a fork and not
+# authored by the repo owner, so your own PRs are left alone. That owner check
+# reads `github.repository_owner` — if these repos ever move into a GitHub
+# organisation, that value becomes the org name and stops matching your personal
+# login. The fork check still protects you, but revisit the second condition.
 
 name: Close pull requests
 

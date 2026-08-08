@@ -335,6 +335,19 @@ self-report. This is intentional: calibration isn't correcting for a second opin
 correlated errors, it's substituting a measured fact for a guess, and that measured
 fact can point either direction.
 
+### Resumed runs don't distort calibration
+
+A run that resumes after a restart (see docs: Operations > Durability & resume,
+`durable:` on the pipeline) carries the exact same `prompt_hash`/`agent_version`
+bucketing described above for every step, whether that step's output was loaded
+from before the crash or executed fresh after resuming — there's no separate
+"resumed" bucket, and no special-casing in the calibration math at all. The
+config-fingerprint guard is what makes that claim actually hold: resume is
+refused outright if the pipeline's step sequence changed while the run was
+down, precisely so a run is never allowed to finish half under one config and
+half under another. A run either resumes wholly under the config it started
+with, or it doesn't resume.
+
 ---
 
 ## 8. A worked example, start to finish

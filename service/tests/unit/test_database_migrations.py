@@ -12,7 +12,9 @@ from sqlalchemy.exc import IntegrityError
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 
-from src.db.database import create_tables, get_engine, get_session_factory, _run_legacy_shim
+from alembic.script import ScriptDirectory
+
+from src.db.database import create_tables, get_engine, get_session_factory, _alembic_config, _run_legacy_shim
 from src.db.models import Base, PipelineRun
 
 
@@ -27,8 +29,29 @@ async def test_fresh_empty_db_boots_to_head(db):
     assert {
         "alembic_version", "pipeline_runs", "pipeline_steps", "run_feedback",
         "step_prompt_versions", "agent_version_snapshots", "step_feedback",
+        "pending_approvals",
     } <= tables
     assert "ix_pipeline_runs_running_fingerprint" in indexes
+
+
+async def test_durable_runs_columns_and_table_present(db):
+    """0002_durable_runs (SPEC-durable-runs.md): config_fingerprint/resumed_at on
+    pipeline_runs, and the pending_approvals table with its run_id index."""
+    engine = get_engine()
+    async with engine.connect() as conn:
+        run_columns = await conn.run_sync(
+            lambda c: {col["name"] for col in inspect(c).get_columns("pipeline_runs")}
+        )
+        pending_columns = await conn.run_sync(
+            lambda c: {col["name"] for col in inspect(c).get_columns("pending_approvals")}
+        )
+        pending_indexes = await conn.run_sync(
+            lambda c: {idx["name"] for idx in inspect(c).get_indexes("pending_approvals")}
+        )
+
+    assert {"config_fingerprint", "resumed_at"} <= run_columns
+    assert {"token", "run_id", "step_name", "pipeline_name", "message", "team", "stage", "created_at"} <= pending_columns
+    assert "ix_pending_approvals_run_id" in pending_indexes
 
 
 async def test_running_fingerprint_partial_index_enforces(db):
@@ -75,10 +98,15 @@ async def test_legacy_adoption_stamps_baseline_without_losing_data(raw_db):
 
     await create_tables()
 
+    # Stamped at head, not the literal "0001_baseline": the shim's create_all()
+    # builds tables matching *current* db/models.py (== head, per the drift test
+    # below), so re-running 0001+ on top of that would replay DDL for columns
+    # create_all already added.
+    head = ScriptDirectory.from_config(_alembic_config()).get_current_head()
     async with engine.connect() as conn:
         result = await conn.exec_driver_sql("SELECT version_num FROM alembic_version")
         stamped_at = result.first()[0]
-    assert stamped_at == "0001_baseline"
+    assert stamped_at == head
 
     async with session_factory() as session:
         run = await session.get(PipelineRun, "pre-migration-run")

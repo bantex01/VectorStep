@@ -40,6 +40,16 @@ class PipelineRun(Base):
     parent_run_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # set for sub-pipeline runs
     team: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # owning team, from auth token resolution
     stage: Mapped[str] = mapped_column(String, nullable=False, default="production", index=True)  # "testing" | "production" — see PipelineConfig.stage
+    # SHA-256[:12] of the pipeline's step sequence (name/executor/agent/model per
+    # StepConfig) at trigger time, populated for every run regardless of `durable`.
+    # Compared against the current config's fingerprint at resume time — a mismatch
+    # means the pipeline changed while the run was down, so it's marked `interrupted`
+    # rather than resumed under different semantics (SPEC-durable-runs.md §2).
+    config_fingerprint: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Set when this run was resumed at least once after a restart. Drives
+    # vectorstep_runs_resumed_total (metrics.py) and is never cleared once set, even
+    # across a second resume of the same run.
+    resumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     steps: Mapped[list["PipelineStep"]] = relationship(
         "PipelineStep", back_populates="run", order_by="PipelineStep.step_index"
@@ -102,6 +112,26 @@ class PipelineStep(Base):
     cost: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     run: Mapped["PipelineRun"] = relationship("PipelineRun", back_populates="steps")
+
+
+class PendingApproval(Base):
+    """Durable mirror of executors/human.py's in-memory `_pending_approvals`/
+    `_pending_meta` dicts — written when a HITL approval request is sent and deleted
+    when it resolves normally (approved/rejected/timed out). A row that survives to
+    the next startup means the process died while a human decision was outstanding;
+    resume re-arms the wait against the same token instead of re-sending the message
+    (SPEC-durable-runs.md §2 "HITL steps resume as waiting, not re-executed").
+    """
+    __tablename__ = "pending_approvals"
+
+    token: Mapped[str] = mapped_column(String, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String, ForeignKey("pipeline_runs.id"), nullable=False, index=True)
+    step_name: Mapped[str] = mapped_column(String, nullable=False)
+    pipeline_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    team: Mapped[str | None] = mapped_column(String, nullable=True)
+    stage: Mapped[str] = mapped_column(String, nullable=False, default="production")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
 
 
 class RunFeedback(Base):

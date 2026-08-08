@@ -12,7 +12,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker, create_async_engine
 
 from ..utils import utc_now
-from .models import Base, PipelineRun
+from .models import Base, PendingApproval, PipelineRun
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +60,13 @@ async def create_tables(auto_migrate: bool = True) -> None:
       revisions, rather than risk the app running against a stale schema.
     - Behind head and auto_migrate is True: an empty DB (no `pipeline_runs`)
       upgrades from scratch; a DB with tables but no `alembic_version` (every
-      pre-Alembic deployment) runs the legacy shim first to bring it to
-      exactly the 0001_baseline shape, stamps it there, then upgrades — after
-      which every DB, however it started, is a normal `alembic upgrade head`.
+      pre-Alembic deployment) runs the legacy shim first. The shim's
+      `Base.metadata.create_all` builds tables matching *current* db/models.py —
+      which the drift test below enforces is always exactly the `head` schema —
+      so the DB is stamped at `head`, not the literal "0001_baseline", before the
+      (now no-op) upgrade. Stamping at a fixed "0001_baseline" would be correct
+      only while that was the sole revision; it broke the moment a second
+      revision touched a column the shim's create_all already creates.
     """
     assert _engine is not None, "Database not initialised — call init_db() first"
 
@@ -88,7 +92,7 @@ async def create_tables(auto_migrate: bool = True) -> None:
     if current is None and has_pipeline_runs:
         async with _engine.begin() as conn:
             await _run_legacy_shim(conn)
-        await asyncio.to_thread(command.stamp, cfg, "0001_baseline")
+        await asyncio.to_thread(command.stamp, cfg, head)
 
     await asyncio.to_thread(command.upgrade, cfg, "head")
 
@@ -180,32 +184,97 @@ _INDEX_MIGRATIONS = [
 ]
 
 
-async def mark_interrupted_runs() -> int:
-    """Sweep runs left in 'running' state after a crash or forced restart.
+def _append_log_event(logs: list, level: str, event: str, msg: str) -> None:
+    logs.append({
+        "ts": utc_now().isoformat(timespec="milliseconds") + "Z",
+        "level": level,
+        "event": event,
+        "msg": msg,
+    })
 
-    A clean shutdown never leaves a run in 'running' — any such row on startup
-    means the process died mid-run. Mark it 'interrupted' so it stops showing
-    as in-progress forever and doesn't skew success-rate stats.
+
+async def sweep_and_partition_running_runs(
+    pipelines: "list[PipelineConfig]",
+    default_max_resume_age_seconds: int = 3600,
+) -> "list[tuple[PipelineConfig, NormalisedContext, str]]":
+    """Startup sweep, replacing the old mark_interrupted_runs() (SPEC-durable-runs.md
+    §2 "Resume happens in lifespan() startup, replacing part of the
+    mark_interrupted_runs() sweep").
+
+    A clean shutdown never leaves a run in 'running' — any such row on startup means
+    the process died mid-run. Every such row is partitioned:
+      - durable pipeline, config unchanged, within max_resume_age_seconds -> handed
+        back as a (pipeline, normalised_context, run_id) tuple, ready to feed straight
+        into the same asyncio.create_task(_run_pipeline(..., resume=True)) path a
+        fresh run uses. The row itself is left exactly as-is (still 'running' — it
+        never left that state, so the dedup partial-unique index keeps suppressing
+        duplicate webhooks for it throughout the outage, same as before the crash).
+      - everything else -> marked 'interrupted', exactly as mark_interrupted_runs
+        always did, with a run-log event naming *why* it wasn't resumed when that's
+        knowable (resume_skipped_config_changed / resume_skipped_max_age_exceeded) on
+        top of the unconditional run_interrupted event.
     """
+    from ..models.context import NormalisedContext
+    from ..models.pipeline import PipelineConfig, pipeline_config_fingerprint
+
     assert _session_factory is not None, "Database not initialised — call init_db() first"
+    by_name: dict[str, PipelineConfig] = {p.name: p for p in pipelines}
+    resumable: list[tuple[PipelineConfig, NormalisedContext, str]] = []
+
     async with _session_factory() as session:
         result = await session.execute(
             select(PipelineRun).where(PipelineRun.status == "running")
         )
         runs = result.scalars().all()
+
         for run in runs:
+            pipeline = by_name.get(run.pipeline_name)
+            skip_event: str | None = None
+            skip_msg = ""
+
+            if pipeline is not None and pipeline.durable is not None:
+                current_fp = pipeline_config_fingerprint(pipeline)
+                if run.config_fingerprint != current_fp:
+                    skip_event = "resume_skipped_config_changed"
+                    skip_msg = (
+                        "Pipeline config changed while this run was down — resuming "
+                        "under different semantics would poison calibration data."
+                    )
+                else:
+                    max_age = pipeline.durable.max_resume_age_seconds
+                    if max_age is None:
+                        max_age = default_max_resume_age_seconds
+                    age_seconds = (utc_now() - run.triggered_at).total_seconds()
+                    if age_seconds > max_age:
+                        skip_event = "resume_skipped_max_age_exceeded"
+                        skip_msg = (
+                            f"Run has been down for {age_seconds:.0f}s, exceeding "
+                            f"durable.max_resume_age_seconds={max_age}s — not resumed."
+                        )
+                    else:
+                        try:
+                            normalised = NormalisedContext.model_validate_json(run.normalised_context)
+                        except Exception:
+                            skip_event = "resume_skipped_config_changed"
+                            skip_msg = "Persisted context could not be reconstructed — not resumed."
+                        else:
+                            resumable.append((pipeline, normalised, run.id))
+                            continue
+
+            logs = json.loads(run.logs) if run.logs else []
+            if skip_event:
+                _append_log_event(logs, "warn", skip_event, skip_msg)
             run.status = "interrupted"
             run.completed_at = utc_now()
-            logs = json.loads(run.logs) if run.logs else []
-            logs.append({
-                "ts": utc_now().isoformat(timespec="milliseconds") + "Z",
-                "level": "warn",
-                "event": "run_interrupted",
-                "msg": "Service restarted while this run was in progress.",
-            })
+            _append_log_event(
+                logs, "warn", "run_interrupted",
+                "Service restarted while this run was in progress.",
+            )
             run.logs = json.dumps(logs)
+
         await session.commit()
-        return len(runs)
+
+    return resumable
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
@@ -222,3 +291,68 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 def get_engine():
     assert _engine is not None, "Database not initialised — call init_db() first"
     return _engine
+
+
+# ---------------------------------------------------------------------------
+# Pending approvals — durable mirror of executors/human.py's in-memory
+# _pending_approvals/_pending_meta dicts (SPEC-durable-runs.md §2). Unlike the
+# functions above, these degrade to a no-op/empty result rather than asserting
+# when no DB is configured: executors/human.py is exercised directly by unit
+# tests that never call init_db(), and its own HITL wait logic works with zero
+# DB dependency today — this must stay true when no session_factory exists.
+# ---------------------------------------------------------------------------
+
+
+async def save_pending_approval(
+    token: str, run_id: str, step_name: str, pipeline_name: str | None,
+    message: str, team: str | None, stage: str,
+) -> None:
+    if _session_factory is None:
+        return
+    async with _session_factory() as session:
+        session.add(PendingApproval(
+            token=token, run_id=run_id, step_name=step_name, pipeline_name=pipeline_name,
+            message=message, team=team, stage=stage,
+        ))
+        await session.commit()
+
+
+async def delete_pending_approval(token: str) -> None:
+    if _session_factory is None:
+        return
+    async with _session_factory() as session:
+        row = await session.get(PendingApproval, token)
+        if row is not None:
+            await session.delete(row)
+            await session.commit()
+
+
+async def get_pending_approval(token: str) -> PendingApproval | None:
+    if _session_factory is None:
+        return None
+    async with _session_factory() as session:
+        return await session.get(PendingApproval, token)
+
+
+async def mark_run_resumed(run_id: str) -> None:
+    """Stamp resumed_at the first time a run is resumed (SPEC-durable-runs.md) —
+    never cleared, and never overwritten on a second resume of the same run.
+    Drives vectorstep_runs_resumed_total in metrics.py.
+    """
+    if _session_factory is None:
+        return
+    async with _session_factory() as session:
+        run = await session.get(PipelineRun, run_id)
+        if run is not None and run.resumed_at is None:
+            run.resumed_at = utc_now()
+            await session.commit()
+
+
+async def get_pending_approvals_for_run(run_id: str) -> list[PendingApproval]:
+    if _session_factory is None:
+        return []
+    async with _session_factory() as session:
+        result = await session.execute(
+            select(PendingApproval).where(PendingApproval.run_id == run_id)
+        )
+        return list(result.scalars().all())

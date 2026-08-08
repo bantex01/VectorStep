@@ -1,3 +1,4 @@
+import hashlib
 from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -377,6 +378,19 @@ class BudgetConfig(BaseModel):
         return self
 
 
+class DurableConfig(BaseModel):
+    """Opt-in resume-after-restart behaviour for this pipeline (SPEC-durable-runs.md).
+
+    on_interrupted governs the step that was in flight when the process died —
+    completed steps are never re-executed, only loaded from their persisted output.
+    """
+    on_interrupted: Literal["rerun", "escalate"] = "rerun"
+    # None = fall back to the service-wide durability.max_resume_age_seconds in
+    # config.yaml (itself defaulting to 3600) — see database.py's
+    # sweep_and_partition_running_runs, the only place this is consulted.
+    max_resume_age_seconds: int | None = None
+
+
 class ContextTemplateConfig(BaseModel):
     include: list[str] = Field(default_factory=list)
 
@@ -438,6 +452,16 @@ class PipelineConfig(BaseModel):
     schedule: ScheduleConfig | None = None
     budget: BudgetConfig | None = None
     readiness: ReadinessConfig | None = None
+    durable: DurableConfig | None = None  # None = not durable; restart always -> interrupted
+
+    @field_validator("durable", mode="before")
+    @classmethod
+    def _coerce_durable(cls, v: object) -> object:
+        """Accept the boolean shorthand `durable: true` (-> on_interrupted: rerun) as
+        well as the block form `durable: {on_interrupted: escalate}`."""
+        if isinstance(v, bool):
+            return {"on_interrupted": "rerun"} if v else None
+        return v
 
     @field_validator("notifications", mode="before")
     @classmethod
@@ -464,3 +488,37 @@ class PipelineConfig(BaseModel):
             action: [item] if isinstance(item, dict) else item
             for action, item in v.items()
         }
+
+
+def pipeline_config_fingerprint(pipeline: PipelineConfig) -> str:
+    """12-char SHA-256 of the pipeline's step sequence (name, executor, agent) —
+    populated on every PipelineRun at trigger time and compared against the
+    currently-loaded pipeline at resume time (SPEC-durable-runs.md §2). A mismatch
+    means the pipeline config changed while the run was down; the run is marked
+    `interrupted` rather than resumed under different semantics.
+
+    Deliberately coarse — same three dimensions as ui/pipelines.py's post-hoc
+    _config_fingerprint (computed from executed steps for the calibration-comparison
+    UI), but derived from the loaded config so it's available before any step runs.
+    Model isn't included: StepConfig has no static `model` field, it's resolved by
+    the executor at call time. A step's prompt_template isn't included either — that
+    already has its own, finer-grained identity via prompt_hash/agent_version, used
+    for calibration bucketing; folding it in here would block resume on a prompt
+    wording tweak that doesn't change what the run needs to reconstruct.
+    """
+    key: list[tuple[str, str, str]] = []
+    for step in pipeline.steps:
+        if isinstance(step, ParallelGroupConfig):
+            for branch in step.parallel.steps:
+                key.append((
+                    f"{step.parallel.name}/{branch.name}", branch.executor,
+                    branch.executor_config.get("agent", ""),
+                ))
+        elif isinstance(step, FanOutGroupConfig):
+            key.append((
+                step.fan_out.name, step.fan_out.executor,
+                step.fan_out.executor_config.get("agent", ""),
+            ))
+        else:
+            key.append((step.name, step.executor, step.executor_config.get("agent", "")))
+    return hashlib.sha256(str(tuple(key)).encode()).hexdigest()[:12]

@@ -7,6 +7,7 @@ import uuid
 import httpx
 from jinja2 import Environment, Undefined
 
+from ..db.database import delete_pending_approval, get_pending_approval, save_pending_approval
 from ..models.llm import LLMOutput
 from ..models.pipeline import StepConfig
 from ..utils import utc_now
@@ -91,6 +92,28 @@ def get_pending_for_run(run_id: str) -> list[dict]:
         for token, meta in _pending_meta.items()
         if meta.get("run_id") == run_id
     ]
+
+
+async def _best_effort(coro, what: str) -> None:
+    """Durability (SPEC-durable-runs.md) is a best-effort layer on top of the
+    approve/reject flow that has worked with zero DB dependency since before this
+    spec — a transient DB error here (or a stale session_factory left behind by an
+    unrelated test that called init_db() and never tore it down) must never break an
+    approval that would otherwise have gone through fine. Worst case on failure: this
+    approval simply won't survive a restart, exactly like before this spec existed.
+    """
+    try:
+        await coro
+    except Exception:
+        logger.warning("Could not %s (continuing without durability)", what, exc_info=True)
+
+
+async def _best_effort_pending_approval(token: str) -> "PendingApproval | None":
+    try:
+        return await get_pending_approval(token)
+    except Exception:
+        logger.warning("Could not load persisted pending approval token=%s", token, exc_info=True)
+        return None
 
 
 def resolve_approval(token: str, approved: bool) -> bool:
@@ -301,6 +324,7 @@ async def request_decision(
     team: str | None,
     testing: bool,
     timeout: int = _DEFAULT_TIMEOUT,
+    resume_token: str | None = None,
 ) -> tuple[bool | None, str]:
     """Shared approval-request flow — used by both HumanExecutor and `human`-type
     deterministic checks. Returns (decision, token):
@@ -311,11 +335,32 @@ async def request_decision(
                  so a forgotten testing approval never wedges a pipeline)
     Callers decide what None means for them — HumanExecutor raises on it (preserving
     its exact existing behaviour); a deterministic check treats it as failed.
+
+    resume_token: set by the runner's resume path (SPEC-durable-runs.md §2) when this
+    call is re-arming a wait that was already outstanding when the process died — the
+    message was already delivered to Telegram/Slack/Teams before the crash, so it must
+    NOT be re-sent; this just re-registers the same token's future so the approval
+    buttons already in the human's chat still resolve it. The persisted PendingApproval
+    row (looked up here, not trusted from the caller) is the source of truth for the
+    message/step/team/stage — whatever the caller passed for those is ignored.
     """
-    token = str(uuid.uuid4())
+    created_at = utc_now()
+    if resume_token:
+        token = resume_token
+        persisted = await _best_effort_pending_approval(resume_token)
+        if persisted is not None:
+            message = persisted.message
+            step_name = persisted.step_name
+            pipeline_name = persisted.pipeline_name
+            team = persisted.team
+            testing = persisted.stage == "testing"
+            created_at = persisted.created_at
+    else:
+        token = str(uuid.uuid4())
+
     channel = None
     channel_name = None
-    if not testing:
+    if not testing and not resume_token:
         channel_cfg = _resolve_channel_config(team)
         if not channel_cfg:
             raise RuntimeError(
@@ -336,11 +381,24 @@ async def request_decision(
         "run_id": run_id,
         "team": team,
         "stage": "testing" if testing else "production",
-        "created_at": utc_now(),
+        "created_at": created_at,
     }
+    if not resume_token:
+        await _best_effort(
+            save_pending_approval(
+                token=token, run_id=run_id, step_name=step_name, pipeline_name=pipeline_name,
+                message=message, team=team, stage="testing" if testing else "production",
+            ),
+            f"persist pending approval for step={step_name} token={token}",
+        )
 
     try:
-        if testing:
+        if resume_token:
+            logger.warning(
+                "Re-arming human approval after restart: step=%s token=%s — message not "
+                "re-sent, it was already delivered before the crash", step_name, token,
+            )
+        elif testing:
             logger.info(
                 "[testing] Human approval NOT sent externally; awaiting UI decision: "
                 "step=%s token=%s", step_name, token,
@@ -365,6 +423,7 @@ async def request_decision(
     finally:
         _pending_approvals.pop(token, None)
         _pending_meta.pop(token, None)
+        await _best_effort(delete_pending_approval(token), f"delete pending approval token={token}")
 
 
 class HumanExecutor(BaseExecutor):
@@ -396,6 +455,7 @@ class HumanExecutor(BaseExecutor):
             team=team,
             testing=testing,
             timeout=timeout,
+            resume_token=context.get("_resume_pending_token"),
         )
 
         if decision is None:

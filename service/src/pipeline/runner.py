@@ -16,7 +16,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..artifacts.store import ArtifactStore
-from ..db.models import PipelineRun, PipelineStep
+from ..db.database import get_pending_approvals_for_run, mark_run_resumed
+from ..db.models import PendingApproval, PipelineRun, PipelineStep
 from ..executors.base import BaseExecutor, LLMParseError
 from ..models.context import NormalisedContext
 from ..models.llm import LLMOutput
@@ -39,6 +40,7 @@ from ..models.pipeline import (
     StepConfig,
     VerifierConfig,
     WebhookCheckConfig,
+    pipeline_config_fingerprint,
 )
 from ..notifications.telegram import TelegramNotifier
 from .context import build_context
@@ -221,6 +223,13 @@ class StepResult:
     grounding_output_tokens: int | None = None
     trust_report: dict | None = None           # full TrustReport (§5e), or None
     deterministic_passed: bool | None = None   # None = no checks declared; else all-checks-passed
+    # Resume-only (SPEC-durable-runs.md): True when this step/group actually had
+    # in-flight work at resume time (a fresh execution, an escalate-on-resume, or a
+    # HITL re-arm) — as opposed to being fully persisted already, or not yet reached.
+    # Lets the resume loop consume its single on_interrupted policy application at
+    # the right step even when a group's completeness can't be known ahead of
+    # executing it (a fan-out's branch count depends on re-resolving `over`).
+    resume_had_gap: bool = False
 
 
 @dataclass
@@ -386,6 +395,7 @@ class PipelineRunner:
         from_step: str | None = None,
         initial_step_outputs: "dict[str, LLMOutput] | None" = None,
         parent_run_id: str | None = None,
+        resume: bool = False,
     ) -> PipelineRunResult:
         run_id = run_id or str(uuid.uuid4())
         run_log: _LiveRunLog = _LiveRunLog(run_id)
@@ -410,6 +420,7 @@ class PipelineRunner:
                 from_step=from_step,
                 initial_step_outputs=initial_step_outputs,
                 parent_run_id=parent_run_id,
+                resume=resume,
             )
             run_span.set_attribute("vectorstep.run.status", result.status)
             if result.abort_reason:
@@ -428,6 +439,7 @@ class PipelineRunner:
         from_step: str | None = None,
         initial_step_outputs: "dict[str, LLMOutput] | None" = None,
         parent_run_id: str | None = None,
+        resume: bool = False,
     ) -> PipelineRunResult:
         logger.info("Pipeline run started: id=%s pipeline=%s", run_id, pipeline.name)
         _log_event(run_log, "info", "run_started",
@@ -439,17 +451,53 @@ class PipelineRunner:
             _log_event(run_log, "info", "rerun_started",
                        f"Re-run from step: {from_step} ({n} prior step output(s) replayed)")
 
-        created = await self._db_create_run(run_id, pipeline, normalised, parent_run_id=parent_run_id)
-        if not created:
-            _log_event(run_log, "warn", "run_deduplicated",
-                       "Duplicate run rejected at insert time — another run is already "
-                       "in flight for this pipeline+fingerprint.")
-            run_events.publish_complete(run_id, "deduplicated")
-            return PipelineRunResult(
-                run_id=run_id,
-                pipeline_name=pipeline.name,
-                status="deduplicated",
+        persisted_branches: dict[str, dict[str, LLMOutput]] = {}
+        plain_persisted_names: set[str] = set()
+        pending_by_step: dict[str, PendingApproval] = {}
+
+        if resume:
+            # The run row already exists and is still 'running' — it never left that
+            # state across the outage, so re-inserting would either collide on the
+            # primary key or (worse) be mistaken for a dedup rejection. Load what
+            # already completed instead (SPEC-durable-runs.md).
+            persisted_rows = await self._db_load_run_steps(run_id)
+            (
+                step_outputs, persisted_branches, plain_persisted_names,
+                accumulated_tokens, accumulated_cost,
+            ) = self._reconstruct_resume_state(pipeline, persisted_rows)
+            for pending in await get_pending_approvals_for_run(run_id):
+                pending_by_step[pending.step_name] = pending
+
+            n_skipped = len(plain_persisted_names) + sum(len(v) for v in persisted_branches.values())
+            on_interrupted = pipeline.durable.on_interrupted if pipeline.durable else "rerun"
+            logger.warning(
+                "Resuming run after restart: id=%s pipeline=%s (%d step(s)/branch(es) "
+                "already persisted, on_interrupted=%s)",
+                run_id, pipeline.name, n_skipped, on_interrupted,
             )
+            _log_event(
+                run_log, "warn", "run_resumed",
+                f"Run resumed after restart — {n_skipped} step(s)/branch(es) already "
+                "completed before the crash were loaded from the database, not "
+                f"re-executed (on_interrupted={on_interrupted}).",
+                steps_skipped=n_skipped, on_interrupted=on_interrupted,
+            )
+            await mark_run_resumed(run_id)
+        else:
+            created = await self._db_create_run(run_id, pipeline, normalised, parent_run_id=parent_run_id)
+            if not created:
+                _log_event(run_log, "warn", "run_deduplicated",
+                           "Duplicate run rejected at insert time — another run is already "
+                           "in flight for this pipeline+fingerprint.")
+                run_events.publish_complete(run_id, "deduplicated")
+                return PipelineRunResult(
+                    run_id=run_id,
+                    pipeline_name=pipeline.name,
+                    status="deduplicated",
+                )
+            step_outputs = dict(initial_step_outputs or {})
+            accumulated_tokens = 0
+            accumulated_cost = 0.0
 
         result = PipelineRunResult(
             run_id=run_id,
@@ -457,10 +505,13 @@ class PipelineRunner:
             status="completed",
         )
 
-        step_outputs: dict[str, LLMOutput] = dict(initial_step_outputs or {})
-        skipping = from_step is not None
-        accumulated_tokens = 0
-        accumulated_cost = 0.0
+        skipping = (not resume) and from_step is not None
+        # Consumed the first time resume finds a step/group that genuinely had
+        # in-flight work — see StepResult.resume_had_gap. Only that one step/group
+        # gets durable.on_interrupted applied; everything after it executes exactly
+        # like a fresh run, since by construction nothing beyond it could have
+        # partially executed (single-writer, sequential — SPEC-durable-runs.md §2).
+        resume_gap_handled = False
 
         for index, step in enumerate(pipeline.steps):
             if isinstance(step, ParallelGroupConfig):
@@ -489,7 +540,14 @@ class PipelineRunner:
                 else bool(pipeline.budget and pipeline.budget.include_approx_cost)
             )
 
-            # Skip steps before from_step when replaying a re-run
+            # A plain step with its own terminal row is done — nothing left to decide
+            # about it, its output is already in step_outputs.
+            if resume and isinstance(step, StepConfig) and step_name in plain_persisted_names:
+                continue
+
+            # Skip steps before from_step when replaying a manual rerun (never set
+            # together with resume=True — see main.py's /runs/{id}/rerun vs. the
+            # startup resume scheduler).
             if skipping:
                 if step_name == from_step:
                     skipping = False
@@ -506,6 +564,18 @@ class PipelineRunner:
                                step=step_name)
                     continue
 
+            # Only the single step/group immediately after the last fully-persisted
+            # unit is a genuine resume gap — durable.on_interrupted only ever applies
+            # there. A group's completeness can't always be known ahead of executing
+            # it (fan-out's branch count depends on re-resolving `over`), so this is
+            # offered speculatively and only "spent" (resume_gap_handled=True) once
+            # the call actually reports in-flight work via resume_had_gap.
+            is_gap_candidate = resume and not resume_gap_handled
+            gap_on_interrupted = (
+                (pipeline.durable.on_interrupted if pipeline.durable else "rerun")
+                if is_gap_candidate else None
+            )
+
             if isinstance(step, ParallelGroupConfig):
                 step_result = await self._run_parallel_group(
                     group=step.parallel,
@@ -515,6 +585,8 @@ class PipelineRunner:
                     run_id=run_id,
                     step_outputs=step_outputs,
                     run_log=run_log,
+                    completed_branches=persisted_branches.get(step_name) if resume else None,
+                    on_interrupted=gap_on_interrupted,
                 )
                 # Branches saved inside _run_parallel_group; register each individually
                 # so downstream steps can reference {{steps.branch_name.field}}
@@ -530,23 +602,68 @@ class PipelineRunner:
                     run_id=run_id,
                     step_outputs=step_outputs,
                     run_log=run_log,
+                    completed_branches=persisted_branches.get(step_name) if resume else None,
+                    on_interrupted=gap_on_interrupted,
                 )
                 for branch_name, branch_output in step_result.branch_outputs.items():
                     if branch_output:
                         step_outputs[branch_name] = branch_output
             else:
-                step_result = await self._run_step(
-                    step=step,
-                    index=index * 1000,
-                    pipeline=pipeline,
-                    normalised=normalised,
-                    run_id=run_id,
-                    step_outputs=step_outputs,
-                    run_log=run_log,
-                )
+                pending = pending_by_step.get(step_name) if is_gap_candidate else None
+                if is_gap_candidate and pending is not None and step.executor == "human":
+                    # HITL steps resume as *waiting*, not re-executed, regardless of
+                    # on_interrupted — the approval request was already delivered to
+                    # Telegram/Slack/Teams before the crash (SPEC-durable-runs.md §2).
+                    step_result = await self._run_step(
+                        step=step, index=index * 1000, pipeline=pipeline, normalised=normalised,
+                        run_id=run_id, step_outputs=step_outputs, run_log=run_log,
+                        resume_pending_token=pending.token,
+                    )
+                    step_result.resume_had_gap = True
+                elif is_gap_candidate and gap_on_interrupted == "escalate":
+                    _log_event(
+                        run_log, "warn", "resume_step_escalated",
+                        f"Step escalated on resume (durable.on_interrupted=escalate): "
+                        f"{step.name} — it was in flight when the process died and was "
+                        "not re-executed",
+                        step=step.name,
+                    )
+                    step_result = StepResult(
+                        step_name=step.name,
+                        step_index=index * 1000,
+                        status="escalated",
+                        output=LLMOutput(
+                            confidence=0.0,
+                            summary=(
+                                f"Step '{step.name}' escalated on resume "
+                                "(durable.on_interrupted=escalate) — it was in flight "
+                                "when the process died"
+                            ),
+                            next_step_context="", raw_response={},
+                        ),
+                        verifier_output=None,
+                        effective_confidence=0.0,
+                        duration_ms=0,
+                        resume_had_gap=True,
+                    )
+                else:
+                    step_result = await self._run_step(
+                        step=step,
+                        index=index * 1000,
+                        pipeline=pipeline,
+                        normalised=normalised,
+                        run_id=run_id,
+                        step_outputs=step_outputs,
+                        run_log=run_log,
+                    )
+                    if is_gap_candidate:
+                        step_result.resume_had_gap = True
                 await self._db_save_step(run_id, step, step_result)
                 if step_result.output:
                     step_outputs[step.name] = step_result.output
+
+            if is_gap_candidate and step_result.resume_had_gap:
+                resume_gap_handled = True
 
             result.steps.append(step_result)
 
@@ -707,6 +824,7 @@ class PipelineRunner:
         run_id: str,
         step_outputs: dict[str, LLMOutput],
         run_log: list,
+        resume_pending_token: str | None = None,
     ) -> StepResult:
         agent = step.executor_config.get("agent", "")
         with tracer.start_as_current_span(
@@ -718,7 +836,8 @@ class PipelineRunner:
             },
         ) as span:
             result = await self._run_step_impl(
-                step, index, pipeline, normalised, run_id, step_outputs, run_log
+                step, index, pipeline, normalised, run_id, step_outputs, run_log,
+                resume_pending_token=resume_pending_token,
             )
             self._set_step_span_attributes(span, result, prompt_template=step.prompt_template)
             return result
@@ -732,6 +851,7 @@ class PipelineRunner:
         run_id: str,
         step_outputs: dict[str, LLMOutput],
         run_log: list,
+        resume_pending_token: str | None = None,
     ) -> StepResult:
         start_ms = int(time.time() * 1000)
 
@@ -760,6 +880,11 @@ class PipelineRunner:
                 artifact_store=self._artifact_store,
             )
             self._inject_vectorstep_context(ctx, normalised)
+            if resume_pending_token:
+                # HumanExecutor reads this to re-arm the same token's wait instead of
+                # sending a new approval request (SPEC-durable-runs.md §2) — the
+                # message was already delivered to Telegram/Slack/Teams pre-crash.
+                ctx["_resume_pending_token"] = resume_pending_token
             if loop_cfg:
                 ctx["loop"] = {
                     "iteration": iteration,
@@ -1160,6 +1285,8 @@ class PipelineRunner:
         run_id: str,
         step_outputs: dict[str, LLMOutput],
         run_log: list,
+        completed_branches: "dict[str, LLMOutput] | None" = None,
+        on_interrupted: str | None = None,
     ) -> StepResult:
         with tracer.start_as_current_span(
             group.name,
@@ -1170,7 +1297,8 @@ class PipelineRunner:
             },
         ) as span:
             result = await self._run_parallel_group_impl(
-                group, index, pipeline, normalised, run_id, step_outputs, run_log
+                group, index, pipeline, normalised, run_id, step_outputs, run_log,
+                completed_branches=completed_branches, on_interrupted=on_interrupted,
             )
             self._set_step_span_attributes(span, result)
             return result
@@ -1184,23 +1312,80 @@ class PipelineRunner:
         run_id: str,
         step_outputs: dict[str, LLMOutput],
         run_log: list,
+        completed_branches: "dict[str, LLMOutput] | None" = None,
+        on_interrupted: str | None = None,
     ) -> StepResult:
         start_ms = int(time.time() * 1000)
+        completed_branches = completed_branches or {}
+        # Only the branches NOT already persisted from before a restart get a fresh
+        # coroutine (SPEC-durable-runs.md) — every other branch is already saved
+        # (_db_save_branch, below, is only ever called for branches actually run
+        # here), so a resumed run never re-fires a side-effecting branch that
+        # completed pre-crash. When nothing was persisted (completed_branches empty,
+        # the ordinary case), this is identical to a fresh run.
+        missing = [b for b in group.steps if b.name not in completed_branches]
+
         ctx = await build_context(
             pipeline, normalised, run_id, group.name, step_outputs,
             artifact_store=self._artifact_store,
         )
         self._inject_vectorstep_context(ctx, normalised)
 
-        logger.info(
-            "Executing parallel group '%s' — %d branch(es)", group.name, len(group.steps)
-        )
+        if on_interrupted == "escalate" and missing:
+            _log_event(
+                run_log, "warn", "resume_step_escalated",
+                f"Parallel group escalated on resume (durable.on_interrupted=escalate): "
+                f"{group.name} — {len(missing)}/{len(group.steps)} branch(es) were in "
+                "flight when the process died and were not re-executed",
+                group=group.name,
+            )
+            confidences = [o.confidence for o in completed_branches.values()]
+            weights = [b.weight for b in group.steps if b.name in completed_branches]
+            effective_confidence = (
+                self._join_confidences(group.join, confidences, weights) if confidences else 0.0
+            )
+            _group_tokens = sum(
+                sum(self._extract_usage(o.raw_response)) for o in completed_branches.values()
+            )
+            _group_cost = sum((self._output_cost(o) or 0) for o in completed_branches.values())
+            return StepResult(
+                step_name=group.name,
+                step_index=index,
+                status="escalated",
+                output=LLMOutput(
+                    confidence=effective_confidence,
+                    summary=(
+                        f"Parallel group '{group.name}' escalated on resume — "
+                        f"{len(completed_branches)}/{len(group.steps)} branch(es) had "
+                        "completed before the restart"
+                    ),
+                    next_step_context="", raw_response={},
+                ),
+                verifier_output=None,
+                effective_confidence=effective_confidence,
+                duration_ms=int(time.time() * 1000) - start_ms,
+                branch_outputs=dict(completed_branches),
+                total_tokens=_group_tokens,
+                cost=_group_cost,
+                resume_had_gap=True,
+            )
+
+        if completed_branches:
+            logger.info(
+                "Executing parallel group '%s' — %d branch(es) to run, %d already "
+                "persisted from before a restart",
+                group.name, len(missing), len(completed_branches),
+            )
+        else:
+            logger.info(
+                "Executing parallel group '%s' — %d branch(es)", group.name, len(group.steps)
+            )
         _log_event(run_log, "info", "parallel_group_started",
-                   f"Parallel group started: {group.name} ({len(group.steps)} branches)",
+                   f"Parallel group started: {group.name} ({len(missing)} branch(es) to run)",
                    group=group.name)
 
         branch_coros = [
-            self._run_parallel_branch(branch, ctx, run_log, run_id) for branch in group.steps
+            self._run_parallel_branch(branch, ctx, run_log, run_id) for branch in missing
         ]
 
         try:
@@ -1226,11 +1411,9 @@ class PipelineRunner:
                 duration_ms=int(time.time() * 1000) - start_ms,
             )
 
-        branch_outputs: dict[str, LLMOutput] = {}
-        confidences: list[float] = []
-        weights: list[float] = []
+        branch_outputs: dict[str, LLMOutput] = dict(completed_branches)
 
-        for i, (branch, raw) in enumerate(zip(group.steps, raw_results)):
+        for i, (branch, raw) in enumerate(zip(missing, raw_results)):
             if isinstance(raw, Exception):
                 msg = f"Executor error: {type(raw).__name__}: {raw}"
                 logger.error("Branch '%s' raised unhandled exception: %s", branch.name, raw)
@@ -1246,11 +1429,19 @@ class PipelineRunner:
                                branch=branch.name, group=group.name)
 
             branch_outputs[branch.name] = output
-            confidences.append(output.confidence)
-            weights.append(branch.weight)
 
-            await self._db_save_branch(run_id, group.name, branch, index, i, output)
+            # Original config index (not position within `missing`) — keeps step_index
+            # consistent with a fresh run's ordering regardless of which branches were
+            # already persisted.
+            branch_config_index = next(j for j, b in enumerate(group.steps) if b.name == branch.name)
+            await self._db_save_branch(run_id, group.name, branch, index, branch_config_index, output)
 
+        # Confidence/weight are recomputed from the FULL branch set (persisted +
+        # freshly executed) in group.steps order, not execution order — join
+        # strategies like weighted_average are order-sensitive to steps declaration,
+        # matching a fresh run's ordering exactly.
+        confidences = [branch_outputs[b.name].confidence for b in group.steps if b.name in branch_outputs]
+        weights = [b.weight for b in group.steps if b.name in branch_outputs]
         effective_confidence = self._join_confidences(group.join, confidences, weights)
 
         logger.info(
@@ -1306,6 +1497,7 @@ class PipelineRunner:
                     total_tokens=_group_tokens,
                     cost=_group_cost,
                     approx_cost=_group_approx_cost,
+                    resume_had_gap=bool(missing),
                 )
 
         return StepResult(
@@ -1320,6 +1512,7 @@ class PipelineRunner:
             total_tokens=_group_tokens,
             cost=_group_cost,
             approx_cost=_group_approx_cost,
+            resume_had_gap=bool(missing),
         )
 
     # ------------------------------------------------------------------
@@ -1335,6 +1528,8 @@ class PipelineRunner:
         run_id: str,
         step_outputs: dict[str, LLMOutput],
         run_log: list,
+        completed_branches: "dict[str, LLMOutput] | None" = None,
+        on_interrupted: str | None = None,
     ) -> StepResult:
         with tracer.start_as_current_span(
             fan_out.name,
@@ -1344,7 +1539,8 @@ class PipelineRunner:
             },
         ) as span:
             result = await self._run_fan_out_impl(
-                fan_out, index, pipeline, normalised, run_id, step_outputs, run_log
+                fan_out, index, pipeline, normalised, run_id, step_outputs, run_log,
+                completed_branches=completed_branches, on_interrupted=on_interrupted,
             )
             self._set_step_span_attributes(span, result, prompt_template=fan_out.prompt_template)
             return result
@@ -1358,11 +1554,14 @@ class PipelineRunner:
         run_id: str,
         step_outputs: dict[str, LLMOutput],
         run_log: list,
+        completed_branches: "dict[str, LLMOutput] | None" = None,
+        on_interrupted: str | None = None,
     ) -> StepResult:
         import ast
         from jinja2 import Environment
 
         start_ms = int(time.time() * 1000)
+        completed_branches = completed_branches or {}
 
         base_ctx = await build_context(
             pipeline, normalised, run_id, fan_out.name, step_outputs,
@@ -1455,12 +1654,63 @@ class PipelineRunner:
             )
 
         total = len(items)
-        logger.info("Fan-out '%s': %d item(s)", fan_out.name, total)
+
+        # Only items not already persisted from before a restart get re-executed
+        # (SPEC-durable-runs.md) — the branch name convention (f"{fan_out.name}/{i}")
+        # is deterministic given `items`, itself deterministic given the same
+        # reconstructed step_outputs `over` was rendered against, so this lines up
+        # with whatever the crash actually left persisted.
+        missing_indices = [i for i in range(total) if f"{fan_out.name}/{i}" not in completed_branches]
+
+        if on_interrupted == "escalate" and missing_indices:
+            _log_event(
+                run_log, "warn", "resume_step_escalated",
+                f"Fan-out escalated on resume (durable.on_interrupted=escalate): "
+                f"{fan_out.name} — {len(missing_indices)}/{total} branch(es) were in "
+                "flight when the process died and were not re-executed",
+                step=fan_out.name,
+            )
+            confidences = [o.confidence for o in completed_branches.values()]
+            effective_confidence = (
+                self._join_confidences(fan_out.join, confidences, [1.0] * len(confidences))
+                if confidences else 0.0
+            )
+            _fan_out_tokens = sum(
+                sum(self._extract_usage(o.raw_response)) for o in completed_branches.values()
+            )
+            _fan_out_cost = sum((self._output_cost(o) or 0) for o in completed_branches.values())
+            return StepResult(
+                step_name=fan_out.name,
+                step_index=index,
+                status="escalated",
+                output=LLMOutput(
+                    confidence=effective_confidence,
+                    summary=(
+                        f"Fan-out '{fan_out.name}' escalated on resume — "
+                        f"{len(completed_branches)}/{total} branch(es) had completed "
+                        "before the restart"
+                    ),
+                    next_step_context="", raw_response={},
+                ),
+                verifier_output=None,
+                effective_confidence=effective_confidence,
+                duration_ms=int(time.time() * 1000) - start_ms,
+                branch_outputs=dict(completed_branches),
+                total_tokens=_fan_out_tokens,
+                cost=_fan_out_cost,
+                resume_had_gap=True,
+            )
+
+        logger.info(
+            "Fan-out '%s': %d item(s), %d to run", fan_out.name, total, len(missing_indices)
+        )
         _log_event(run_log, "info", "fan_out_started",
-                   f"Fan-out started: {fan_out.name} ({total} items)", step=fan_out.name)
+                   f"Fan-out started: {fan_out.name} ({len(missing_indices)} of {total} "
+                   "item(s) to run)", step=fan_out.name)
 
         branch_coros = []
-        for i, item in enumerate(items):
+        for i in missing_indices:
+            item = items[i]
             branch_ctx = {
                 **base_ctx,
                 fan_out.as_var: item,
@@ -1481,11 +1731,9 @@ class PipelineRunner:
 
         raw_results = await asyncio.gather(*branch_coros, return_exceptions=True)
 
-        branch_outputs: dict[str, LLMOutput] = {}
-        confidences: list[float] = []
-        weights: list[float] = []
+        branch_outputs: dict[str, LLMOutput] = dict(completed_branches)
 
-        for i, (item, raw) in enumerate(zip(items, raw_results)):
+        for i, raw in zip(missing_indices, raw_results):
             branch_name = f"{fan_out.name}/{i}"
             if isinstance(raw, Exception):
                 msg = f"Executor error: {type(raw).__name__}: {raw}"
@@ -1505,8 +1753,6 @@ class PipelineRunner:
                                step=fan_out.name, branch=branch_name)
 
             branch_outputs[branch_name] = output
-            confidences.append(output.confidence)
-            weights.append(1.0)
 
             # DB branch name is str(i) so stored step_name = "{fan_out.name}/{i}"
             db_branch = ParallelStepConfig(
@@ -1517,6 +1763,13 @@ class PipelineRunner:
             )
             await self._db_save_branch(run_id, fan_out.name, db_branch, index, i, output)
 
+        # Recomputed from the FULL branch set (persisted + freshly executed) in item
+        # order, not execution order — matches a fresh run's ordering exactly.
+        confidences = [
+            branch_outputs[f"{fan_out.name}/{i}"].confidence
+            for i in range(total) if f"{fan_out.name}/{i}" in branch_outputs
+        ]
+        weights = [1.0] * len(confidences)
         effective_confidence = self._join_confidences(fan_out.join, confidences, weights)
         logger.info(
             "Fan-out '%s' join=%s confidences=%s effective=%.2f",
@@ -1565,6 +1818,7 @@ class PipelineRunner:
                     total_tokens=_fan_out_tokens,
                     cost=_fan_out_cost,
                     approx_cost=_fan_out_approx_cost,
+                    resume_had_gap=bool(missing_indices),
                 )
 
         return StepResult(
@@ -1576,6 +1830,7 @@ class PipelineRunner:
             effective_confidence=effective_confidence,
             duration_ms=int(time.time() * 1000) - start_ms,
             branch_outputs=branch_outputs,
+            resume_had_gap=bool(missing_indices),
             total_tokens=_fan_out_tokens,
             cost=_fan_out_cost,
             approx_cost=_fan_out_approx_cost,
@@ -2156,6 +2411,7 @@ class PipelineRunner:
                 parent_run_id=parent_run_id,
                 team=normalised.team,
                 stage=pipeline.stage,
+                config_fingerprint=pipeline_config_fingerprint(pipeline),
             ))
             try:
                 await session.commit()
@@ -2351,6 +2607,92 @@ class PipelineRunner:
                 run.completed_at = utc_now()
                 run.logs = json.dumps(run_log)
                 await session.commit()
+
+    async def _db_load_run_steps(self, run_id: str) -> list[PipelineStep]:
+        """All persisted steps for a run, in execution order — the resume path's only
+        source of truth for what already completed (SPEC-durable-runs.md). A run still
+        in status='running' can only have 'completed' step rows: any other status
+        would have already ended the run via the abort/escalate/fail/stop break in the
+        main loop, flipping it out of 'running' — so resume never has to reason about
+        a persisted row in some other state.
+        """
+        if not self._session_factory:
+            return []
+        from sqlalchemy import select
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(PipelineStep)
+                .where(PipelineStep.run_id == run_id)
+                .order_by(PipelineStep.step_index)
+            )
+            return list(result.scalars().all())
+
+    def _reconstruct_resume_state(
+        self, pipeline: PipelineConfig, persisted: list[PipelineStep],
+    ) -> tuple[dict[str, LLMOutput], dict[str, dict[str, LLMOutput]], set[str], int, float]:
+        """Rebuild everything the step loop needs to pick up where it left off:
+          - step_outputs: keyed exactly as the live loop would key them (bare branch
+            name for a parallel group's branches, matching _run_parallel_group_impl;
+            the full "group/branch" string for a fan-out's, matching _run_fan_out_impl
+            — the two differ today, see runner.py's own branch-registration loops in
+            _run_pipeline_body, and reconstruction must mirror that exactly or a
+            downstream {{steps.*}} reference would resolve differently after a resume
+            than it would have live).
+          - persisted_branches: {group_or_fan_out_name: {branch_key: output}} — what
+            _run_parallel_group/_run_fan_out use to skip already-done branches.
+          - plain_persisted_names: step.name values with their own terminal row —
+            these are skipped outright, matching a completed step's persisted output
+            already being in step_outputs.
+          - accumulated_tokens / accumulated_cost: seeded from every persisted row
+            (plain steps and branches alike) so the budget guardrail counts
+            pre-restart usage, which the from_step-based manual rerun path (main.py's
+            /runs/{id}/rerun) does NOT do today — a resume must, or a run that already
+            spent most of its budget.max_tokens before the crash would get a fresh
+            budget on top of it.
+        """
+        group_names = {
+            step.parallel.name for step in pipeline.steps if isinstance(step, ParallelGroupConfig)
+        }
+        fan_out_names = {
+            step.fan_out.name for step in pipeline.steps if isinstance(step, FanOutGroupConfig)
+        }
+
+        step_outputs: dict[str, LLMOutput] = {}
+        persisted_branches: dict[str, dict[str, LLMOutput]] = {}
+        plain_persisted_names: set[str] = set()
+        accumulated_tokens = 0
+        accumulated_cost = 0.0
+
+        for row in persisted:
+            if not row.parsed_output:
+                continue
+            output = LLMOutput.model_validate(json.loads(row.parsed_output))
+            # Branch rows have no verifier/grounding columns (neither is wired into
+            # parallel/fan-out branches — see _run_parallel_branch_impl's TODO), so
+            # these are always 0 there; for a plain step's row they mirror exactly
+            # what _step_tokens summed live in _run_step_impl (primary + verifier +
+            # grounding), which input_tokens/output_tokens alone would undercount.
+            accumulated_tokens += (
+                (row.input_tokens or 0) + (row.output_tokens or 0)
+                + (row.verifier_input_tokens or 0) + (row.verifier_output_tokens or 0)
+                + (row.grounding_input_tokens or 0) + (row.grounding_output_tokens or 0)
+            )
+            accumulated_cost += row.cost or 0
+
+            if "/" in row.step_name:
+                prefix, suffix = row.step_name.split("/", 1)
+                persisted_branches.setdefault(prefix, {})[
+                    suffix if prefix in group_names else row.step_name
+                ] = output
+                if prefix in group_names:
+                    step_outputs[suffix] = output
+                elif prefix in fan_out_names:
+                    step_outputs[row.step_name] = output
+            else:
+                plain_persisted_names.add(row.step_name)
+                step_outputs[row.step_name] = output
+
+        return step_outputs, persisted_branches, plain_persisted_names, accumulated_tokens, accumulated_cost
 
     # ------------------------------------------------------------------
     # Notifications

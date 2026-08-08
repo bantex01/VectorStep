@@ -111,6 +111,13 @@ concurrency:
                   # when this limit is reached. Raise for high-volume deployments;
                   # lower to protect LLM spend on constrained hardware.
 
+durability:
+  # Service-wide default for durable.max_resume_age_seconds — only takes effect for a
+  # pipeline whose `durable:` block doesn't set its own value. Opt-in is per pipeline
+  # (`durable: true` in the pipeline YAML); this block has no effect on a pipeline that
+  # isn't durable. See docs: Operations > Durability & resume.
+  max_resume_age_seconds: 3600   # a run down longer than this is marked interrupted, not resumed
+
 auth:
   # Per-team tokens — see README §3b. Each team's token both authenticates
   # POST /webhook and resolves the `team` attribution recorded on every run

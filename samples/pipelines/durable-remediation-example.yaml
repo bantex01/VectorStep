@@ -1,0 +1,105 @@
+# Sample: durable resume-after-restart (SPEC-durable-runs.md), and the tradeoff
+# that comes with it.
+#
+# `durable:` is a PIPELINE-wide setting, not per-step — so a pipeline mixing a
+# safe-to-rerun investigation step with a side-effecting remediation step has to
+# pick ONE on_interrupted policy for the whole run. This pipeline picks the
+# conservative one:
+#
+#   durable:
+#     on_interrupted: escalate
+#
+# Why escalate, not the rerun default: the LAST step here (`remediate`) fires a
+# real action (an incident ticket + Slack post). If the process crashes while
+# `remediate` is in flight, VectorStep cannot know whether the ticket/post already
+# went out before it died — re-running the step on resume (the `rerun` default)
+# risks firing it TWICE. `escalate` means a step still in flight at resume time is
+# never re-executed; it's marked escalated and a human decides, exactly like a
+# live low-confidence escalation would.
+#
+# The cost of that choice: it applies to `triage` too. If the crash happens while
+# `triage` (which has no side effect at all, and would be perfectly safe to
+# rerun) is in flight, this pipeline still escalates rather than cheaply
+# re-investigating. That's the real tradeoff of a pipeline-wide setting — accept
+# an occasional unnecessary escalation on the cheap step, in exchange for a
+# guarantee the expensive/side-effecting step never double-fires. A pipeline
+# with ONLY safe-to-rerun steps should use `durable: true` (shorthand for
+# on_interrupted: rerun) instead — see the plain triage-only pipelines elsewhere
+# in this directory.
+#
+# Replace agent names and URLs with your own values.
+
+name: durable-remediation-example
+description: Triage feeding a side-effecting remediation step, durable with on_interrupted=escalate
+version: 1
+stage: testing   # flip to "production" once you're happy — see README "Pipeline Stages"
+
+durable:
+  on_interrupted: escalate
+  # max_resume_age_seconds: 1800   # uncomment to override the service-wide
+                                    # durability.max_resume_age_seconds default (3600)
+
+trigger:
+  match:
+    alertname: PaymentApiErrorRateHigh
+    environment: prod
+  dedup:
+    window_seconds: 600
+
+vars:
+  jira_project: PAY
+
+context_template:
+  include:
+    - severity
+    - labels.service
+    - labels.environment
+    - summary
+
+steps:
+  # Safe to rerun on its own — no side effect. Escalates on resume anyway if it's
+  # the step that was in flight, because the PIPELINE's durable setting above is
+  # escalate, not because this step needs it.
+  - name: triage
+    executor: gateway
+    executor_config:
+      agent: sre-triage
+    confidence_threshold: 0.60
+    on_low_confidence: escalate
+    prompt_template: |
+      Alert: {{summary}}
+      Severity: {{severity}}
+      Service: {{labels.service}} ({{labels.environment}})
+
+      Decide whether this needs remediation. Respond with ONLY this JSON:
+      {
+        "confidence": 0.0,
+        "summary": "One sentence: what is happening and how serious",
+        "next_step_context": "Focused brief for the remediation step"
+      }
+
+  # The step this pipeline's durable: {on_interrupted: escalate} exists to protect —
+  # a real side effect (ticket + Slack post) that must never double-fire.
+  - name: remediate
+    executor: notify
+    on_failure: continue   # a failed notification should never mask that remediation was approved
+    executor_config:
+      url: "${SLACK_WEBHOOK_URL}"
+      payload:
+        blocks:
+          - type: section
+            text:
+              type: mrkdwn
+              text: |
+                *Remediation:* {{steps.triage.next_step_context}}
+                *Ticket:* {{jira_project}}-<pending>
+
+notifications:
+  escalate:
+    - channel: telegram
+      template: |
+        ⚠️ Escalated: {{pipeline_name}}
+        Service: {{labels.service}} ({{labels.environment}})
+        Step: {{current_step}}
+        Reason: {{escalation_reason}}
+        Summary: {{step_summary}}

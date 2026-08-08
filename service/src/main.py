@@ -34,7 +34,7 @@ from .config_writer import (
     write_pipeline_yaml,
     write_step_yaml,
 )
-from .db.database import create_tables, get_session_factory, init_db, mark_interrupted_runs
+from .db.database import create_tables, get_session_factory, init_db, sweep_and_partition_running_runs
 from .db.models import PipelineRun, PipelineStep, RunFeedback, StepFeedback
 import functools
 
@@ -288,7 +288,7 @@ async def _cleanup_artifacts() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task, _slack_poller_tasks, _artifact_store, _artifact_retention_days, _dedup_enabled, _dedup_window_seconds, _webhook_tokens, _max_concurrent_runs
+    global _runner, _pipelines, _pipeline_dir, _step_library, _step_library_dir, _scheduler, _app_ref, _poller_task, _slack_poller_tasks, _artifact_store, _artifact_retention_days, _dedup_enabled, _dedup_window_seconds, _webhook_tokens, _max_concurrent_runs, _active_runs
     _app_ref = app
 
     config = _load_config()
@@ -337,10 +337,6 @@ async def lifespan(app: FastAPI):
     await create_tables(auto_migrate=auto_migrate)
     logger.info("Database initialised: %s", db_url)
 
-    interrupted = await mark_interrupted_runs()
-    if interrupted:
-        logger.warning("Marked %d run(s) as 'interrupted' after restart", interrupted)
-
     # Step library (load before pipelines so references can be resolved)
     _step_library_dir = config.get("step_library_dir", "./steps")
     _step_library = load_step_library(_step_library_dir)
@@ -348,6 +344,16 @@ async def lifespan(app: FastAPI):
     # Pipeline configs
     _pipeline_dir = config.get("pipeline_config_dir", "./pipelines")
     _pipelines = load_pipelines(_pipeline_dir, step_library=_step_library)
+
+    # Sweep runs left 'running' after a crash/restart (SPEC-durable-runs.md). Needs
+    # _pipelines loaded (to know which are durable and their current config
+    # fingerprint) but the actual resume tasks are scheduled at the very end of
+    # startup, below — after executors/pollers are registered, not before.
+    durability_cfg = config.get("durability", {}) or {}
+    _resumable_runs = await sweep_and_partition_running_runs(
+        _pipelines,
+        default_max_resume_age_seconds=durability_cfg.get("max_resume_age_seconds", 3600),
+    )
 
     # Notifiers — log is always available; telegram and webhook require config
     from .notifications.webhook import WebhookNotifier
@@ -550,6 +556,16 @@ async def lifespan(app: FastAPI):
         signal.SIGHUP,
         lambda: asyncio.create_task(_sighup_reload()),
     )
+
+    # Resume durable runs left 'running' after the crash/restart that just booted this
+    # process. Scheduled here — the last thing before "ready" — so every executor,
+    # notifier, and poller a resumed run might touch (including the human_approval
+    # channels configured above, needed for HITL re-arm) is already registered.
+    if _resumable_runs:
+        logger.warning("Resuming %d durable run(s) after restart", len(_resumable_runs))
+    for pipeline, normalised, run_id in _resumable_runs:
+        _active_runs += 1
+        asyncio.create_task(_run_pipeline(pipeline, normalised, run_id, resume=True))
 
     logger.info("Service ready — %d pipeline(s) loaded", len(_pipelines))
     yield
@@ -795,12 +811,14 @@ async def _trigger_run(normalised: NormalisedContext, allow_testing: bool = Fals
 
 
 async def _run_pipeline(pipeline, normalised, run_id: str | None = None,
-                        from_step: str | None = None, initial_step_outputs: dict | None = None):
+                        from_step: str | None = None, initial_step_outputs: dict | None = None,
+                        resume: bool = False):
     global _active_runs
     from .run_events import publish_complete as _publish_complete
     try:
         result = await _runner.run(pipeline, normalised, run_id=run_id,
-                                   from_step=from_step, initial_step_outputs=initial_step_outputs)
+                                   from_step=from_step, initial_step_outputs=initial_step_outputs,
+                                   resume=resume)
         logger.info(
             "Pipeline completed: id=%s pipeline=%s status=%s",
             result.run_id, result.pipeline_name, result.status,
