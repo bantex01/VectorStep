@@ -381,6 +381,14 @@ class PipelineRunner:
                     c = c[:max_chars] + "…"
                 err = " [ERROR]" if ev.get("is_error") else ""
                 lines.append(f"TOOL RESULT{err} ({ev.get('name', '')}): {c}")
+            elif t == "tool_denied":
+                # Gateway tool_policy blocked this call before it ran — no
+                # tool_result follows it, so without this branch the judge sees
+                # a TOOL CALL with no matching result and no explanation why.
+                reason = str(ev.get("reason", ""))
+                if len(reason) > max_chars:
+                    reason = reason[:max_chars] + "…"
+                lines.append(f"TOOL DENIED ({ev.get('name', '')}): {reason}")
             elif t == "text":
                 c = str(ev.get("content", ""))
                 if c.strip():

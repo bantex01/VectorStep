@@ -114,6 +114,38 @@ def test_format_trace_with_no_tool_activity_returns_empty():
     assert runner._format_trace_for_grounding(None) == ""
 
 
+def test_format_trace_renders_tool_denied_as_evidence():
+    # Gateway tool_policy events: a tool_call with no matching tool_result
+    # would otherwise look like a dropped/unexplained call to the judge.
+    runner = _runner()
+    trace = [
+        {"type": "tool_call", "name": "jira_delete_issue", "input": {"id": "OPS-1"}},
+        {
+            "type": "tool_denied",
+            "name": "jira_delete_issue",
+            "server": "atlassian",
+            "rule_index": 0,
+            "reason": "Destructive Jira operations are operator-only",
+        },
+    ]
+
+    out = runner._format_trace_for_grounding(trace)
+
+    assert "TOOL CALL: jira_delete_issue" in out
+    assert "TOOL DENIED (jira_delete_issue): Destructive Jira operations are operator-only" in out
+    assert "TOOL RESULT" not in out
+
+
+def test_format_trace_truncates_long_denial_reason():
+    runner = _runner()
+    trace = [{"type": "tool_denied", "name": "t", "reason": "x" * 5000}]
+
+    out = runner._format_trace_for_grounding(trace, max_chars=100)
+
+    assert len(out) < 200
+    assert out.endswith("…")
+
+
 # ---------------------------------------------------------------------------
 # 2. G extraction + report
 # ---------------------------------------------------------------------------
