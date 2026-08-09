@@ -99,7 +99,7 @@
           {% for item in s.preview %}
           <a href="/ui/runs/{{ item.run_id }}"
              class="inline-flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-mono bg-zinc-800 text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100 transition-colors"
-             title="{{ item.executed_at.isoformat() }}">
+             title="{{ item.executed_at.isoformat() }}{% if item.is_replay %} — replay batch, mark here then see the full report at /ui/replays/{{ item.run_id }}{% endif %}">
             {{ item.run_id[:8] }}
             {% if item.provenance %}<span class="text-amber-500">{{ item.provenance }}</span>{% endif %}
           </a>

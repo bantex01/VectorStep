@@ -199,7 +199,15 @@ class OpenClawWSExecutor(BaseExecutor):
             step.name, model_used, duration_ms,
         )
 
-        return self._parse_output(text, step.name, model_used, duration_ms)
+        output = self._parse_output(text, step.name, model_used, duration_ms)
+        # Stashed the same way GatewayExecutor does (executors/gateway.py) — lets
+        # _db_save_step persist the exact rendered instructions into
+        # PipelineStep.prompt instead of falling back to a raw executor_config dump.
+        # Rows saved before this change have no "prompt" key here, so replay's
+        # `rendered` mode treats them as unreplayable rather than guessing
+        # (SPEC-replay-shadow-eval.md §2).
+        output.raw_response["prompt"] = prompt
+        return output
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -275,6 +275,40 @@ class PipelineRunner:
     def set_pipeline_registry(self, registry: "dict[str, PipelineConfig]") -> None:
         self._pipeline_registry = registry
 
+    async def execute_candidate(self, step: StepConfig, ctx: dict) -> LLMOutput:
+        """Single bare primary-executor call — no verifier, no grounding, no
+        loop_until refinement. Retry/timeout semantics mirror _run_step_impl's
+        primary-call loop exactly (same executor instances, via _get_executor,
+        so replay never spins a parallel execution path), minus everything a
+        production step does around that one call.
+
+        Used only by replay.py (SPEC-replay-shadow-eval.md §2 "the candidate
+        runs bare — cheaper, and isolates the variable under test"). Raises the
+        last error on exhausted retries rather than returning a failed
+        LLMOutput, since replay counts an execution failure as unreplayable
+        rather than as a graded (and auto-labelled) sample.
+        """
+        max_attempts = step.retry.attempts if step.retry else 1
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                executor = self._get_executor(step.executor)
+                coro = executor.execute(step, ctx)
+                if step.timeout_seconds:
+                    return await asyncio.wait_for(coro, timeout=step.timeout_seconds)
+                return await coro
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_attempts:
+                    await asyncio.sleep(_compute_backoff(step.retry, attempt))
+        assert last_exc is not None
+        raise last_exc
+
+    async def run_deterministic_checks(self, step: StepConfig, ctx: dict) -> list[dict]:
+        """Public entry point for replay.py — same evaluation as production
+        (_run_deterministic_checks), just without a run_log to append to."""
+        return await self._run_deterministic_checks(step=step, ctx=ctx, run_log=[])
+
     def _build_bucket_reset(
         self,
         step_name: str,

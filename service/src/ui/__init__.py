@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from . import agents, approvals, dashboard, insights, insights_trust, pipelines, runs, steps
+from . import agents, approvals, dashboard, insights, insights_trust, pipelines, replays, runs, steps
 from .helpers import configure, _fetch_openclaw_agents, _fetch_vectorstep_gateway_agents
 from .pipelines import _read_pipeline_yaml
 from .steps import _read_step_yaml
@@ -29,6 +29,7 @@ router.include_router(insights_trust.router, prefix="/ui")
 router.include_router(steps.router, prefix="/ui")
 router.include_router(agents.router, prefix="/ui")
 router.include_router(approvals.router, prefix="/ui")
+router.include_router(replays.router, prefix="/ui")
 
 __all__ = [
     "router",

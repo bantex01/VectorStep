@@ -168,3 +168,13 @@ auth:
 #                                   # subsection. Off by default.
 #     enabled: true
 #     refresh_interval_seconds: 3600
+
+replay:
+  # Explicit allowlist of "executor:agent" identities a replay batch is allowed to
+  # run — see docs: Operations > Replay / shadow evaluation. A replay re-runs real agent calls
+  # against live tools (Grafana, Jira, etc.), so only list an agent here once
+  # you've verified it makes no side-effecting tool calls. Unset/empty means
+  # replay is off entirely — POST /steps/{name}/replay 403s pointing back here.
+  safe_agents:
+    - "gateway:sre-investigation"
+    - "openclaw:incident-triage"

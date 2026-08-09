@@ -56,6 +56,7 @@ async def ui_marking_queue(
                 PipelineStep.run_id, PipelineStep.step_name, PipelineStep.executed_at,
                 PipelineStep.deterministic_passed,
                 PipelineRun.pipeline_name, PipelineRun.team, PipelineRun.stage,
+                PipelineRun.replay_of,
             )
             .select_from(PipelineStep)
             .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
@@ -95,7 +96,13 @@ async def ui_marking_queue(
     # oldest first (rows are already ordered that way from the query above).
     pipelines_by_name: dict[str, dict] = {}
     for r in unmarked_rows:
-        if r.deterministic_passed is False:
+        is_replay = r.replay_of is not None
+        if is_replay:
+            # A replay batch's own D-check failure still means something ("failed
+            # check") but the REPLAY tag takes priority — that's the fact an
+            # operator marking this queue needs to see first (SPEC-replay-shadow-eval.md).
+            provenance = "REPLAY"
+        elif r.deterministic_passed is False:
             provenance = "failed check"
         elif r.run_id in run_feedback_ids:
             provenance = "run feedback"
@@ -108,7 +115,10 @@ async def ui_marking_queue(
         p["run_ids"].add(r.run_id)
         step_group = r.step_name.split("/", 1)[0]
         s = p["steps"].setdefault(step_group, {"name": step_group, "items": []})
-        s["items"].append({"run_id": r.run_id, "executed_at": r.executed_at, "provenance": provenance})
+        s["items"].append({
+            "run_id": r.run_id, "executed_at": r.executed_at, "provenance": provenance,
+            "is_replay": is_replay,
+        })
 
     pipeline_list = []
     total_unmarked_steps = 0

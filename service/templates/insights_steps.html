@@ -126,6 +126,7 @@
         <th class="text-left px-5 py-3 font-medium">Avg duration</th>
         <th class="text-left px-5 py-3 font-medium">Tokens</th>
         <th class="text-left px-5 py-3 font-medium">Pipelines</th>
+        <th class="text-left px-5 py-3 font-medium"></th>
       </tr>
     </thead>
     <tbody id="top-steps-tbody" class="divide-y divide-zinc-800"></tbody>
@@ -334,6 +335,7 @@
         <td class="px-5 py-3 text-sm text-zinc-200">${durStr}</td>
         <td class="px-5 py-3 text-sm text-zinc-200" title="${tokTitle}">${tokStr}</td>
         <td class="px-5 py-3"><div class="flex gap-1 flex-wrap">${pipelines}</div></td>
+        <td class="px-5 py-3"><a href="/ui/replays/new?step=${encodeURIComponent(r.name)}" class="text-xs text-indigo-400 hover:underline whitespace-nowrap">Replay against candidate…</a></td>
       </tr>`;
     }).join('');
   }

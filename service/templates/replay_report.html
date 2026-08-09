@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Replay {{ run_id[:8] }} — VectorStep{% endblock %}
+{% block page_heading %}
+<h1 class="text-2xl font-semibold text-zinc-50">Replay report</h1>
+<p class="text-xs text-zinc-500 mt-1 font-mono">{{ run_id }}</p>
+{% endblock %}
+{% block content %}
+
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+  <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+    <div class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Step</div>
+    <div class="text-lg font-mono text-zinc-100">{{ report.step_name }}</div>
+    <div class="text-xs text-zinc-500 mt-1">mode: {{ report.mode }}</div>
+  </div>
+  <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+    <div class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Recorded accuracy</div>
+    <div class="text-lg text-zinc-100">
+      {{ "%.0f%%"|format(report.recorded_accuracy * 100) if report.recorded_accuracy is not none else "—" }}
+    </div>
+    <div class="text-xs text-zinc-500 mt-1">
+      {{ report.recorded_distribution.correct }} correct /
+      {{ report.recorded_distribution.partial }} partial /
+      {{ report.recorded_distribution.incorrect }} incorrect
+    </div>
+  </div>
+  <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+    <div class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Candidate accuracy so far</div>
+    <div class="text-lg text-zinc-100">
+      {{ "%.0f%%"|format(report.candidate_accuracy_so_far * 100) if report.candidate_accuracy_so_far is not none else "—" }}
+    </div>
+    <div class="text-xs text-zinc-500 mt-1">{{ report.candidate_graded_n }} / {{ report.candidate_total_n }} graded</div>
+  </div>
+  <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+    <div class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Unreplayable</div>
+    <div class="text-lg text-zinc-100">{{ report.unreplayable_count }}</div>
+  </div>
+</div>
+
+<div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 mb-8 text-xs text-zinc-400 leading-relaxed">
+  <div><span class="text-zinc-500">Source bucket:</span>
+    agent={{ report.source_bucket.agent or "—" }},
+    model={{ report.source_bucket.model or "—" }},
+    provider={{ report.source_bucket.provider or "—" }},
+    prompt_hash={{ report.source_bucket.prompt_hash or "—" }},
+    agent_version={{ report.source_bucket.agent_version or "—" }}
+  </div>
+  <div class="mt-1"><span class="text-zinc-500">Candidate:</span>
+    {% for k, v in report.candidate.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}
+    {% if not report.candidate %}(unchanged from recorded){% endif %}
+  </div>
+  <div class="mt-2 text-zinc-500">
+    Deterministic-check failure auto-labels a candidate 0.0; a pass leaves it unmarked until a
+    human marks it from the <a href="/ui/marking-queue" class="text-indigo-400 hover:underline">marking queue</a>
+    (flagged REPLAY there). No verifier/grounding ran — the candidate executed bare, primary call only.
+  </div>
+</div>
+
+<table class="w-full text-sm">
+  <thead>
+    <tr class="text-left text-xs text-zinc-500 uppercase tracking-wide border-b border-zinc-800">
+      <th class="py-2 pr-4">Sample</th>
+      <th class="py-2 pr-4">Recorded</th>
+      <th class="py-2 pr-4">Status</th>
+      <th class="py-2 pr-4">Candidate confidence</th>
+      <th class="py-2 pr-4">Candidate summary</th>
+      <th class="py-2 pr-4">D-check</th>
+      <th class="py-2 pr-4">Mark</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in report.rows %}
+    <tr class="border-b border-zinc-900">
+      <td class="py-2 pr-4 font-mono text-xs text-zinc-500">{{ row.sample_step_id[:8] }}</td>
+      <td class="py-2 pr-4 text-zinc-300">{{ "%.1f"|format(row.recorded_label) }} <span class="text-zinc-600">({{ row.recorded_label_source }})</span></td>
+      {% if row.status == "unreplayable" %}
+      <td class="py-2 pr-4 text-amber-500" colspan="4">unreplayable — {{ row.unreplayable_reason }}</td>
+      {% else %}
+      <td class="py-2 pr-4 {% if row.status == 'failed' %}text-red-400{% else %}text-zinc-300{% endif %}">{{ row.status }}</td>
+      <td class="py-2 pr-4 text-zinc-300">{{ "%.2f"|format(row.candidate_confidence) if row.candidate_confidence is not none else "—" }}</td>
+      <td class="py-2 pr-4 text-zinc-400 max-w-md truncate">{{ row.candidate_summary or "—" }}</td>
+      <td class="py-2 pr-4">
+        {% if row.deterministic_passed is none %}<span class="text-zinc-600">—</span>
+        {% elif row.deterministic_passed %}<span class="text-emerald-400">passed</span>
+        {% else %}<span class="text-red-400">failed</span>{% endif %}
+      </td>
+      <td class="py-2 pr-4 text-zinc-300">{{ row.mark_outcome or "unmarked" }}</td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% endblock %}

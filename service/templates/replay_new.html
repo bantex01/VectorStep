@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Replay {{ step_name }} — VectorStep{% endblock %}
+{% block page_heading %}<h1 class="text-2xl font-semibold text-zinc-50">Replay against candidate</h1>{% endblock %}
+{% block content %}
+
+<p class="text-xs text-zinc-500 mb-6 leading-relaxed max-w-2xl">
+  Re-runs the most recent labelled, production executions of this step's calibration
+  bucket against the candidate below — real agent calls, live tools, gated by
+  <code class="font-mono text-zinc-400">replay.safe_agents</code>. Blocks until every
+  sample has been attempted, then opens the report.
+</p>
+
+{% if error %}
+<div class="bg-red-950/40 border border-red-800 text-red-300 text-sm rounded-lg px-4 py-3 mb-6 max-w-2xl">
+  {{ error }}
+</div>
+{% endif %}
+
+<form method="post" action="/ui/replays" class="max-w-2xl space-y-4">
+  <div>
+    <label class="block text-xs text-zinc-500 mb-1">Step name</label>
+    <input type="text" name="step_name" value="{{ step_name }}" required
+      class="w-full text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500">
+  </div>
+  <div>
+    <label class="block text-xs text-zinc-500 mb-1">Mode</label>
+    <select name="mode" required
+      class="w-full text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <option value="rendered">rendered — resend the recorded prompt verbatim (model/agent change only)</option>
+      <option value="rerender">rerender — render the candidate prompt template against reconstructed context</option>
+    </select>
+  </div>
+  <div class="grid grid-cols-2 gap-4">
+    <div>
+      <label class="block text-xs text-zinc-500 mb-1">Candidate model (optional)</label>
+      <input type="text" name="model" placeholder="unchanged from recorded"
+        class="w-full text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    </div>
+    <div>
+      <label class="block text-xs text-zinc-500 mb-1">Candidate agent (optional)</label>
+      <input type="text" name="agent" placeholder="unchanged from recorded"
+        class="w-full text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    </div>
+  </div>
+  <div>
+    <label class="block text-xs text-zinc-500 mb-1">Candidate prompt template (rerender mode only)</label>
+    <textarea name="prompt_template" rows="6" placeholder="leave blank to re-render the recorded template unchanged"
+      class="w-full text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+  </div>
+  <div>
+    <label class="block text-xs text-zinc-500 mb-1">Sample size (K, most recent labelled executions)</label>
+    <input type="number" name="k" value="20" min="1" max="100"
+      class="w-32 text-sm border border-zinc-700 rounded-md px-3 py-1.5 bg-zinc-800 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+  </div>
+  <button type="submit" class="text-sm bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-500 transition-colors">
+    Run replay
+  </button>
+</form>
+
+{% endblock %}

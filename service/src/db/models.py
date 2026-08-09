@@ -50,6 +50,13 @@ class PipelineRun(Base):
     # vectorstep_runs_resumed_total (metrics.py) and is never cleared once set, even
     # across a second resume of the same run.
     resumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # JSON descriptor {source: {...bucket selector...}, candidate: {...}, mode, k,
+    # sample_run_ids: [...]} — set only for synthetic runs created by a replay batch
+    # (SPEC-replay-shadow-eval.md §2). NULL for every ordinary run. A replay run is
+    # always stage='testing', so it needs no separate exclusion logic anywhere that
+    # already scopes to stage='production' — this column exists purely to let the
+    # replay report reconstruct what was replayed, not to drive any filtering itself.
+    replay_of: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     steps: Mapped[list["PipelineStep"]] = relationship(
         "PipelineStep", back_populates="run", order_by="PipelineStep.step_index"

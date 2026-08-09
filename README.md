@@ -442,6 +442,11 @@ See `samples/pipelines/stage-testing-example.yaml` for a complete worked example
 covering all three testing-gated executor paths (`notify`, `on_failure.webhook`,
 `human`) plus muted pipeline `notifications:`, with the promotion comment inline.
 
+A replay batch (`POST /steps/{step_name}/replay`, §15) is `stage: testing` for
+exactly this reason — it earns evidence for a candidate config without
+touching the production track record it's being compared against. See
+[Replay / shadow evaluation](https://vectorstep.io/docs/operations/replay-shadow-eval/).
+
 ---
 
 ### 3d. Cost accounting
@@ -1725,6 +1730,16 @@ GET /runs/{run_id}/steps/{step_name}/feedback
 # Re-run a pipeline from a specific step
 POST /runs/{run_id}/rerun
 # body: {"from_step": "step-name"}  — see §Re-run from a step
+
+# Replay: re-run recent labelled production executions of a step against a
+# candidate model/agent/prompt, to earn evidence before promoting a change.
+# Gated by replay.safe_agents in config.yaml. Full explanation on the docs
+# site: https://vectorstep.io/docs/operations/replay-shadow-eval/
+# Minimal UI form: /ui/replays/new
+POST /steps/{step_name}/replay
+# body: {"bucket": "current", "candidate": {"model": "..."}, "mode": "rendered"|"rerender", "k": 20}
+# → {"status": "completed", "run_id": "<synthetic-run-id>"}
+GET /replays/{run_id}/report
 
 # Manually trigger a pipeline by name — powers the UI's Run now button.
 # Not behind webhook Bearer auth (internal/management action, same trust

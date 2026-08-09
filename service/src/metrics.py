@@ -7,6 +7,7 @@ recomputed on every scrape.
 """
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -66,6 +67,16 @@ class MetricsData:
     # (pipeline, count) — from pipeline_runs, resumed_at IS NOT NULL (SPEC-durable-runs.md).
     # Defaulted (unlike every field above) so existing MetricsData(...) call sites in
     # tests that predate this field don't all need updating.
+    replay_batches: list[tuple[str, int]] = field(default_factory=list)
+    # (step_name, count) — one row per synthetic run created by POST /steps/{name}/replay
+    # (SPEC-replay-shadow-eval.md). Deliberately NOT stage='production'-filtered like
+    # everything else in this module — replay batches are always stage='testing' by
+    # design, and this metric exists specifically to count them, not exclude them.
+    replay_steps: list[tuple[str, str, int]] = field(default_factory=list)
+    # (step_name, grade, count) — grade in {"completed", "deterministic_failed",
+    # "execution_failed", "unreplayable"}. "completed" includes both human-marked and
+    # still-unmarked-but-passed candidates; StepFeedback isn't joined here (marks
+    # arrive later and change live — see replay.get_report for the graded view).
 
 
 async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData:
@@ -289,6 +300,52 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         )
         deterministic_check_counts = list(rows.all())
 
+        # Replay batches (SPEC-replay-shadow-eval.md) — pipeline_name is always
+        # "replay:{step_name}" for a batch's synthetic run (replay.py's
+        # _create_batch_run), so step_name is recoverable without parsing the
+        # replay_of JSON descriptor for this query.
+        rows = await session.execute(
+            select(PipelineRun.pipeline_name, func.count())
+            .where(PipelineRun.replay_of.is_not(None))
+            .group_by(PipelineRun.pipeline_name)
+        )
+        replay_batches = [
+            (name.removeprefix("replay:"), count) for name, count in rows.all()
+        ]
+
+        grade_case = case(
+            (PipelineStep.status == "failed", "execution_failed"),
+            (PipelineStep.deterministic_passed.is_(False), "deterministic_failed"),
+            else_="completed",
+        )
+        rows = await session.execute(
+            select(PipelineStep.step_name, grade_case.label("grade"), func.count())
+            .join(PipelineRun, PipelineStep.run_id == PipelineRun.id)
+            .where(PipelineRun.replay_of.is_not(None))
+            .group_by(PipelineStep.step_name, grade_case)
+        )
+        replay_steps: list[tuple[str, str, int]] = list(rows.all())
+
+        # Unreplayable samples never get a PipelineStep row — the only record of
+        # them is the "unreplayable" list inside each batch's replay_of JSON, so
+        # (like approx_cost_usage above) this aggregates in Python rather than SQL.
+        rows = await session.execute(
+            select(PipelineRun.pipeline_name, PipelineRun.replay_of)
+            .where(PipelineRun.replay_of.is_not(None))
+        )
+        unreplayable_counts: dict[str, int] = defaultdict(int)
+        for pipeline_name, replay_of_json in rows.all():
+            try:
+                descriptor = json.loads(replay_of_json)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            unreplayable_counts[pipeline_name.removeprefix("replay:")] += len(
+                descriptor.get("unreplayable", [])
+            )
+        replay_steps.extend(
+            (step_name, "unreplayable", count) for step_name, count in unreplayable_counts.items() if count
+        )
+
     team_spend = await get_team_month_to_date_spend(session_factory)
     team_budget_ratios = [
         (team, row["ratio"]) for team, row in team_spend.items() if row["ratio"] is not None
@@ -310,6 +367,8 @@ async def fetch_metrics_data(session_factory: async_sessionmaker) -> MetricsData
         step_feedback_counts=step_feedback_counts,
         grounding_scores=grounding_scores,
         deterministic_check_counts=deterministic_check_counts,
+        replay_batches=replay_batches,
+        replay_steps=replay_steps,
     )
 
 
@@ -466,6 +525,25 @@ class VectorStepCollector(Collector):
         for pipeline, step_name, outcome, count in data.deterministic_check_counts:
             deterministic_total.add_metric([pipeline, step_name, outcome], count)
         yield deterministic_total
+
+        replay_batches_total = CounterMetricFamily(
+            "vectorstep_replay_batches_total",
+            "Total replay batches launched via POST /steps/{name}/replay, by step",
+            labels=["step_name"],
+        )
+        for step_name, count in data.replay_batches:
+            replay_batches_total.add_metric([step_name], count)
+        yield replay_batches_total
+
+        replay_steps_total = CounterMetricFamily(
+            "vectorstep_replay_steps_total",
+            "Total replay sample outcomes, by step and grade "
+            "(completed | deterministic_failed | execution_failed | unreplayable)",
+            labels=["step_name", "grade"],
+        )
+        for step_name, grade, count in data.replay_steps:
+            replay_steps_total.add_metric([step_name, grade], count)
+        yield replay_steps_total
 
         yield self._pending_approvals_gauge()
 

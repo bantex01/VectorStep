@@ -49,7 +49,8 @@ from .normaliser.alertmanager import AlertmanagerStrategy
 from .notifications.log import LogNotifier
 from .notifications.telegram import TelegramNotifier
 from .pipeline import PipelineRunner, load_pipelines, load_step_library, resolve_pipeline
-from . import live_pricing, pricing
+from . import live_pricing, pricing, replay
+from .replay import AgentNotAllowlisted, ReplayNotConfigured, ReplayRequest
 from .readiness import evaluate_readiness, gather_readiness_evidence, step_specs
 from .tracing import setup_tracing, shutdown_tracing
 from .ui import _fetch_openclaw_agents, _fetch_vectorstep_gateway_agents, _read_pipeline_yaml, _read_step_yaml
@@ -233,6 +234,7 @@ def _do_reload() -> int:
     # anyway (SIGHUP/`POST /reload` is the operator's one hot-reload knob) — already
     # persisted step costs never change, only steps priced after this point.
     pricing.configure(_load_config().get("pricing"))
+    replay.configure(_load_config().get("replay"))
     _register_live_pricing_job()
     if _runner is not None:
         _runner.set_pipeline_registry({p.name: p for p in _pipelines})
@@ -296,6 +298,7 @@ async def lifespan(app: FastAPI):
     setup_tracing(config)
 
     pricing.configure(config.get("pricing"))
+    replay.configure(config.get("replay"))
 
     dedup_cfg = config.get("dedup", {})
     _dedup_enabled = dedup_cfg.get("enabled", True)
@@ -525,6 +528,7 @@ async def lifespan(app: FastAPI):
     app.state.pipeline_dir = _pipeline_dir
     app.state.step_library = _step_library
     app.state.step_library_dir = _step_library_dir
+    app.state.runner = _runner
 
     _scheduler = AsyncIOScheduler()
     _register_schedules(_pipelines)
@@ -1453,8 +1457,6 @@ async def rerun_from_step(run_id: str, request: Request):
     into the new run so prompt templates referencing {{steps.prior.field}} and
     {{artifacts.prior.key}} resolve correctly without re-executing those steps.
     """
-    from .models.llm import LLMOutput as _LLMOutput
-
     body = await request.json()
     from_step = body.get("from_step", "").strip()
     if not from_step:
@@ -1494,40 +1496,19 @@ async def rerun_from_step(run_id: str, request: Request):
             ),
         )
 
-    # Reconstruct prior step outputs from DB rows that precede from_step
-    sorted_steps = sorted(original_run.steps, key=lambda s: s.step_index)
-    initial_step_outputs: dict[str, _LLMOutput] = {}
-    for step_row in sorted_steps:
-        if step_row.step_name == from_step:
-            break
-        if not step_row.parsed_output:
-            continue
-        parsed = json.loads(step_row.parsed_output)
-        output = _LLMOutput.model_validate(parsed)
-        if "/" in step_row.step_name:
-            # Parallel branch stored as "group/branch" — register under branch name
-            # so {{steps.branch_name.field}} resolves correctly downstream
-            _, branch_name = step_row.step_name.split("/", 1)
-            initial_step_outputs[branch_name] = output
-        else:
-            initial_step_outputs[step_row.step_name] = output
+    # Reconstruct prior step outputs + NormalisedContext from the original run's
+    # DB rows — shared with replay.py's `rerender` mode via replay_context.py
+    # (SPEC-replay-shadow-eval.md §notes) so both code paths agree on what a
+    # step's context looked like at execution time.
+    from .pipeline.replay_context import group_prior_step_outputs, reconstruct_normalised_context
 
-    # Reconstruct NormalisedContext from the original run, with a fresh timestamp
-    # and no fingerprint (re-runs are never deduped against each other)
-    nc_raw = json.loads(original_run.normalised_context)
-    normalised = NormalisedContext(
-        source="rerun",
-        pipeline=nc_raw.get("pipeline", ""),
-        severity=nc_raw.get("severity"),
-        labels=nc_raw.get("labels", {}),
-        summary=nc_raw.get("summary"),
-        fingerprint=None,
-        raw=nc_raw.get("raw", {}),
-        metadata={
-            **nc_raw.get("metadata", {}),
-            "original_run_id": run_id,
-            "from_step": from_step,
-        },
+    sorted_steps = sorted(original_run.steps, key=lambda s: s.step_index)
+    from_step_index = next(s.step_index for s in sorted_steps if s.step_name == from_step)
+    initial_step_outputs = group_prior_step_outputs(sorted_steps, before_step_index=from_step_index)
+
+    normalised = reconstruct_normalised_context(
+        original_run, source="rerun",
+        metadata_extra={"original_run_id": run_id, "from_step": from_step},
     )
 
     global _active_runs
@@ -1563,6 +1544,59 @@ async def rerun_from_step(run_id: str, request: Request):
             "prior_steps_loaded": len(initial_step_outputs),
         },
     )
+
+
+@app.post("/steps/{step_name}/replay")
+async def replay_step(step_name: str, request: Request):
+    """Launch a replay batch: re-run the most recent K labelled production
+    executions of this step's calibration bucket against a candidate
+    model/agent/prompt (SPEC-replay-shadow-eval.md). Synchronous — a batch is
+    at most 100 samples at concurrency 3, so this returns once every sample
+    has been attempted (executed, unreplayable, or failed), not just accepted.
+    """
+    body = await request.json()
+    try:
+        replay_request = ReplayRequest.model_validate(body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"invalid replay request: {exc}") from exc
+
+    if _runner is None:
+        raise HTTPException(status_code=503, detail="runner not initialised")
+
+    session_factory = get_session_factory()
+    try:
+        run_id = await replay.run_replay_batch(
+            session_factory, _runner, step_name, replay_request,
+            gateway_rest_url=_runner._gateway_rest_url,
+        )
+    except ReplayNotConfigured:
+        raise HTTPException(
+            status_code=403,
+            detail="replay is not configured — set replay.safe_agents in config.yaml",
+        )
+    except AgentNotAllowlisted as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"agent '{exc.agent_key}' is not in replay.safe_agents — add it to config.yaml "
+                "only if you have verified it makes no side-effecting tool calls"
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return JSONResponse(status_code=202, content={"status": "completed", "run_id": run_id})
+
+
+@app.get("/replays/{run_id}/report")
+async def get_replay_report(run_id: str):
+    """Recomputed live on every request (same pattern as calibration) — a mark
+    submitted a moment ago is already reflected, no persisted report artifact."""
+    session_factory = get_session_factory()
+    try:
+        return await replay.get_report(session_factory, run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.post("/runs/{run_id}/feedback")

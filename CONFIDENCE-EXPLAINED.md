@@ -348,6 +348,21 @@ down, precisely so a run is never allowed to finish half under one config and
 half under another. A run either resumes wholly under the config it started
 with, or it doesn't resume.
 
+### Proving a change before promotion
+
+Editing a step's prompt (or swapping its model/agent) resets its calibration
+bucket by design — a fresh `prompt_hash`/`agent_version` starts the track
+record at zero, and rebuilding that record the normal way means running the
+new config forward in production and waiting. Replay (see docs: Operations >
+Replay / shadow evaluation) shortcuts that wait: it re-runs the same recorded,
+labelled inputs an existing bucket already has ground truth for against the
+candidate config, so the comparison is apples-to-apples — same inputs, only
+the configuration under test differs. A replay batch is `stage: testing`
+throughout, so it never pre-seeds the candidate's real production bucket;
+production trust is still only earned in production. What replay produces is
+evidence for the decision to promote, not a shortcut around the [readiness
+gate](https://vectorstep.io/docs/concepts/readiness/) itself.
+
 ---
 
 ## 8. A worked example, start to finish
