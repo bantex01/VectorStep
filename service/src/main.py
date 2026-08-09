@@ -65,6 +65,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Container images set VECTORSTEP_VERSION at build time (see Dockerfile and
+# .github/workflows/image.yml) — a released image reports its tag, an
+# untagged local build reports "dev". Outside a container (bare checkout,
+# no env var set) this also falls back to "dev" — there is no released
+# version yet.
+VERSION = os.environ.get("VECTORSTEP_VERSION") or "dev"
+
 
 def _setup_logging(config: dict) -> None:
     """Reconfigure logging from config.yaml after startup.
@@ -150,8 +157,15 @@ _max_concurrent_runs: int = 10
 
 def _load_config() -> dict:
     config_path = os.environ.get("CONFIG_PATH", "config.yaml")
-    with open(config_path) as f:
-        raw = yaml.safe_load(f)
+    try:
+        with open(config_path) as f:
+            raw = yaml.safe_load(f)
+    except FileNotFoundError:
+        raise SystemExit(
+            f"Config file not found at '{config_path}' (set via the CONFIG_PATH "
+            "env var, default 'config.yaml'). Mount a config file at this path "
+            "or point CONFIG_PATH at one before starting the service."
+        )
 
     # Resolve ${ENV_VAR} placeholders
     def _resolve(value):
@@ -862,6 +876,7 @@ async def favicon():
 async def health():
     return {
         "status": "ok",
+        "version": VERSION,
         "active_runs": _active_runs,
         "max_concurrent_runs": _max_concurrent_runs,
     }

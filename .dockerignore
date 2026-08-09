@@ -1,0 +1,12 @@
+.git
+.venv
+**/__pycache__
+*.log
+logs/
+tests/
+.github/
+config.yaml
+service/steps/
+service/config.yaml
+*.db
+artifacts/

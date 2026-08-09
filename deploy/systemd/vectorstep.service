@@ -1,0 +1,27 @@
+[Unit]
+Description=VectorStep orchestration service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=vectorstep
+Group=vectorstep
+WorkingDirectory=/opt/vectorstep/vectorstep/service
+EnvironmentFile=/etc/vectorstep/vectorstep/env
+Environment=CONFIG_PATH=/etc/vectorstep/vectorstep/config.yaml
+ExecStart=/opt/vectorstep/vectorstep/.venv/bin/uvicorn src.main:app --host 0.0.0.0 --port 8000
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Hardening — keep, unless a documented feature breaks under it (then relax the
+# specific directive with a comment saying which feature needed it).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vectorstep/vectorstep /var/log/vectorstep/vectorstep
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,81 @@
+# replicas: 1 is required today, regardless of database backend — the
+# scheduler (APScheduler) is in-process and the event/dedup state is
+# in-memory. A second replica would double-fire scheduled pipelines and
+# desync dedup windows. strategy: Recreate (rather than the apps/v1 default
+# RollingUpdate) ensures the old pod fully terminates before the new one
+# starts, so there is never a moment with two pods live — see
+# configmap.example.yaml's database.auto_migrate comment for why that also
+# makes in-process Alembic migration safe with no init container.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vectorstep
+  labels:
+    app: vectorstep
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vectorstep
+  template:
+    metadata:
+      labels:
+        app: vectorstep
+    spec:
+      containers:
+        - name: vectorstep
+          # Pin to a specific released tag in production (see ../../RELEASING.md);
+          # :edge tracks the default branch, :latest tracks the most recent release.
+          image: ghcr.io/bantex01/vectorstep:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            # kubectl create secret generic vectorstep-secrets \
+            #   --from-literal=VECTORSTEP_GATEWAY_TOKEN=... \
+            #   --from-literal=VECTORSTEP_WEBHOOK_TOKEN=...
+            # Feeds the ${VAR} placeholders in configmap.example.yaml — no secret
+            # values are ever baked into the ConfigMap or the image.
+            - secretRef:
+                name: vectorstep-secrets
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vectorstep
+              readOnly: true
+            - name: data
+              mountPath: /data
+            # Uncomment to manage pipelines/steps as versioned ConfigMaps instead of
+            # PVC-resident files (mutually exclusive with editing them via the UI/API,
+            # which writes to /data/pipelines and /data/steps on the PVC):
+            # - name: pipelines
+            #   mountPath: /data/pipelines
+            #   readOnly: true
+            # - name: steps
+            #   mountPath: /data/steps
+            #   readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: vectorstep-config   # from configmap.example.yaml — copy, edit, apply first
+        - name: data
+          persistentVolumeClaim:
+            claimName: vectorstep-data
+        # - name: pipelines
+        #   configMap:
+        #     name: vectorstep-pipelines   # kubectl create configmap vectorstep-pipelines --from-file=./pipelines/
+        # - name: steps
+        #   configMap:
+        #     name: vectorstep-steps       # kubectl create configmap vectorstep-steps --from-file=./steps/

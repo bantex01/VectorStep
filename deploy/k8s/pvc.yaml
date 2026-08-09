@@ -1,0 +1,13 @@
+# The single /data volume — db, artifacts, logs, pipelines, steps. Adjust
+# storageClassName and size for your cluster; 5Gi is a small-deployment
+# starting point, not a sizing recommendation.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vectorstep-data
+spec:
+  accessModes: [ReadWriteOnce]
+  # storageClassName: your-storage-class
+  resources:
+    requests:
+      storage: 5Gi

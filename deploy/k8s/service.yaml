@@ -1,0 +1,13 @@
+# ClusterIP by default — front this with an Ingress or change type: to
+# LoadBalancer/NodePort if you need it reachable from outside the cluster
+# (e.g. for Alertmanager/webhook sources).
+apiVersion: v1
+kind: Service
+metadata:
+  name: vectorstep
+spec:
+  selector:
+    app: vectorstep
+  ports:
+    - port: 8000
+      targetPort: 8000

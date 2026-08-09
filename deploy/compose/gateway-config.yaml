@@ -1,0 +1,25 @@
+# Minimal working config for the docker-compose evaluation stack.
+# See ../../../VectorStep-Gateway/samples/config.yaml.example for the full
+# annotated reference.
+
+server:
+  host: 0.0.0.0
+  port: 18780
+
+agents_dir: /data/agents
+
+identity:
+  path: /data/identity
+
+logging:
+  dir: /data/logs
+
+# No MCP servers configured — an empty mcp_servers map is valid and /health
+# stays "ok". Add servers here (see the Gateway's samples/config.yaml.example)
+# once you need real tools; note that npx-based servers fetch on first
+# startup unless preinstalled in the image (see ../README.md).
+mcp_servers: {}
+
+providers:
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY}

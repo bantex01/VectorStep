@@ -1,0 +1,39 @@
+# Evaluation/dev bring-up for the VectorStep + VectorStep-Gateway pair.
+# Assumes sibling checkouts:  <parent>/VectorStep  and  <parent>/VectorStep-Gateway
+# Copy compose.env.example to .env and fill in keys first.
+# Production: use deploy/k8s/ or deploy/systemd/ instead.
+services:
+  vectorstep:
+    build: {context: .., dockerfile: service/Dockerfile}
+    image: ghcr.io/bantex01/vectorstep:edge      # used if you `docker compose pull`
+    ports: ["8000:8000"]
+    environment:
+      CONFIG_PATH: /etc/vectorstep/config.yaml
+      VECTORSTEP_GATEWAY_TOKEN: ${VECTORSTEP_GATEWAY_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./compose/vectorstep-config.yaml:/etc/vectorstep/config.yaml:ro
+      - vectorstep-data:/data
+    depends_on: [gateway]
+
+  gateway:
+    build: {context: ../../VectorStep-Gateway}
+    image: ghcr.io/bantex01/vectorstep-gateway:edge
+    ports: ["18780:18780"]
+    environment:
+      VECTORSTEP_GATEWAY_CONFIG: /etc/vectorstep-gateway/config.yaml
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./compose/gateway-config.yaml:/etc/vectorstep-gateway/config.yaml:ro
+      - gateway-data:/data
+
+  postgres:
+    image: postgres:16
+    profiles: [postgres]
+    environment:
+      POSTGRES_USER: vectorstep
+      POSTGRES_PASSWORD: vectorstep
+      POSTGRES_DB: vectorstep
+    volumes: [pg-data:/var/lib/postgresql/data]
+
+volumes: {vectorstep-data: {}, gateway-data: {}, pg-data: {}}

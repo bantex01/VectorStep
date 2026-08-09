@@ -1,0 +1,52 @@
+# EXAMPLE — copy, edit, and apply as your own ConfigMap (or generate one from
+# your real config with `kubectl create configmap vectorstep-config
+# --from-file=config.yaml=./my-config.yaml`). Do not apply this file verbatim.
+#
+# This is the same "container paths" config described in
+# ../../samples/config.yaml.example — everything writable lives under /data,
+# which the Deployment mounts from the PVC in pvc.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vectorstep-config
+data:
+  config.yaml: |
+    server:
+      host: 0.0.0.0
+      port: 8000
+
+    database:
+      url: sqlite+aiosqlite:////data/db/runs.db   # four slashes = absolute path
+      # auto_migrate: true is the default (see below) — omit this key to keep it.
+      # Migrations run in-process at boot via create_tables(). With replicas: 1
+      # and strategy: Recreate (both set in deployment.yaml) that is safe and
+      # needs no init container: the old pod is fully torn down before the new
+      # one starts, so there is never a version-mismatched pod running against
+      # a mid-migration schema.
+      #
+      # For a DBA-controlled cluster where migrations should be a reviewed,
+      # separate step: set `auto_migrate: false` here, then run migrations
+      # explicitly before rolling a new image —
+      #   kubectl exec deploy/vectorstep -- alembic upgrade head
+      # (or a one-shot Job running the same command) — then roll the
+      # Deployment. That's exactly what auto_migrate exists for.
+
+    pipeline_config_dir: /data/pipelines   # see the commented ConfigMap-mount alternative
+    step_library_dir: /data/steps          # in deployment.yaml if you'd rather manage these
+                                            # as versioned ConfigMaps than PVC-resident files.
+
+    artifacts:
+      dir: /data/artifacts
+
+    logging:
+      dir: /data/logs
+
+    executors:
+      gateway:
+        url: ws://vectorstep-gateway:18780/rpc   # Gateway's in-cluster Service name:port
+        token: ${VECTORSTEP_GATEWAY_TOKEN}       # from the Secret via envFrom — see README.md
+        rest_url: http://vectorstep-gateway:18780
+
+    # auth:
+    #   token: ${VECTORSTEP_WEBHOOK_TOKEN}   # protect POST /webhook before exposing it — see
+    #                                         # samples/config.yaml.example for the full auth block.

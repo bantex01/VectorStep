@@ -1,3 +1,18 @@
+# ---------------------------------------------------------------------------
+# Container deployment (Docker / Kubernetes)
+# ---------------------------------------------------------------------------
+# The defaults below assume a bare checkout, with paths relative to the
+# process's working directory. In a container, everything writable lives
+# under a single /data volume (see service/Dockerfile and deploy/k8s/).
+# Override the equivalent keys like this:
+#
+#   database: {url: "sqlite+aiosqlite:////data/db/runs.db"}   # four slashes = absolute path
+#   pipeline_config_dir: /data/pipelines     # or a ConfigMap mount — operator's choice
+#   step_library_dir: /data/steps
+#   artifacts: {dir: /data/artifacts}
+#   logging: {dir: /data/logs}
+# ---------------------------------------------------------------------------
+
 server:
   host: 0.0.0.0
   port: 8000
