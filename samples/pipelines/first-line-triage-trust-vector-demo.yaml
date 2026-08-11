@@ -39,13 +39,13 @@ trigger:
     source: demo   # irrelevant for "Run now" (which triggers by name), only matters for real webhooks
 
 vars:
-  confluence_space: SOC
-  confluence_space_url: https://alexfdalton.atlassian.net/wiki/spaces/SOC/
+  confluence_space: OPS
+  confluence_space_url: https://yourorg.atlassian.net/wiki/spaces/OPS/
   confluence_service_docs_folder: Service Documentation
   confluence_service_doc_name: OTEL Collector
   service_doc_schema: "Owner, Business Criticality, SLO (Scrape Duration), SLO (Availability), Dependencies (Upstream + Downstream), Failure Impact, Known Fragility"
-  jira_project: OC
-  jira_project_url: https://alexfdalton.atlassian.net/jira/software/projects/OC/
+  jira_project: OPS
+  jira_project_url: https://yourorg.atlassian.net/jira/software/projects/OPS/
 
 context_template:
   include:

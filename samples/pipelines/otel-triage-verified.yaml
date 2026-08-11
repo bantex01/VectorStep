@@ -13,17 +13,17 @@ trigger:
 
 vars:
   # First-line triage
-  confluence_space: SOC
-  confluence_space_url: https://alexfdalton.atlassian.net/wiki/spaces/SOC/
+  confluence_space: OPS
+  confluence_space_url: https://yourorg.atlassian.net/wiki/spaces/OPS/
   confluence_service_docs_folder: Service Documentation
   confluence_service_doc_name: OTEL Collector
   service_doc_schema: "Owner, Business Criticality, SLO (Scrape Duration), SLO (Availability), Dependencies (Upstream + Downstream), Failure Impact, Known Fragility"
-  jira_project: OC
-  jira_project_url: https://alexfdalton.atlassian.net/jira/software/projects/OC/
+  jira_project: OPS
+  jira_project_url: https://yourorg.atlassian.net/jira/software/projects/OPS/
 
   # SRE investigation
   grafana_mcp_server: grafana_production
-  grafana_url: https://alexfdalton.grafana.net/
+  grafana_url: https://yourorg.grafana.net/
   grafana_dashboard: OTEL Collector
   grafana_service_labels: "job=otelcol-contrib, component=adalton-tools-otel-collector"
   alerting_metric: scrape_duration_seconds

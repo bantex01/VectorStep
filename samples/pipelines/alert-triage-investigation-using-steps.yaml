@@ -65,7 +65,7 @@ steps:
   # deep-merged so agent/session_key are still inherited from the library):
   #   - use: sre-investigation
   #     executor_config:
-  #       model: anthropic/claude-opus-4-8
+  #       model: anthropic/claude-opus-5
   - use: sre-investigation
 
 # ── Notifications ─────────────────────────────────────────────────────────────

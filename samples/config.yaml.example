@@ -163,10 +163,10 @@ auth:
 #   currency: USD                  # display label only — no FX conversion anywhere
 #   models:
 #     # example — verify against your provider's current pricing before relying on this
-#     - match: {provider: anthropic, model: "claude-sonnet-4-6"}
+#     - match: {provider: anthropic, model: "claude-sonnet-5"}
 #       input_per_mtok: 3.00        # currency units per 1,000,000 input tokens
 #       output_per_mtok: 15.00
-#     - match: {provider: anthropic, model: "claude-haiku"}   # prefix match on the model string
+#     - match: {provider: anthropic, model: "claude-haiku-4-5"}   # prefix match on the model string
 #       input_per_mtok: 1.00
 #       output_per_mtok: 5.00
 #     - match: {provider: openrouter}                          # provider-only fallback (no model key)

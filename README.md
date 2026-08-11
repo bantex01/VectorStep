@@ -62,4 +62,4 @@ Full docs at [vectorstep.io](https://vectorstep.io/docs/):
 
 ## Licence and contributions
 
-Apache-2.0 — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). Open source, but not open contribution: no external code contributions are accepted. See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), and [Licence & contributions](https://vectorstep.io/docs/about/licence-and-contributions/) for the full policy and why.
+Apache-2.0 — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). Contributions are welcome: see [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), and [Licence & contributions](https://vectorstep.io/docs/about/licence-and-contributions/).
