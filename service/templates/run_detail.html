@@ -63,6 +63,22 @@
 </div>
 {% endmacro %}
 
+{% macro _render_value(v) %}
+{% if v is string %}
+<p class="text-sm text-zinc-300 leading-relaxed">{{ v }}</p>
+{% elif v is mapping %}
+<pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ v | tojson(indent=2) }}</pre>
+{% elif v is sequence %}
+<ul class="list-disc list-inside space-y-1 text-sm text-zinc-300">
+  {% for entry in v %}
+  <li>{{ entry if entry is string else (entry | tojson) }}</li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="text-sm text-zinc-300 leading-relaxed font-mono">{{ v | tojson }}</p>
+{% endif %}
+{% endmacro %}
+
 {% macro _render_parsed_output(parsed, pretty, threshold) %}
 {% set known_top_keys = ['confidence', 'proceed', 'proceed_reason', 'summary', 'next_step_context', 'reasoning', 'model', 'provider', 'agent_version', 'raw_response'] %}
 {% set known_reasoning_keys = ['supports', 'contradicts'] %}
@@ -80,6 +96,16 @@
     <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-mono ring-1 ring-inset
                   {% if parsed.proceed %}bg-green-950 text-green-400 ring-green-800{% else %}bg-red-950 text-red-400 ring-red-800{% endif %}">
       proceed: {{ parsed.proceed | tojson }}
+    </span>
+    {% endif %}
+    {% if parsed.model %}
+    <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">
+      model: {{ parsed.model }}
+    </span>
+    {% endif %}
+    {% if parsed.provider %}
+    <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-mono bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700">
+      provider: {{ parsed.provider }}
     </span>
     {% endif %}
   </div>
@@ -125,11 +151,7 @@
         {% if rkey not in known_reasoning_keys %}
         <div class="rounded-md bg-zinc-800/50 border border-zinc-700/50 px-3 py-2.5">
           <p class="text-xs font-semibold text-zinc-400 mb-1 uppercase tracking-wide">{{ rkey }}</p>
-          {% if rval is string %}
-          <p class="text-sm text-zinc-300 leading-relaxed">{{ rval }}</p>
-          {% else %}
-          <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ rval | tojson(indent=2) }}</pre>
-          {% endif %}
+          {{ _render_value(rval) }}
         </div>
         {% endif %}
       {% endfor %}
@@ -148,11 +170,7 @@
       {% for k, v in other.items() %}
       <div class="flex gap-2 text-sm">
         <span class="text-zinc-500 font-mono shrink-0">{{ k }}:</span>
-        {% if v is string %}
-        <span class="text-zinc-300">{{ v }}</span>
-        {% else %}
-        <span class="text-zinc-300 font-mono">{{ v | tojson }}</span>
-        {% endif %}
+        <div class="flex-1">{{ _render_value(v) }}</div>
       </div>
       {% endfor %}
     </div>
