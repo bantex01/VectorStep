@@ -63,6 +63,117 @@
 </div>
 {% endmacro %}
 
+{% macro _render_parsed_output(parsed, pretty, threshold) %}
+{% set known_top_keys = ['confidence', 'proceed', 'proceed_reason', 'summary', 'next_step_context', 'reasoning', 'model', 'provider', 'agent_version', 'raw_response'] %}
+{% set known_reasoning_keys = ['supports', 'contradicts'] %}
+{% set thresh = threshold if threshold is not none else 0.75 %}
+<div x-data="{ json_open: false }" class="space-y-3">
+  <div class="flex flex-wrap items-center gap-2">
+    {% if parsed.confidence is defined and parsed.confidence is not none %}
+    <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-mono ring-1 ring-inset
+                  {% if parsed.confidence >= thresh %}bg-green-950 text-green-400 ring-green-800{% else %}bg-red-950 text-red-400 ring-red-800{% endif %}">
+      confidence: {{ "%.0f%%"|format(parsed.confidence * 100) }}
+      <span class="opacity-60">(threshold {{ "%.0f%%"|format(thresh * 100) }})</span>
+    </span>
+    {% endif %}
+    {% if parsed.proceed is defined and parsed.proceed is not none %}
+    <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-mono ring-1 ring-inset
+                  {% if parsed.proceed %}bg-green-950 text-green-400 ring-green-800{% else %}bg-red-950 text-red-400 ring-red-800{% endif %}">
+      proceed: {{ parsed.proceed | tojson }}
+    </span>
+    {% endif %}
+  </div>
+
+  {% if parsed.proceed_reason %}
+  <div>
+    <p class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Proceed reason</p>
+    <p class="text-sm text-zinc-300 leading-relaxed">{{ parsed.proceed_reason }}</p>
+  </div>
+  {% endif %}
+
+  {% if parsed.summary %}
+  <div>
+    <p class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Summary</p>
+    <p class="text-sm text-zinc-300 leading-relaxed">{{ parsed.summary }}</p>
+  </div>
+  {% endif %}
+
+  {% if parsed.next_step_context %}
+  <div>
+    <p class="text-xs text-zinc-500 uppercase tracking-wide mb-1">Next-step context</p>
+    <p class="text-sm text-zinc-300 leading-relaxed">{{ parsed.next_step_context }}</p>
+  </div>
+  {% endif %}
+
+  {% if parsed.reasoning %}
+  <div>
+    <p class="text-xs text-zinc-500 uppercase tracking-wide mb-2">Reasoning</p>
+    <div class="space-y-2">
+      {% if parsed.reasoning.supports %}
+      <div class="rounded-md bg-emerald-950/30 border border-emerald-900/40 px-3 py-2.5">
+        <p class="text-xs font-semibold text-emerald-400 mb-1 uppercase tracking-wide">Supports</p>
+        <p class="text-sm text-emerald-100/80 leading-relaxed">{{ parsed.reasoning.supports }}</p>
+      </div>
+      {% endif %}
+      {% if parsed.reasoning.contradicts %}
+      <div class="rounded-md bg-red-950/30 border border-red-900/40 px-3 py-2.5">
+        <p class="text-xs font-semibold text-red-400 mb-1 uppercase tracking-wide">Contradicts</p>
+        <p class="text-sm text-red-100/80 leading-relaxed">{{ parsed.reasoning.contradicts }}</p>
+      </div>
+      {% endif %}
+      {% for rkey, rval in parsed.reasoning.items() %}
+        {% if rkey not in known_reasoning_keys %}
+        <div class="rounded-md bg-zinc-800/50 border border-zinc-700/50 px-3 py-2.5">
+          <p class="text-xs font-semibold text-zinc-400 mb-1 uppercase tracking-wide">{{ rkey }}</p>
+          {% if rval is string %}
+          <p class="text-sm text-zinc-300 leading-relaxed">{{ rval }}</p>
+          {% else %}
+          <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ rval | tojson(indent=2) }}</pre>
+          {% endif %}
+        </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% set other = {} %}
+  {% for k, v in parsed.items() %}
+    {% if k not in known_top_keys %}{% set _ = other.update({k: v}) %}{% endif %}
+  {% endfor %}
+  {% if other %}
+  <div>
+    <p class="text-xs text-zinc-500 uppercase tracking-wide mb-2">Other fields</p>
+    <div class="space-y-1.5">
+      {% for k, v in other.items() %}
+      <div class="flex gap-2 text-sm">
+        <span class="text-zinc-500 font-mono shrink-0">{{ k }}:</span>
+        {% if v is string %}
+        <span class="text-zinc-300">{{ v }}</span>
+        {% else %}
+        <span class="text-zinc-300 font-mono">{{ v | tojson }}</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <div>
+    <button @click="json_open = !json_open" type="button"
+            class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
+      <svg class="w-3.5 h-3.5 transition-transform" :class="json_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+      </svg>
+      <span class="uppercase tracking-wide font-medium">Raw JSON</span>
+    </button>
+    <div x-show="json_open" x-cloak class="mt-3">
+      <pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ pretty }}</pre>
+    </div>
+  </div>
+</div>
+{% endmacro %}
+
 <!-- Run header -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 mb-6">
   <div class="flex items-start justify-between">
@@ -199,7 +310,7 @@
     </div>
     {% if item.pretty or item.trace %}
     <div x-show="open" x-cloak class="border-t border-zinc-800 divide-y divide-zinc-800">
-      {% if item.pretty %}<div class="px-4 py-3"><pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.pretty }}</pre></div>{% endif %}
+      {% if item.pretty %}<div class="px-4 py-3">{{ _render_parsed_output(item.parsed, item.pretty, none) }}</div>{% endif %}
       {% if item.trace %}{{ _render_trace(item.trace) }}{% endif %}
     </div>
     {% endif %}
@@ -222,11 +333,11 @@
     </div>
     {% if item.pretty or item.verifier_pretty or item.trace %}
     <div x-show="open" x-cloak class="border-t border-zinc-800 divide-y divide-zinc-800">
-      {% if item.pretty %}<div class="px-4 py-3"><pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.pretty }}</pre></div>{% endif %}
+      {% if item.pretty %}<div class="px-4 py-3">{{ _render_parsed_output(item.parsed, item.pretty, none) }}</div>{% endif %}
       {% if item.verifier_pretty %}
       <div class="px-4 py-3">
         <p class="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">{{ item.verifier_label }}</p>
-        <pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.verifier_pretty }}</pre>
+        {{ _render_parsed_output(item.verifier_parsed, item.verifier_pretty, none) }}
       </div>
       {% endif %}
       {% if item.trace %}{{ _render_trace(item.trace) }}{% endif %}
@@ -303,7 +414,7 @@
     <div x-show="open" x-cloak class="border-t border-zinc-800 divide-y divide-zinc-800">
       {% if item.pretty %}
       <div class="px-4 py-3">
-        <pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.pretty }}</pre>
+        {{ _render_parsed_output(item.parsed, item.pretty, none) }}
       </div>
       {% endif %}
       {% if item.agent_snapshot %}
@@ -479,12 +590,13 @@
       {% if item.agent_snapshot %}
       {{ macros.agent_snapshot_panel(item) }}
       {% endif %}
+      {% set _threshold = item.trust.gate.confidence_threshold if item.trust and item.trust.gate else none %}
       {% if item.pretty %}
       <div class="px-4 py-4">
         {% if item.verifier_pretty %}
           <p class="text-xs text-zinc-500 uppercase tracking-wide mb-2">Primary</p>
         {% endif %}
-        <pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.pretty }}</pre>
+        {{ _render_parsed_output(item.parsed, item.pretty, _threshold) }}
       </div>
       {% endif %}
       {% if item.verifier_pretty %}
@@ -510,7 +622,7 @@
           </div>
         </div>
         {% endif %}
-        <pre class="text-xs text-zinc-300 font-mono leading-relaxed">{{ item.verifier_pretty }}</pre>
+        {{ _render_parsed_output(item.verifier_parsed, item.verifier_pretty, _threshold) }}
       </div>
       {% endif %}
       {% if run.status not in ('running', 'interrupted') and item.step.status != 'running' %}

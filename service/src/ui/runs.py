@@ -415,6 +415,7 @@ async def ui_run_detail(request: Request, run_id: str):
                 "step": step,
                 "parsed": parsed,
                 "pretty": pretty,
+                "verifier_parsed": verifier_parsed,
                 "verifier_pretty": verifier_pretty,
                 "verifier_label": verifier_label,
                 "trace": trace,
@@ -428,6 +429,7 @@ async def ui_run_detail(request: Request, run_id: str):
                 "step": step,
                 "parsed": parsed,
                 "pretty": pretty,
+                "verifier_parsed": verifier_parsed,
                 "verifier_pretty": verifier_pretty,
                 "verifier_label": verifier_label,
                 "trace": trace,
@@ -486,6 +488,7 @@ async def ui_run_detail(request: Request, run_id: str):
                     rerun_prior_items.append({
                         "type": "branch", "group": group_name, "name": branch_name,
                         "step": step, "parsed": parsed, "pretty": pretty,
+                        "verifier_parsed": verifier_parsed,
                         "verifier_pretty": verifier_pretty, "verifier_label": verifier_label,
                         "trace": trace,
                     })
@@ -493,6 +496,7 @@ async def ui_run_detail(request: Request, run_id: str):
                     rerun_prior_items.append({
                         "type": "step", "name": step.step_name,
                         "step": step, "parsed": parsed, "pretty": pretty,
+                        "verifier_parsed": verifier_parsed,
                         "verifier_pretty": verifier_pretty, "verifier_label": verifier_label,
                         "trace": trace,
                     })
