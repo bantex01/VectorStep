@@ -45,7 +45,7 @@ class AlertmanagerParser(BaseParser):
         labels = alert.get("labels", {})
         annotations = alert.get("annotations", {})
         severity = labels.get("severity")
-        pipeline = labels.get("pipeline", "alert-triage-critical")
+        pipeline = labels.get("pipeline")  # unset falls through to trigger.match
         summary = annotations.get("summary") or annotations.get("description")
 
         return NormalisedContext(
@@ -64,7 +64,7 @@ class AlertmanagerParser(BaseParser):
         labels = payload.get("commonLabels", {})
         annotations = payload.get("commonAnnotations", {})
         severity = labels.get("severity")
-        pipeline = labels.get("pipeline", "alert-triage-critical")
+        pipeline = labels.get("pipeline")  # unset falls through to trigger.match
         summary = annotations.get("summary") or annotations.get("description")
 
         return NormalisedContext(

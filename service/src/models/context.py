@@ -6,7 +6,7 @@ from ..utils import utc_now
 
 class NormalisedContext(BaseModel):
     source: str
-    pipeline: str
+    pipeline: str | None = None  # explicit routing — unset falls through to trigger.match
     severity: str | None = None
     labels: dict[str, str] = Field(default_factory=dict)
     summary: str | None = None

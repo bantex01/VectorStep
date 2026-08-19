@@ -25,8 +25,7 @@
         "alertname": "HighErrorRate",
         "environment": "prod",
         "service": "payments-api",
-        "severity": "critical",
-        "pipeline": "alert-triage-critical"
+        "severity": "critical"
       },
       "annotations": {
         "summary": "Error rate for payments-api exceeded 5% for 5 minutes",
