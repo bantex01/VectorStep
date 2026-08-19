@@ -31,24 +31,29 @@ database:
   #                      # README §Database.
 
 executors:
-  openclaw:
-    url: ws://127.0.0.1:18789/rpc   # OpenClaw Gateway WebSocket URL
-    # identity_dir: ~/.openclaw/identity  # optional — defaults to ~/.openclaw/identity
-    #
-    # OpenClaw authenticates using Ed25519 device-signature auth. The identity files
-    # (device.json and device-auth.json) are created automatically by OpenClaw when
-    # it is installed and run on this machine.
-    #
-    # If OpenClaw is running on a DIFFERENT machine:
-    #   1. Copy ~/.openclaw/identity/ from the OpenClaw machine to this machine
-    #      (or mount it as a secret in Kubernetes)
-    #   2. Set identity_dir to the path where you copied the files
-    #   3. On the OpenClaw machine, run: openclaw devices list
-    #      to confirm the device is approved on the remote gateway
-    #
-    # If identity files are missing at startup, VectorStep will log a warning and the
-    # openclaw executor will be registered — but any step using it will fail until
-    # the files are in place.
+  # OpenClaw is a separate, optional executor backend — uncomment only if you
+  # actually run OpenClaw. Leaving it uncommented with nothing listening at
+  # the URL below is harmless (VectorStep logs a warning and any step using
+  # it fails until OpenClaw is reachable), but there's no reason to carry
+  # the connection attempt if you're not using it.
+  # openclaw:
+  #   url: ws://127.0.0.1:18789/rpc   # OpenClaw Gateway WebSocket URL
+  #   # identity_dir: ~/.openclaw/identity  # optional — defaults to ~/.openclaw/identity
+  #   #
+  #   # OpenClaw authenticates using Ed25519 device-signature auth. The identity files
+  #   # (device.json and device-auth.json) are created automatically by OpenClaw when
+  #   # it is installed and run on this machine.
+  #   #
+  #   # If OpenClaw is running on a DIFFERENT machine:
+  #   #   1. Copy ~/.openclaw/identity/ from the OpenClaw machine to this machine
+  #   #      (or mount it as a secret in Kubernetes)
+  #   #   2. Set identity_dir to the path where you copied the files
+  #   #   3. On the OpenClaw machine, run: openclaw devices list
+  #   #      to confirm the device is approved on the remote gateway
+  #   #
+  #   # If identity files are missing at startup, VectorStep will log a warning and the
+  #   # openclaw executor will be registered — but any step using it will fail until
+  #   # the files are in place.
 
   gateway:
     url: ws://localhost:18780/rpc     # VectorStep Gateway WebSocket URL
