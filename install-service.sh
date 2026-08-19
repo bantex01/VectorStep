@@ -22,22 +22,25 @@ die()  { printf 'error: %s\n' "$1" >&2; exit 1; }
 
 command -v git >/dev/null 2>&1 || die "git not found on PATH. Install git and re-run."
 
-PYTHON_BIN=""
-for candidate in python3.11 python3.12 python3.13 python3; do
-  if command -v "$candidate" >/dev/null 2>&1; then
-    PYTHON_BIN="$candidate"
-    break
+# macOS machines commonly have more than one Python (Homebrew, python.org,
+# pyenv, system) on PATH at once, and one of them can be broken — bad
+# linking against system libraries, a corrupted build — while another
+# works fine. Collect every 3.11+ interpreter found, deduplicated by
+# resolved path, so the venv step below can fall through to the next one
+# instead of dying on whichever happens to be found first.
+PYTHON_CANDIDATES=""
+for name in python3 python3.13 python3.12 python3.11; do
+  bin="$(command -v "$name" 2>/dev/null)" || continue
+  case " $PYTHON_CANDIDATES " in
+    *" $bin "*) continue ;;
+  esac
+  if "$bin" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 11) else 1)' 2>/dev/null; then
+    PYTHON_CANDIDATES="$PYTHON_CANDIDATES $bin"
   fi
 done
-[ -n "$PYTHON_BIN" ] || die "no python3 found on PATH. Install Python 3.11+ and re-run."
+[ -n "$PYTHON_CANDIDATES" ] || die "no Python 3.11+ found on PATH (checked python3, python3.11, python3.12, python3.13). Install Python 3.11+ and re-run."
 
-PYTHON_VERSION="$("$PYTHON_BIN" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-"$PYTHON_BIN" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 11) else 1)' \
-  || die "found $PYTHON_BIN ($PYTHON_VERSION), but VectorStep needs Python 3.11+."
-
-"$PYTHON_BIN" -m pip --version >/dev/null 2>&1 || die "pip not available for $PYTHON_BIN. Install pip and re-run."
-
-log "preflight ok (git, $PYTHON_BIN $PYTHON_VERSION, pip)"
+log "preflight ok (git; Python 3.11+ found:$PYTHON_CANDIDATES)"
 
 # --- Clone ---------------------------------------------------------------
 
@@ -61,18 +64,33 @@ else
     rm -rf .venv
   fi
 
-  log "creating virtualenv"
-  if ! "$PYTHON_BIN" -m venv .venv; then
+  PYTHON_BIN=""
+  for candidate in $PYTHON_CANDIDATES; do
+    log "creating virtualenv with $candidate"
+    if "$candidate" -m venv .venv 2>/dev/null; then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+
     # ensurepip's bootstrap install of pip into the new venv is a known
-    # flaky step on some Python builds (Homebrew's python@3.12 in
-    # particular) — venv creation itself succeeds, but that internal `pip
-    # install --upgrade pip` subprocess fails with no useful error surfaced.
-    # Recreate without the bundled bootstrap and install pip ourselves.
-    log "venv creation failed bootstrapping pip (a known issue on some Python builds, e.g. Homebrew's python@3.12) — retrying without the bundled pip bootstrap"
+    # flaky step on some Python builds — venv creation itself proceeds, but
+    # the internal `pip install --upgrade pip` subprocess fails (seen on
+    # both a Homebrew python@3.12 with a stale/mismatched bottle and a
+    # python@3.14 with a broken pyexpat build). Retry without the bundled
+    # bootstrap and install pip ourselves instead.
+    log "venv creation with $candidate failed bootstrapping pip — retrying without the bundled pip bootstrap"
     rm -rf .venv
-    "$PYTHON_BIN" -m venv --without-pip .venv
-    curl -sS https://bootstrap.pypa.io/get-pip.py | .venv/bin/python
-  fi
+    if "$candidate" -m venv --without-pip .venv 2>/dev/null \
+      && curl -sS https://bootstrap.pypa.io/get-pip.py | .venv/bin/python >/dev/null 2>&1; then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+
+    log "$candidate could not produce a working virtualenv, trying the next Python found"
+    rm -rf .venv
+  done
+
+  [ -n "$PYTHON_BIN" ] || die "none of the Python interpreters on PATH ($PYTHON_CANDIDATES) could create a working virtualenv — this points to a broken local Python install rather than anything this script can fix. Try installing Python fresh from https://python.org and re-run."
 fi
 
 log "installing dependencies"
