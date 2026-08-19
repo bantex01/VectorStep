@@ -53,11 +53,26 @@ cd "$INSTALL_DIR/service"
 # --- Virtualenv + deps -----------------------------------------------------
 # venv and config live in service/; requirements.txt lives at the repo root.
 
-if [ -d ".venv" ]; then
+if [ -d ".venv" ] && [ -x ".venv/bin/pip" ]; then
   skip ".venv already exists, not recreating"
 else
+  if [ -d ".venv" ]; then
+    log "existing .venv has no working pip, recreating"
+    rm -rf .venv
+  fi
+
   log "creating virtualenv"
-  "$PYTHON_BIN" -m venv .venv
+  if ! "$PYTHON_BIN" -m venv .venv; then
+    # ensurepip's bootstrap install of pip into the new venv is a known
+    # flaky step on some Python builds (Homebrew's python@3.12 in
+    # particular) — venv creation itself succeeds, but that internal `pip
+    # install --upgrade pip` subprocess fails with no useful error surfaced.
+    # Recreate without the bundled bootstrap and install pip ourselves.
+    log "venv creation failed bootstrapping pip (a known issue on some Python builds, e.g. Homebrew's python@3.12) — retrying without the bundled pip bootstrap"
+    rm -rf .venv
+    "$PYTHON_BIN" -m venv --without-pip .venv
+    curl -sS https://bootstrap.pypa.io/get-pip.py | .venv/bin/python
+  fi
 fi
 
 log "installing dependencies"
