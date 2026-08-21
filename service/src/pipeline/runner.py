@@ -1456,6 +1456,8 @@ class PipelineRunner:
         branch_outputs: dict[str, LLMOutput] = dict(completed_branches)
 
         for i, (branch, raw) in enumerate(zip(missing, raw_results)):
+            verifier_output: LLMOutput | None = None
+            primary_confidence: float | None = None
             if isinstance(raw, Exception):
                 msg = f"Executor error: {type(raw).__name__}: {raw}"
                 logger.error("Branch '%s' raised unhandled exception: %s", branch.name, raw)
@@ -1464,7 +1466,7 @@ class PipelineRunner:
                            branch=branch.name, group=group.name)
                 output = LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True)
             else:
-                output = raw
+                output, verifier_output, primary_confidence = raw
                 if not getattr(output, "failed", False):
                     _log_event(run_log, "info", "branch_completed",
                                f"Branch completed: {branch.name} — confidence {output.confidence:.0%}",
@@ -1476,7 +1478,10 @@ class PipelineRunner:
             # consistent with a fresh run's ordering regardless of which branches were
             # already persisted.
             branch_config_index = next(j for j, b in enumerate(group.steps) if b.name == branch.name)
-            await self._db_save_branch(run_id, group.name, branch, index, branch_config_index, output)
+            await self._db_save_branch(
+                run_id, group.name, branch, index, branch_config_index, output,
+                verifier_output, primary_confidence,
+            )
 
         # Confidence/weight are recomputed from the FULL branch set (persisted +
         # freshly executed) in group.steps order, not execution order — join
@@ -1777,6 +1782,8 @@ class PipelineRunner:
 
         for i, raw in zip(missing_indices, raw_results):
             branch_name = f"{fan_out.name}/{i}"
+            verifier_output: LLMOutput | None = None
+            primary_confidence: float | None = None
             if isinstance(raw, Exception):
                 msg = f"Executor error: {type(raw).__name__}: {raw}"
                 output = LLMOutput(
@@ -1787,7 +1794,7 @@ class PipelineRunner:
                            f"Fan-out branch failed: {branch_name} — {msg}",
                            step=fan_out.name, branch=branch_name)
             else:
-                output = raw
+                output, verifier_output, primary_confidence = raw
                 if not getattr(output, "failed", False):
                     _log_event(run_log, "info", "fan_out_branch_completed",
                                f"Fan-out branch completed: {branch_name} — "
@@ -1802,8 +1809,12 @@ class PipelineRunner:
                 executor=fan_out.executor,
                 executor_config=fan_out.executor_config,
                 prompt_template=fan_out.prompt_template,
+                verifier=fan_out.verifier,
             )
-            await self._db_save_branch(run_id, fan_out.name, db_branch, index, i, output)
+            await self._db_save_branch(
+                run_id, fan_out.name, db_branch, index, i, output,
+                verifier_output, primary_confidence,
+            )
 
         # Recomputed from the FULL branch set (persisted + freshly executed) in item
         # order, not execution order — matches a fresh run's ordering exactly.
@@ -1884,7 +1895,7 @@ class PipelineRunner:
         ctx: dict,
         run_log: list,
         run_id: str,
-    ) -> LLMOutput:
+    ) -> tuple[LLMOutput, LLMOutput | None, float]:
         # TODO(grounding phase): branches — grounding is not yet wired into fan-out/
         # parallel branches, only sequential StepConfig steps (see SPEC-grounding-shadow.md).
         agent = branch.executor_config.get("agent", "")
@@ -1896,7 +1907,9 @@ class PipelineRunner:
                 "vectorstep.agent": agent,
             },
         ) as span:
-            output = await self._run_parallel_branch_impl(branch, ctx, run_log, run_id)
+            output, verifier_output, primary_confidence = await self._run_parallel_branch_impl(
+                branch, ctx, run_log, run_id
+            )
             span.set_attribute("vectorstep.confidence", output.confidence)
             if output.model:
                 span.set_attribute("vectorstep.model", output.model)
@@ -1904,7 +1917,7 @@ class PipelineRunner:
                 span.set_attribute("vectorstep.provider", output.provider)
             if getattr(output, "failed", False):
                 span.set_status(Status(StatusCode.ERROR))
-            return output
+            return output, verifier_output, primary_confidence
 
     async def _run_parallel_branch_impl(
         self,
@@ -1912,7 +1925,7 @@ class PipelineRunner:
         ctx: dict,
         run_log: list,
         run_id: str,
-    ) -> LLMOutput:
+    ) -> tuple[LLMOutput, LLMOutput | None, float]:
         # Synthesise a StepConfig so we can reuse executor dispatch and verifier logic.
         # confidence_threshold=0.0 because gating happens at the group level, not per-branch.
         branch_step = StepConfig(
@@ -1937,25 +1950,27 @@ class PipelineRunner:
         except asyncio.TimeoutError:
             msg = f"Branch timed out after {branch.timeout_seconds}s"
             logger.error("Branch '%s' %s", branch.name, msg)
-            return LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True)
+            return LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True), None, 0.0
         except Exception as exc:
             msg = f"Executor error: {type(exc).__name__}: {exc}"
             logger.error("Branch '%s' %s", branch.name, msg)
-            return LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True)
+            return LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True), None, 0.0
 
+        verifier_output: LLMOutput | None = None
+        primary_confidence = output.confidence
         if branch.verifier and self._should_verify(branch.verifier, output.confidence):
             verifier_output = await self._run_verifier(branch_step, ctx, output, run_log)
             if verifier_output:
                 adjusted = self._combine_confidence(
-                    branch_step, output.confidence, verifier_output.confidence
+                    branch_step, primary_confidence, verifier_output.confidence
                 )
                 output = output.model_copy(update={"confidence": adjusted})
                 logger.info(
                     "Branch '%s' verifier: primary=%.2f verifier=%.2f effective=%.2f",
-                    branch.name, output.confidence, verifier_output.confidence, adjusted,
+                    branch.name, primary_confidence, verifier_output.confidence, adjusted,
                 )
                 _log_event(run_log, "info", "verifier_ran",
-                           f"Verifier ran: {branch.name} — primary {output.confidence:.0%} / "
+                           f"Verifier ran: {branch.name} — primary {primary_confidence:.0%} / "
                            f"verifier {verifier_output.confidence:.0%} → effective {adjusted:.0%}",
                            branch=branch.name)
 
@@ -1963,7 +1978,7 @@ class PipelineRunner:
             "Branch '%s' confidence=%.2f summary=%s",
             branch.name, output.confidence, output.summary,
         )
-        return output
+        return output, verifier_output, primary_confidence
 
     def _join_confidences(
         self,
@@ -2574,6 +2589,8 @@ class PipelineRunner:
         group_index: int,
         branch_index: int,
         output: LLMOutput,
+        verifier_output: LLMOutput | None = None,
+        primary_confidence: float | None = None,
     ) -> None:
         if not self._session_factory:
             return
@@ -2589,7 +2606,14 @@ class PipelineRunner:
         if _t is not None:
             _trace = json.dumps(_t)
         _in_tok, _out_tok = self._extract_usage(output.raw_response)
+        if verifier_output is None:
+            _verifier_in_tok, _verifier_out_tok = None, None
+        else:
+            _vi, _vo = self._extract_usage(verifier_output.raw_response)
+            _verifier_in_tok, _verifier_out_tok = _vi or None, _vo or None
         _branch_cost = self._output_cost(output)
+        if verifier_output is not None:
+            _branch_cost = (_branch_cost or 0) + (self._output_cost(verifier_output) or 0)
         _branch_step_name = f"{group_name}/{branch.name}"
         _prompt_hash = prompt_hash(branch.prompt_template)
         _agent_key = f"{branch.executor}:{_agent}" if _agent else None
@@ -2609,10 +2633,21 @@ class PipelineRunner:
                 prompt=json.dumps(branch.executor_config),
                 raw_output=json.dumps(output.raw_response),
                 parsed_output=output.model_dump_json(exclude={"raw_response"}),
-                verifier_output=None,
+                verifier_output=verifier_output.model_dump_json(exclude={"raw_response"}) if verifier_output else None,
+                verifier_mode=branch.verifier.mode if branch.verifier and verifier_output else None,
+                verifier_agent=(
+                    f"{branch.verifier.executor}:{branch.verifier.executor_config.get('agent')}"
+                    if branch.verifier and verifier_output and branch.verifier.executor_config.get("agent")
+                    else None
+                ),
+                verifier_model=verifier_output.model if verifier_output else None,
+                verifier_provider=verifier_output.provider if verifier_output else None,
+                verifier_prompt=(
+                    (verifier_output.raw_response or {}).get("prompt") if verifier_output else None
+                ),
                 status="failed" if branch_failed else "completed",
-                primary_confidence=None if branch_failed else output.confidence,
-                verifier_confidence=None,
+                primary_confidence=None if branch_failed else (primary_confidence if primary_confidence is not None else output.confidence),
+                verifier_confidence=verifier_output.confidence if verifier_output else None,
                 effective_confidence=None if branch_failed else output.confidence,
                 duration_ms=None,
                 executed_at=utc_now(),
@@ -2620,6 +2655,8 @@ class PipelineRunner:
                 agent_trace=_trace,
                 input_tokens=_in_tok or None,
                 output_tokens=_out_tok or None,
+                verifier_input_tokens=_verifier_in_tok,
+                verifier_output_tokens=_verifier_out_tok,
                 cost=_branch_cost,
             ))
             if _prompt_hash is not None:

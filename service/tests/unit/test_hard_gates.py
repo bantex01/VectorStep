@@ -18,6 +18,8 @@ from src.metrics import MetricsData, VectorStepCollector, fetch_metrics_data
 from src.models.context import NormalisedContext
 from src.models.llm import LLMOutput
 from src.models.pipeline import (
+    FanOutConfig,
+    FanOutGroupConfig,
     GroundingConfig,
     HumanCheckConfig,
     PipelineConfig,
@@ -704,6 +706,70 @@ async def test_verifier_agent_model_provider_persisted_to_db(db):
     assert row.verifier_model == "gpt-5"
     assert row.verifier_provider == "azure"
     assert row.verifier_prompt == "You are an independent reviewer... (verifier's own rendered prompt)"
+
+
+async def test_fan_out_branch_verifier_persisted_to_db(db):
+    """The same per-run verifier attribution
+    (test_verifier_agent_model_provider_persisted_to_db above) must also be
+    persisted for fan-out/parallel branches. The branch verifier genuinely
+    runs and its result is folded into the branch's effective confidence —
+    but until this was fixed, the verifier's own output was discarded
+    before it ever reached the DB, so a branch with a configured verifier
+    showed no verifier data in the UI at all, as if it hadn't run."""
+    sf = get_session_factory()
+
+    primary_output = LLMOutput(
+        confidence=0.9, summary="primary", next_step_context="", raw_response={},
+        model="claude-haiku", provider="anthropic",
+    )
+    verifier_output = LLMOutput(
+        confidence=0.4, summary="verifier", next_step_context="",
+        raw_response={"prompt": "verifier's own rendered prompt"},
+        model="claude-sonnet", provider="anthropic",
+    )
+    runner = PipelineRunner(
+        executors={
+            "gateway": lambda: _StubExecutor(primary_output),
+            "verifier_stub": lambda: _StubExecutor(verifier_output),
+        },
+        session_factory=sf,
+    )
+    fan_out = FanOutConfig(
+        name="check-upstreams",
+        executor="gateway",
+        over="['github']",
+        as_var="upstream",
+        confidence_threshold=0.0,
+        on_low_confidence="proceed",
+        verifier=VerifierConfig(
+            executor="verifier_stub",
+            executor_config={"agent": "upstream-checker"},
+            trigger=VerifierTriggerConfig(always=True),
+        ),
+    )
+    pipeline = PipelineConfig(
+        name="p", trigger=TriggerConfig(),
+        steps=[FanOutGroupConfig(fan_out=fan_out)],
+    )
+
+    result = await runner.run(pipeline=pipeline, normalised=_make_normalised(), run_id="run-fo1")
+    assert result.status == "completed"
+
+    async with sf() as session:
+        row = (await session.execute(
+            select(PipelineStep).where(PipelineStep.run_id == "run-fo1")
+        )).scalar_one()
+
+    assert row.step_name == "check-upstreams/0"
+    # primary_confidence must stay the raw, pre-verifier self-report — not
+    # silently overwritten with the post-combination effective figure.
+    assert row.primary_confidence == 0.9
+    assert row.verifier_confidence == 0.4
+    assert row.effective_confidence == 0.4  # minimum combination: min(0.9, 0.4)
+    assert row.verifier_agent == "verifier_stub:upstream-checker"
+    assert row.verifier_model == "claude-sonnet"
+    assert row.verifier_provider == "anthropic"
+    assert row.verifier_prompt == "verifier's own rendered prompt"
 
 
 async def test_no_verifier_leaves_verifier_attribution_columns_null(db):
