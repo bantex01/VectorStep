@@ -1458,6 +1458,7 @@ class PipelineRunner:
         for i, (branch, raw) in enumerate(zip(missing, raw_results)):
             verifier_output: LLMOutput | None = None
             primary_confidence: float | None = None
+            trust_report: dict | None = None
             if isinstance(raw, Exception):
                 msg = f"Executor error: {type(raw).__name__}: {raw}"
                 logger.error("Branch '%s' raised unhandled exception: %s", branch.name, raw)
@@ -1466,7 +1467,7 @@ class PipelineRunner:
                            branch=branch.name, group=group.name)
                 output = LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True)
             else:
-                output, verifier_output, primary_confidence = raw
+                output, verifier_output, primary_confidence, trust_report = raw
                 if not getattr(output, "failed", False):
                     _log_event(run_log, "info", "branch_completed",
                                f"Branch completed: {branch.name} — confidence {output.confidence:.0%}",
@@ -1480,7 +1481,7 @@ class PipelineRunner:
             branch_config_index = next(j for j, b in enumerate(group.steps) if b.name == branch.name)
             await self._db_save_branch(
                 run_id, group.name, branch, index, branch_config_index, output,
-                verifier_output, primary_confidence,
+                verifier_output, primary_confidence, trust_report,
             )
 
         # Confidence/weight are recomputed from the FULL branch set (persisted +
@@ -1784,6 +1785,7 @@ class PipelineRunner:
             branch_name = f"{fan_out.name}/{i}"
             verifier_output: LLMOutput | None = None
             primary_confidence: float | None = None
+            trust_report: dict | None = None
             if isinstance(raw, Exception):
                 msg = f"Executor error: {type(raw).__name__}: {raw}"
                 output = LLMOutput(
@@ -1794,7 +1796,7 @@ class PipelineRunner:
                            f"Fan-out branch failed: {branch_name} — {msg}",
                            step=fan_out.name, branch=branch_name)
             else:
-                output, verifier_output, primary_confidence = raw
+                output, verifier_output, primary_confidence, trust_report = raw
                 if not getattr(output, "failed", False):
                     _log_event(run_log, "info", "fan_out_branch_completed",
                                f"Fan-out branch completed: {branch_name} — "
@@ -1813,7 +1815,7 @@ class PipelineRunner:
             )
             await self._db_save_branch(
                 run_id, fan_out.name, db_branch, index, i, output,
-                verifier_output, primary_confidence,
+                verifier_output, primary_confidence, trust_report,
             )
 
         # Recomputed from the FULL branch set (persisted + freshly executed) in item
@@ -1895,7 +1897,7 @@ class PipelineRunner:
         ctx: dict,
         run_log: list,
         run_id: str,
-    ) -> tuple[LLMOutput, LLMOutput | None, float]:
+    ) -> tuple[LLMOutput, LLMOutput | None, float, dict | None]:
         # TODO(grounding phase): branches — grounding is not yet wired into fan-out/
         # parallel branches, only sequential StepConfig steps (see SPEC-grounding-shadow.md).
         agent = branch.executor_config.get("agent", "")
@@ -1907,7 +1909,7 @@ class PipelineRunner:
                 "vectorstep.agent": agent,
             },
         ) as span:
-            output, verifier_output, primary_confidence = await self._run_parallel_branch_impl(
+            output, verifier_output, primary_confidence, trust_report = await self._run_parallel_branch_impl(
                 branch, ctx, run_log, run_id
             )
             span.set_attribute("vectorstep.confidence", output.confidence)
@@ -1917,7 +1919,7 @@ class PipelineRunner:
                 span.set_attribute("vectorstep.provider", output.provider)
             if getattr(output, "failed", False):
                 span.set_status(Status(StatusCode.ERROR))
-            return output, verifier_output, primary_confidence
+            return output, verifier_output, primary_confidence, trust_report
 
     async def _run_parallel_branch_impl(
         self,
@@ -1925,7 +1927,7 @@ class PipelineRunner:
         ctx: dict,
         run_log: list,
         run_id: str,
-    ) -> tuple[LLMOutput, LLMOutput | None, float]:
+    ) -> tuple[LLMOutput, LLMOutput | None, float, dict | None]:
         # Synthesise a StepConfig so we can reuse executor dispatch and verifier logic.
         # confidence_threshold=0.0 because gating happens at the group level, not per-branch.
         branch_step = StepConfig(
@@ -1950,14 +1952,15 @@ class PipelineRunner:
         except asyncio.TimeoutError:
             msg = f"Branch timed out after {branch.timeout_seconds}s"
             logger.error("Branch '%s' %s", branch.name, msg)
-            return LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True), None, 0.0
+            return LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True), None, 0.0, None
         except Exception as exc:
             msg = f"Executor error: {type(exc).__name__}: {exc}"
             logger.error("Branch '%s' %s", branch.name, msg)
-            return LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True), None, 0.0
+            return LLMOutput(confidence=0.0, summary=msg, next_step_context="", raw_response={}, failed=True), None, 0.0, None
 
         verifier_output: LLMOutput | None = None
         primary_confidence = output.confidence
+        trust_report: dict | None = None
         if branch.verifier and self._should_verify(branch.verifier, output.confidence):
             verifier_output = await self._run_verifier(branch_step, ctx, output, run_log)
             if verifier_output:
@@ -1973,12 +1976,41 @@ class PipelineRunner:
                            f"Verifier ran: {branch.name} — primary {primary_confidence:.0%} / "
                            f"verifier {verifier_output.confidence:.0%} → effective {adjusted:.0%}",
                            branch=branch.name)
+                # Branches never carry grounding/deterministic checks/calibration
+                # (not wired into fan-out/parallel — see the grounding reference's
+                # caution on this), so gate_policy is always the legacy S+V path
+                # here, unlike sequential steps where it can flip to "trust_vector".
+                trust_report = self._build_trust_report(
+                    primary_confidence=primary_confidence,
+                    effective_confidence=adjusted,
+                    verifier_confidence=verifier_output.confidence,
+                    verifier_mode=branch.verifier.mode,
+                    verifier_combination_strategy=branch.verifier.combination_strategy,
+                    verifier_veto_floor=(
+                        branch.verifier.veto_floor
+                        if branch.verifier.combination_strategy == "veto" else None
+                    ),
+                    grounding_score=None,
+                    grounding_report=None,
+                    deterministic_results=None,
+                    calibration_report=None,
+                    combined_trust=adjusted,
+                    gate_policy="legacy_confidence",
+                    # A branch has no confidence_threshold/on_low_confidence of its
+                    # own — gating happens once, at the group/fan-out level, against
+                    # the joined confidence across all branches. These are filler
+                    # values for a report schema built around a per-step gate that
+                    # doesn't exist at this level; the real threshold is on the
+                    # fan_out/parallel group config, shown separately in the UI.
+                    confidence_threshold=0.0,
+                    on_low_confidence="proceed",
+                )
 
         logger.debug(
             "Branch '%s' confidence=%.2f summary=%s",
             branch.name, output.confidence, output.summary,
         )
-        return output, verifier_output, primary_confidence
+        return output, verifier_output, primary_confidence, trust_report
 
     def _join_confidences(
         self,
@@ -2591,6 +2623,7 @@ class PipelineRunner:
         output: LLMOutput,
         verifier_output: LLMOutput | None = None,
         primary_confidence: float | None = None,
+        trust_report: dict | None = None,
     ) -> None:
         if not self._session_factory:
             return
@@ -2649,6 +2682,7 @@ class PipelineRunner:
                 primary_confidence=None if branch_failed else (primary_confidence if primary_confidence is not None else output.confidence),
                 verifier_confidence=verifier_output.confidence if verifier_output else None,
                 effective_confidence=None if branch_failed else output.confidence,
+                trust_report=json.dumps(trust_report) if trust_report else None,
                 duration_ms=None,
                 executed_at=utc_now(),
                 artifacts=_artifact_refs,

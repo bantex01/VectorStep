@@ -192,6 +192,222 @@
 </div>
 {% endmacro %}
 
+{% macro _render_step_output(item) %}
+{# Shared between sequential steps and fan-out/parallel branches — both
+   populate the same parsed/verifier_* keys on `item` (see ui/runs.py), so
+   a branch with a configured verifier renders identically to a sequential
+   step's primary/verifier split instead of only ever showing the primary
+   output. #}
+{% set _threshold = item.trust.gate.confidence_threshold if item.trust and item.trust.gate else none %}
+{% if item.pretty %}
+<div class="px-4 py-4">
+  {% if item.verifier_pretty %}
+    <p class="text-xs text-zinc-500 uppercase tracking-wide mb-2">Primary</p>
+  {% endif %}
+  {{ _render_parsed_output(item.parsed, item.pretty, _threshold) }}
+</div>
+{% endif %}
+{% if item.verifier_pretty %}
+<div class="px-4 py-4">
+  <p class="text-xs text-zinc-500 uppercase tracking-wide mb-2">
+    {{ item.verifier_label }}
+    {% if item.step.verifier_agent %}
+      <span class="normal-case text-zinc-600 font-normal">— {{ item.step.verifier_agent }}{% if item.step.verifier_model %} · {{ item.step.verifier_model }}{% endif %}</span>
+    {% endif %}
+  </p>
+  {% if item.step.verifier_prompt %}
+  <div x-data="{ verifier_prompt_open: false }" class="mb-3">
+    <button @click="verifier_prompt_open = !verifier_prompt_open" type="button"
+            class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
+      <svg class="w-3.5 h-3.5 transition-transform" :class="verifier_prompt_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+      </svg>
+      <span class="uppercase tracking-wide font-medium">Prompt</span>
+      <span class="text-zinc-600 normal-case">— what {{ item.verifier_label|lower }} was actually asked</span>
+    </button>
+    <div x-show="verifier_prompt_open" x-cloak class="mt-3">
+      <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ item.step.verifier_prompt }}</pre>
+    </div>
+  </div>
+  {% endif %}
+  {{ _render_parsed_output(item.verifier_parsed, item.verifier_pretty, _threshold) }}
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro _render_trust_panel(item) %}
+{% if item.trust %}
+{% set sig = item.trust.signals %}
+<div class="px-4 py-3 border-t border-zinc-800" x-data="{ explain_open: false, config_open: false }">
+  <div class="flex items-center gap-2 mb-2">
+    <span class="text-xs font-semibold text-zinc-500 uppercase tracking-wide">
+      Trust {% if item.trust.mode == 'enforced' %}(enforced){% else %}(shadow){% endif %}
+    </span>
+    <span class="text-[10px] text-zinc-600">
+      {% if item.trust.mode == 'enforced' %}gated this decision{% else %}recorded, not enforced{% endif %}
+    </span>
+    <div class="ml-auto flex items-center gap-3">
+      {% if item.step_config_summary %}
+      <button @click="config_open = !config_open" type="button"
+              class="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+        </svg>
+        Step configuration
+      </button>
+      {% endif %}
+      {% if item.confidence_narrative %}
+      <button @click="explain_open = !explain_open" type="button"
+              class="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        How was this calculated?
+      </button>
+      {% endif %}
+    </div>
+  </div>
+  {% if item.step_config_summary %}
+  <div x-show="config_open" x-cloak class="mb-3 rounded-md bg-zinc-800/50 border border-zinc-700/50 px-3 py-2.5 space-y-1">
+    {% for line in item.step_config_summary %}
+    <p class="text-xs text-zinc-300 leading-relaxed">{{ line }}</p>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if item.confidence_narrative %}
+  <div x-show="explain_open" x-cloak class="mb-3 rounded-md bg-zinc-800/50 border border-zinc-700/50 px-3 py-2.5 space-y-1.5">
+    {% for line in item.confidence_narrative %}
+    <p class="text-xs text-zinc-300 leading-relaxed">{{ loop.index }}. {{ line }}</p>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="flex flex-wrap items-center gap-4 text-xs">
+    <span class="text-zinc-400">Self-report (S):
+      <span class="font-mono text-zinc-200">{{ "%.0f"|format(sig.S * 100) }}%</span></span>
+    {% if sig.V is not none %}
+    <span class="text-zinc-400">Verifier (V):
+      <span class="font-mono text-zinc-200">{{ "%.0f"|format(sig.V * 100) }}%</span>
+      {% if sig.V_mode %}<span class="text-zinc-600">({{ sig.V_mode }})</span>{% endif %}
+      {% if item.step.verifier_agent %}
+        <span class="text-zinc-600">— {{ item.step.verifier_agent }}{% if item.step.verifier_model %} · {{ item.step.verifier_model }}{% endif %}</span>
+      {% endif %}
+    </span>
+    {% endif %}
+    <span class="text-zinc-400">Grounding (G):
+      {% if sig.G is not none %}
+        <span class="font-mono {% if sig.G >= 0.7 %}text-green-400{% elif sig.G >= 0.4 %}text-amber-400{% else %}text-red-400{% endif %}">{{ "%.0f"|format(sig.G * 100) }}%</span>
+      {% else %}
+        <span class="font-mono text-zinc-600">n/a</span>
+      {% endif %}
+      {% if item.trust.grounding and item.trust.grounding.agent %}
+        <span class="text-zinc-600">— {{ item.trust.grounding.agent }}{% if item.trust.grounding.model %} · {{ item.trust.grounding.model }}{% endif %}</span>
+      {% endif %}
+    </span>
+    {% if sig.D is not none %}
+    <span class="text-zinc-400">Checks (D):
+      <span class="font-mono {% if sig.D %}text-green-400{% else %}text-red-400{% endif %}">{{ "PASS" if sig.D else "FAIL" }}</span>
+    </span>
+    {% endif %}
+    {% if item.trust.mode == 'enforced' %}
+    <span class="text-zinc-400">Combined trust:
+      <span class="font-mono text-zinc-200">{{ "%.0f"|format(item.trust.combined_trust * 100) }}%</span></span>
+    {% endif %}
+    {% if sig.G is not none and (sig.G - sig.S)|abs >= 0.2 %}
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800">S/G divergence</span>
+    {% endif %}
+    {% if item.trust.calibration %}
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
+        {% if item.trust.calibration.validated %}bg-indigo-950 text-indigo-400 ring-1 ring-inset ring-indigo-800
+        {% else %}bg-zinc-800 text-zinc-500 ring-1 ring-inset ring-zinc-700{% endif %}">
+        {% if item.trust.calibration.validated %}calibrated{% else %}uncalibrated{% endif %}
+      </span>
+    {% endif %}
+  </div>
+  {% if item.trust.calibration %}
+  {% set cal = item.trust.calibration %}
+  <p class="mt-1 text-xs text-zinc-500">
+    {% if cal.validated %}
+      <span class="text-indigo-400">Combined trust came from calibration, not the raw score above:</span>
+      this step/agent/model has actually been correct {{ "%.0f"|format(cal.calibrated * 100) }}% of the time
+      when it self-reports {{ "%.0f"|format(cal.bin.lo * 100) }}–{{ "%.0f"|format(cal.bin.hi * 100) }}%
+      confidence ({{ cal.n }} marked outcomes) — that measured figure replaced the raw
+      {{ "%.0f"|format(cal.raw * 100) }}% self-report/verifier score, <em>before</em> grounding and
+      deterministic checks applied on top of it.
+    {% elif cal.on_uncalibrated == 'escalate' %}
+      <span class="text-red-400">Combined trust was forced to 0% by calibration, not the raw score above:</span>
+      this step/agent/model doesn't have enough track record yet
+      ({{ cal.n }}/{{ cal.n_min }} marked outcomes) to calibrate, and
+      <code class="text-zinc-400">on_uncalibrated: escalate</code> means an unvalidated
+      configuration is treated as untrustworthy on purpose — rather than falling back to the raw
+      {{ "%.0f"|format(cal.raw * 100) }}% self-report/verifier score.
+    {% else %}
+      Calibration is configured for this step but not yet validated
+      ({{ cal.n }}/{{ cal.n_min }} marked outcomes for this exact agent/model combination) —
+      the raw self-report/verifier score above was carried forward unchanged
+      (<code class="text-zinc-400">on_uncalibrated: proceed</code>).
+    {% endif %}
+  </p>
+  {% endif %}
+  {% if item.trust.grounding and item.trust.grounding.prompt %}
+  <div x-data="{ grounding_prompt_open: false }" class="mt-2">
+    <button @click="grounding_prompt_open = !grounding_prompt_open" type="button"
+            class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
+      <svg class="w-3.5 h-3.5 transition-transform" :class="grounding_prompt_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+      </svg>
+      <span class="uppercase tracking-wide font-medium">Prompt</span>
+      <span class="text-zinc-600 normal-case">— what the grounding judge was actually asked</span>
+    </button>
+    <div x-show="grounding_prompt_open" x-cloak class="mt-3">
+      <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ item.trust.grounding.prompt }}</pre>
+    </div>
+  </div>
+  {% endif %}
+  {% if item.trust.grounding and item.trust.grounding.raw_output %}
+  <div x-data="{ grounding_answer_open: false }" class="mt-2">
+    <button @click="grounding_answer_open = !grounding_answer_open" type="button"
+            class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
+      <svg class="w-3.5 h-3.5 transition-transform" :class="grounding_answer_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+      </svg>
+      <span class="uppercase tracking-wide font-medium">Answer</span>
+      <span class="text-zinc-600 normal-case">— what the grounding judge replied</span>
+    </button>
+    <div x-show="grounding_answer_open" x-cloak class="mt-3">
+      <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ item.trust.grounding.raw_output }}</pre>
+    </div>
+  </div>
+  {% endif %}
+  {% if item.trust.grounding and item.trust.grounding.claims %}
+  <div class="mt-2 space-y-1">
+    {% for c in item.trust.grounding.claims %}
+    <div class="flex items-start gap-2 text-xs">
+      <span class="shrink-0 mt-0.5 {% if c.supported %}text-green-400{% else %}text-red-400{% endif %}">
+        {% if c.supported %}✓{% else %}✗{% endif %}
+      </span>
+      <span class="text-zinc-300">{{ c.claim }}<span class="text-zinc-600"> — {{ c.evidence }}</span></span>
+    </div>
+    {% endfor %}
+  </div>
+  {% elif item.trust.grounding and not item.trust.grounding.computed %}
+  <p class="mt-1 text-xs text-zinc-600">Grounding not computed ({{ item.trust.grounding.reason or 'unavailable' }}).</p>
+  {% endif %}
+  {% if item.trust.deterministic_checks %}
+  <div class="mt-2 space-y-1">
+    {% for c in item.trust.deterministic_checks %}
+    <div class="flex items-start gap-2 text-xs">
+      <span class="shrink-0 mt-0.5 {% if c.passed %}text-green-400{% else %}text-red-400{% endif %}">
+        {% if c.passed %}✓{% else %}✗{% endif %}
+      </span>
+      <span class="text-zinc-300">{{ c.name }} <span class="text-zinc-600">({{ c.type }})</span><span class="text-zinc-600"> — {{ c.detail }}</span></span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+{% endmacro %}
+
 <!-- Run header -->
 <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 mb-6">
   <div class="flex items-start justify-between">
@@ -410,17 +626,25 @@
         <span class="text-xs text-zinc-500 font-mono">{{ item.step.agent }}</span>
       {% endif %}
       {% if item.step.effective_confidence is not none %}
-        <div class="flex items-center gap-1.5 ml-auto mr-2">
-          <div class="w-20 bg-zinc-700 rounded-full h-1.5">
-            <div class="h-1.5 rounded-full {{ confidence_bar_color(item.step.effective_confidence) }}"
-                 style="width: {{ (item.step.effective_confidence * 100)|round|int }}%"></div>
+        <div class="flex items-center gap-2 ml-auto mr-2">
+          {% if item.step.verifier_confidence is not none %}
+            <span class="text-xs text-zinc-500">primary {{ "%.0f"|format(item.step.primary_confidence * 100) }}%</span>
+            <span class="text-xs text-zinc-700">→</span>
+            <span class="text-xs text-zinc-500">verifier {{ "%.0f"|format(item.step.verifier_confidence * 100) }}%</span>
+            <span class="text-xs text-zinc-700">→</span>
+          {% endif %}
+          <div class="flex items-center gap-1.5">
+            <div class="w-20 bg-zinc-700 rounded-full h-1.5">
+              <div class="h-1.5 rounded-full {{ confidence_bar_color(item.step.effective_confidence) }}"
+                   style="width: {{ (item.step.effective_confidence * 100)|round|int }}%"></div>
+            </div>
+            <span class="text-xs text-zinc-400 w-8">{{ "%.0f"|format(item.step.effective_confidence * 100) }}%</span>
           </div>
-          <span class="text-xs text-zinc-400 w-8">{{ "%.0f"|format(item.step.effective_confidence * 100) }}%</span>
         </div>
       {% else %}
         <div class="ml-auto"></div>
       {% endif %}
-      {% if item.pretty or item.trace or item.agent_snapshot %}
+      {% if item.pretty or item.verifier_pretty or item.trace or item.agent_snapshot %}
         <button @click="open = !open" class="text-xs text-zinc-500 hover:text-zinc-300 shrink-0">
           <svg class="w-4 h-4 transition-transform" :class="open ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
@@ -428,19 +652,16 @@
         </button>
       {% endif %}
     </div>
-    {% if item.pretty or item.trace or item.agent_snapshot %}
+    {% if item.pretty or item.verifier_pretty or item.trace or item.agent_snapshot %}
     <div x-show="open" x-cloak class="border-t border-zinc-800 divide-y divide-zinc-800">
-      {% if item.pretty %}
-      <div class="px-4 py-3">
-        {{ _render_parsed_output(item.parsed, item.pretty, none) }}
-      </div>
-      {% endif %}
+      {{ _render_step_output(item) }}
       {% if item.agent_snapshot %}
       {{ macros.agent_snapshot_panel(item) }}
       {% endif %}
       {% if run.status not in ('running', 'interrupted') and item.step.status != 'running' %}
       {% include "_step_feedback_widget.html" %}
       {% endif %}
+      {{ _render_trust_panel(item) }}
       {% if item.trace %}
       {{ _render_trace(item.trace) }}
       {% endif %}
@@ -608,214 +829,11 @@
       {% if item.agent_snapshot %}
       {{ macros.agent_snapshot_panel(item) }}
       {% endif %}
-      {% set _threshold = item.trust.gate.confidence_threshold if item.trust and item.trust.gate else none %}
-      {% if item.pretty %}
-      <div class="px-4 py-4">
-        {% if item.verifier_pretty %}
-          <p class="text-xs text-zinc-500 uppercase tracking-wide mb-2">Primary</p>
-        {% endif %}
-        {{ _render_parsed_output(item.parsed, item.pretty, _threshold) }}
-      </div>
-      {% endif %}
-      {% if item.verifier_pretty %}
-      <div class="px-4 py-4">
-        <p class="text-xs text-zinc-500 uppercase tracking-wide mb-2">
-          {{ item.verifier_label }}
-          {% if item.step.verifier_agent %}
-            <span class="normal-case text-zinc-600 font-normal">— {{ item.step.verifier_agent }}{% if item.step.verifier_model %} · {{ item.step.verifier_model }}{% endif %}</span>
-          {% endif %}
-        </p>
-        {% if item.step.verifier_prompt %}
-        <div x-data="{ verifier_prompt_open: false }" class="mb-3">
-          <button @click="verifier_prompt_open = !verifier_prompt_open" type="button"
-                  class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
-            <svg class="w-3.5 h-3.5 transition-transform" :class="verifier_prompt_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-            </svg>
-            <span class="uppercase tracking-wide font-medium">Prompt</span>
-            <span class="text-zinc-600 normal-case">— what {{ item.verifier_label|lower }} was actually asked</span>
-          </button>
-          <div x-show="verifier_prompt_open" x-cloak class="mt-3">
-            <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ item.step.verifier_prompt }}</pre>
-          </div>
-        </div>
-        {% endif %}
-        {{ _render_parsed_output(item.verifier_parsed, item.verifier_pretty, _threshold) }}
-      </div>
-      {% endif %}
+      {{ _render_step_output(item) }}
       {% if run.status not in ('running', 'interrupted') and item.step.status != 'running' %}
       {% include "_step_feedback_widget.html" %}
       {% endif %}
-      {% if item.trust %}
-      {% set sig = item.trust.signals %}
-      <div class="px-4 py-3 border-t border-zinc-800" x-data="{ explain_open: false, config_open: false }">
-        <div class="flex items-center gap-2 mb-2">
-          <span class="text-xs font-semibold text-zinc-500 uppercase tracking-wide">
-            Trust {% if item.trust.mode == 'enforced' %}(enforced){% else %}(shadow){% endif %}
-          </span>
-          <span class="text-[10px] text-zinc-600">
-            {% if item.trust.mode == 'enforced' %}gated this decision{% else %}recorded, not enforced{% endif %}
-          </span>
-          <div class="ml-auto flex items-center gap-3">
-            {% if item.step_config_summary %}
-            <button @click="config_open = !config_open" type="button"
-                    class="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">
-              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-              </svg>
-              Step configuration
-            </button>
-            {% endif %}
-            {% if item.confidence_narrative %}
-            <button @click="explain_open = !explain_open" type="button"
-                    class="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors">
-              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-              </svg>
-              How was this calculated?
-            </button>
-            {% endif %}
-          </div>
-        </div>
-        {% if item.step_config_summary %}
-        <div x-show="config_open" x-cloak class="mb-3 rounded-md bg-zinc-800/50 border border-zinc-700/50 px-3 py-2.5 space-y-1">
-          {% for line in item.step_config_summary %}
-          <p class="text-xs text-zinc-300 leading-relaxed">{{ line }}</p>
-          {% endfor %}
-        </div>
-        {% endif %}
-        {% if item.confidence_narrative %}
-        <div x-show="explain_open" x-cloak class="mb-3 rounded-md bg-zinc-800/50 border border-zinc-700/50 px-3 py-2.5 space-y-1.5">
-          {% for line in item.confidence_narrative %}
-          <p class="text-xs text-zinc-300 leading-relaxed">{{ loop.index }}. {{ line }}</p>
-          {% endfor %}
-        </div>
-        {% endif %}
-        <div class="flex flex-wrap items-center gap-4 text-xs">
-          <span class="text-zinc-400">Self-report (S):
-            <span class="font-mono text-zinc-200">{{ "%.0f"|format(sig.S * 100) }}%</span></span>
-          {% if sig.V is not none %}
-          <span class="text-zinc-400">Verifier (V):
-            <span class="font-mono text-zinc-200">{{ "%.0f"|format(sig.V * 100) }}%</span>
-            {% if sig.V_mode %}<span class="text-zinc-600">({{ sig.V_mode }})</span>{% endif %}
-            {% if item.step.verifier_agent %}
-              <span class="text-zinc-600">— {{ item.step.verifier_agent }}{% if item.step.verifier_model %} · {{ item.step.verifier_model }}{% endif %}</span>
-            {% endif %}
-          </span>
-          {% endif %}
-          <span class="text-zinc-400">Grounding (G):
-            {% if sig.G is not none %}
-              <span class="font-mono {% if sig.G >= 0.7 %}text-green-400{% elif sig.G >= 0.4 %}text-amber-400{% else %}text-red-400{% endif %}">{{ "%.0f"|format(sig.G * 100) }}%</span>
-            {% else %}
-              <span class="font-mono text-zinc-600">n/a</span>
-            {% endif %}
-            {% if item.trust.grounding and item.trust.grounding.agent %}
-              <span class="text-zinc-600">— {{ item.trust.grounding.agent }}{% if item.trust.grounding.model %} · {{ item.trust.grounding.model }}{% endif %}</span>
-            {% endif %}
-          </span>
-          {% if sig.D is not none %}
-          <span class="text-zinc-400">Checks (D):
-            <span class="font-mono {% if sig.D %}text-green-400{% else %}text-red-400{% endif %}">{{ "PASS" if sig.D else "FAIL" }}</span>
-          </span>
-          {% endif %}
-          {% if item.trust.mode == 'enforced' %}
-          <span class="text-zinc-400">Combined trust:
-            <span class="font-mono text-zinc-200">{{ "%.0f"|format(item.trust.combined_trust * 100) }}%</span></span>
-          {% endif %}
-          {% if sig.G is not none and (sig.G - sig.S)|abs >= 0.2 %}
-            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-950 text-amber-400 ring-1 ring-inset ring-amber-800">S/G divergence</span>
-          {% endif %}
-          {% if item.trust.calibration %}
-            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
-              {% if item.trust.calibration.validated %}bg-indigo-950 text-indigo-400 ring-1 ring-inset ring-indigo-800
-              {% else %}bg-zinc-800 text-zinc-500 ring-1 ring-inset ring-zinc-700{% endif %}">
-              {% if item.trust.calibration.validated %}calibrated{% else %}uncalibrated{% endif %}
-            </span>
-          {% endif %}
-        </div>
-        {% if item.trust.calibration %}
-        {% set cal = item.trust.calibration %}
-        <p class="mt-1 text-xs text-zinc-500">
-          {% if cal.validated %}
-            <span class="text-indigo-400">Combined trust came from calibration, not the raw score above:</span>
-            this step/agent/model has actually been correct {{ "%.0f"|format(cal.calibrated * 100) }}% of the time
-            when it self-reports {{ "%.0f"|format(cal.bin.lo * 100) }}–{{ "%.0f"|format(cal.bin.hi * 100) }}%
-            confidence ({{ cal.n }} marked outcomes) — that measured figure replaced the raw
-            {{ "%.0f"|format(cal.raw * 100) }}% self-report/verifier score, <em>before</em> grounding and
-            deterministic checks applied on top of it.
-          {% elif cal.on_uncalibrated == 'escalate' %}
-            <span class="text-red-400">Combined trust was forced to 0% by calibration, not the raw score above:</span>
-            this step/agent/model doesn't have enough track record yet
-            ({{ cal.n }}/{{ cal.n_min }} marked outcomes) to calibrate, and
-            <code class="text-zinc-400">on_uncalibrated: escalate</code> means an unvalidated
-            configuration is treated as untrustworthy on purpose — rather than falling back to the raw
-            {{ "%.0f"|format(cal.raw * 100) }}% self-report/verifier score.
-          {% else %}
-            Calibration is configured for this step but not yet validated
-            ({{ cal.n }}/{{ cal.n_min }} marked outcomes for this exact agent/model combination) —
-            the raw self-report/verifier score above was carried forward unchanged
-            (<code class="text-zinc-400">on_uncalibrated: proceed</code>).
-          {% endif %}
-        </p>
-        {% endif %}
-        {% if item.trust.grounding and item.trust.grounding.prompt %}
-        <div x-data="{ grounding_prompt_open: false }" class="mt-2">
-          <button @click="grounding_prompt_open = !grounding_prompt_open" type="button"
-                  class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
-            <svg class="w-3.5 h-3.5 transition-transform" :class="grounding_prompt_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-            </svg>
-            <span class="uppercase tracking-wide font-medium">Prompt</span>
-            <span class="text-zinc-600 normal-case">— what the grounding judge was actually asked</span>
-          </button>
-          <div x-show="grounding_prompt_open" x-cloak class="mt-3">
-            <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ item.trust.grounding.prompt }}</pre>
-          </div>
-        </div>
-        {% endif %}
-        {% if item.trust.grounding and item.trust.grounding.raw_output %}
-        <div x-data="{ grounding_answer_open: false }" class="mt-2">
-          <button @click="grounding_answer_open = !grounding_answer_open" type="button"
-                  class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
-            <svg class="w-3.5 h-3.5 transition-transform" :class="grounding_answer_open ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-            </svg>
-            <span class="uppercase tracking-wide font-medium">Answer</span>
-            <span class="text-zinc-600 normal-case">— what the grounding judge replied</span>
-          </button>
-          <div x-show="grounding_answer_open" x-cloak class="mt-3">
-            <pre class="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{{ item.trust.grounding.raw_output }}</pre>
-          </div>
-        </div>
-        {% endif %}
-        {% if item.trust.grounding and item.trust.grounding.claims %}
-        <div class="mt-2 space-y-1">
-          {% for c in item.trust.grounding.claims %}
-          <div class="flex items-start gap-2 text-xs">
-            <span class="shrink-0 mt-0.5 {% if c.supported %}text-green-400{% else %}text-red-400{% endif %}">
-              {% if c.supported %}✓{% else %}✗{% endif %}
-            </span>
-            <span class="text-zinc-300">{{ c.claim }}<span class="text-zinc-600"> — {{ c.evidence }}</span></span>
-          </div>
-          {% endfor %}
-        </div>
-        {% elif item.trust.grounding and not item.trust.grounding.computed %}
-        <p class="mt-1 text-xs text-zinc-600">Grounding not computed ({{ item.trust.grounding.reason or 'unavailable' }}).</p>
-        {% endif %}
-        {% if item.trust.deterministic_checks %}
-        <div class="mt-2 space-y-1">
-          {% for c in item.trust.deterministic_checks %}
-          <div class="flex items-start gap-2 text-xs">
-            <span class="shrink-0 mt-0.5 {% if c.passed %}text-green-400{% else %}text-red-400{% endif %}">
-              {% if c.passed %}✓{% else %}✗{% endif %}
-            </span>
-            <span class="text-zinc-300">{{ c.name }} <span class="text-zinc-600">({{ c.type }})</span><span class="text-zinc-600"> — {{ c.detail }}</span></span>
-          </div>
-          {% endfor %}
-        </div>
-        {% endif %}
-      </div>
-      {% endif %}
+      {{ _render_trust_panel(item) }}
       {% if item.trace %}
       {{ _render_trace(item.trace) }}
       {% endif %}

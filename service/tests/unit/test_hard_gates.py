@@ -715,7 +715,12 @@ async def test_fan_out_branch_verifier_persisted_to_db(db):
     runs and its result is folded into the branch's effective confidence —
     but until this was fixed, the verifier's own output was discarded
     before it ever reached the DB, so a branch with a configured verifier
-    showed no verifier data in the UI at all, as if it hadn't run."""
+    showed no verifier data in the UI at all, as if it hadn't run.
+
+    trust_report specifically matters beyond the raw verifier_* columns:
+    the run-detail page's entire Trust panel (src/ui/runs.py) is built from
+    json.loads(step.trust_report) — a branch row with correct verifier_*
+    columns but trust_report=NULL still renders no Trust panel at all."""
     sf = get_session_factory()
 
     primary_output = LLMOutput(
@@ -770,6 +775,17 @@ async def test_fan_out_branch_verifier_persisted_to_db(db):
     assert row.verifier_model == "claude-sonnet"
     assert row.verifier_provider == "anthropic"
     assert row.verifier_prompt == "verifier's own rendered prompt"
+
+    assert row.trust_report is not None
+    trust = json.loads(row.trust_report)
+    assert trust["signals"]["S"] == 0.9
+    assert trust["signals"]["V"] == 0.4
+    assert trust["signals"]["S_after_V"] == 0.4
+    assert trust["combined_trust"] == 0.4
+    # Branches never carry grounding/deterministic/calibration, so mode must
+    # stay "shadow" (gate_policy="legacy_confidence") even with a verifier —
+    # matches the documented rule that a verifier-only step is always shadow.
+    assert trust["mode"] == "shadow"
 
 
 async def test_no_verifier_leaves_verifier_attribution_columns_null(db):

@@ -55,6 +55,19 @@ def _bucket_reset_narrative(bucket_reset: dict, n: int, n_min: int) -> str:
 
 
 
+def _display_parsed(parsed: dict, step: "PipelineStep") -> dict:
+    """A copy of parsed_output with confidence corrected to the primary's own
+    self-report for display. For a branch with a verifier, parsed_output's
+    confidence is the post-combination effective value (needed downstream for
+    join/resume math — see PipelineRunner._run_parallel_branch_impl), which
+    would otherwise make the "Primary" panel show the verifier-adjusted number
+    instead of what the primary agent actually reported. A no-op for anything
+    without a verifier, since primary_confidence then equals parsed's own value."""
+    if not parsed or step.primary_confidence is None:
+        return parsed
+    return {**parsed, "confidence": step.primary_confidence}
+
+
 # --- lines 308-449 ---
 def _confidence_narrative(trust: dict, status: str) -> list[str]:
     """Plain-language, numbers-first walkthrough of how this ONE run's trust score was
@@ -396,6 +409,7 @@ async def ui_run_detail(request: Request, run_id: str):
     for step in sorted_steps:
         parsed = json.loads(step.parsed_output) if step.parsed_output else {}
         pretty = json.dumps(parsed, indent=2) if parsed else ""
+        parsed = _display_parsed(parsed, step)
 
         verifier_parsed = json.loads(step.verifier_output) if step.verifier_output else {}
         verifier_pretty = json.dumps(verifier_parsed, indent=2) if verifier_parsed else ""
@@ -408,6 +422,14 @@ async def ui_run_detail(request: Request, run_id: str):
             if group_name not in seen_groups:
                 seen_groups.add(group_name)
                 display_items.append({"type": "group_header", "name": group_name})
+            # Mirrors the sequential "step" branch below — a fan-out/parallel
+            # branch with a configured verifier gets a trust_report exactly
+            # like a sequential step does (see PipelineRunner._db_save_branch),
+            # so it needs the same trust/confidence_narrative/step_config_summary
+            # keys or the template has nothing to render a Trust panel from,
+            # even though the underlying data is there.
+            branch_trust = json.loads(step.trust_report) if step.trust_report else None
+            branch_approx_cost, branch_approx_is_native = helpers._approx_cost_for_step(step)
             display_items.append({
                 "type": "branch",
                 "group": group_name,
@@ -419,6 +441,11 @@ async def ui_run_detail(request: Request, run_id: str):
                 "verifier_pretty": verifier_pretty,
                 "verifier_label": verifier_label,
                 "trace": trace,
+                "trust": branch_trust,
+                "confidence_narrative": _confidence_narrative(branch_trust, step.status) if branch_trust else None,
+                "step_config_summary": _step_config_summary(branch_trust) if branch_trust else None,
+                "approx_cost": branch_approx_cost,
+                "approx_is_native": branch_approx_is_native,
             })
         else:
             trust = json.loads(step.trust_report) if step.trust_report else None
@@ -476,6 +503,7 @@ async def ui_run_detail(request: Request, run_id: str):
                     break
                 parsed = json.loads(step.parsed_output) if step.parsed_output else {}
                 pretty = json.dumps(parsed, indent=2) if parsed else ""
+                parsed = _display_parsed(parsed, step)
                 verifier_parsed = json.loads(step.verifier_output) if step.verifier_output else {}
                 verifier_pretty = json.dumps(verifier_parsed, indent=2) if verifier_parsed else ""
                 verifier_label = "Independent" if step.verifier_mode in ("challenger", "independent") else "Critic"
